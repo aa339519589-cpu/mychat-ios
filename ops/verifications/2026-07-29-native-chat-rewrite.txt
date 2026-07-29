@@ -1,0 +1,5 @@
+Verification-only branch for the clean native chat reply rewrite.
+
+Source revision under test: 3a6d641c3c421afe8848b4f82c3d55d20b213c3a
+Expected flow: enqueue once -> poll authoritative job -> render terminal result -> refresh history
+Forbidden: SSE consumption, recovery fallback layers, build-time source patching
