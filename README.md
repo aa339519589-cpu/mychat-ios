@@ -43,6 +43,17 @@ With the developer iPhone connected and unlocked:
 scripts/deploy-device.sh
 ```
 
+The deployment script now fetches and fast-forwards to `origin/main`, rejects
+uncommitted or divergent source, verifies the UI contract, deletes old
+DerivedData, performs a clean build with a revision-specific build number, and
+blocks installation if retired sidebar content appears in the compiled app.
+
+To remove the installed copy before reinstalling the exact current build:
+
+```bash
+git pull --ff-only && MYCHAT_FRESH_INSTALL=1 scripts/deploy-device.sh
+```
+
 Override the device when necessary:
 
 ```bash
