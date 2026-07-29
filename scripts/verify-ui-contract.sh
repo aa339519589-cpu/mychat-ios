@@ -73,8 +73,18 @@ if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_vi
   exit 1
 fi
 
-if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for|patch-authoritative-job-recovery' "$repo_root"; then
-  echo "Retired chat transport or build-time patching is still referenced"
+if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for' "$api_client"; then
+  echo "Retired chat transport is still referenced by APIClient"
+  exit 1
+fi
+
+if [[ -e "$repo_root/scripts/patch-authoritative-job-recovery.py" ]]; then
+  echo "Build-time chat patch script still exists"
+  exit 1
+fi
+
+if regex_search 'patch-authoritative-job-recovery' "$repo_root/.github"; then
+  echo "Build workflow still invokes a chat patch"
   exit 1
 fi
 
