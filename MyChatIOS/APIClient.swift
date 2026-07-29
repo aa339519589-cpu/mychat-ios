@@ -732,7 +732,7 @@ actor APIClient {
         if let value = error as? URLError { return value }
         let value = error as NSError
         guard value.domain == NSURLErrorDomain else { return nil }
-        guard let code = URLError.Code(rawValue: value.code) else { return nil }
+        let code = URLError.Code(rawValue: value.code)
         return URLError(code, userInfo: value.userInfo)
     }
 
