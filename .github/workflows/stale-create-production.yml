@@ -1,0 +1,118 @@
+name: Stale create production verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/stale-create-production.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diagnostics/stale-create-production-20260730'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_URL: https://mychat-nm6x.onrender.com
+      EXPECTED_REVISION: 4425d1c68284
+      SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
+    steps:
+      - name: Wait for direct-admission production revision
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 240); do
+            payload="$(curl --silent --show-error --connect-timeout 10 --max-time 30 "$APP_URL/api/ready" || true)"
+            ready="$(jq -r '.ready // false' <<<"$payload" 2>/dev/null || true)"
+            revision="$(jq -r '.revision // empty' <<<"$payload" 2>/dev/null || true)"
+            echo "attempt=$attempt ready=$ready revision=${revision:-missing}"
+            if [[ "$ready" == "true" && "$revision" == "$EXPECTED_REVISION" ]]; then exit 0; fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Create isolated session and profile
+        run: |
+          set -euo pipefail
+          email="stale-create-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          password="Test-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$email" --arg password "$password" '{email:$email,password:$password}' > "$RUNNER_TEMP/signup.json"
+          status="$(curl -sS -o "$RUNNER_TEMP/auth.json" -w '%{http_code}' --connect-timeout 10 --max-time 60 \
+            -H "apikey: $SUPABASE_ANON_KEY" -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H 'Content-Type: application/json' -X POST --data-binary "@$RUNNER_TEMP/signup.json" \
+            "$SUPABASE_URL/auth/v1/signup")"
+          token="$(jq -r '.access_token // .session.access_token // empty' "$RUNNER_TEMP/auth.json")"
+          user_id="$(jq -r '.user.id // .session.user.id // empty' "$RUNNER_TEMP/auth.json")"
+          test "$status" -ge 200 -a "$status" -lt 300 -a -n "$token" -a -n "$user_id"
+          echo "::add-mask::$token"
+          printf '%s' "$token" > "$RUNNER_TEMP/token"
+          status="$(curl -sS -o "$RUNNER_TEMP/profile.json" -w '%{http_code}' --connect-timeout 10 --max-time 30 \
+            -H "apikey: $SUPABASE_ANON_KEY" -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json' -H 'Prefer: return=minimal' \
+            -X POST --data "{\"user_id\":\"$user_id\"}" "$SUPABASE_URL/rest/v1/profiles")"
+          test "$status" -ge 200 -a "$status" -lt 300
+
+      - name: Send first and stale-create second turns
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          conversation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          printf '%s' "$conversation_id" > "$RUNNER_TEMP/conversation-id"
+
+          send_turn() {
+            local label="$1" text="$2"
+            local user_id assistant_id job_id
+            user_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+            assistant_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+            job_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+            jq -n --arg conversationId "$conversation_id" --arg userMessageId "$user_id" \
+              --arg assistantMessageId "$assistant_id" --arg generationId "$job_id" --arg text "$text" \
+              '{conversationId:$conversationId,userMessageId:$userMessageId,assistantMessageId:$assistantMessageId,generationId:$generationId,messages:[{id:$userMessageId,role:"user",content:$text}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:true,title:"stale-create verification",projectId:null}}' \
+              > "$RUNNER_TEMP/request-$label.json"
+            status="$(curl -sS -o "$RUNNER_TEMP/response-$label.json" -w '%{http_code}' --connect-timeout 10 --max-time 90 \
+              -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -H 'Accept: application/json' \
+              -H "Idempotency-Key: chat:$job_id" -X POST --data-binary "@$RUNNER_TEMP/request-$label.json" "$APP_URL/api/chat")"
+            echo "$label enqueue status=$status"
+            cat "$RUNNER_TEMP/response-$label.json"
+            test "$status" = "202" -o "$status" = "200"
+            test "$(jq -r '.jobId // empty' "$RUNNER_TEMP/response-$label.json")" = "$job_id"
+            for attempt in $(seq 1 120); do
+              status="$(curl -sS -o "$RUNNER_TEMP/job-$label.json" -w '%{http_code}' --connect-timeout 10 --max-time 30 \
+                -H "Authorization: Bearer $token" -H 'Accept: application/json' "$APP_URL/api/v1/jobs/$job_id")"
+              test "$status" = "200"
+              state="$(jq -r '.job.status // empty' "$RUNNER_TEMP/job-$label.json")"
+              echo "$label attempt=$attempt state=$state"
+              if [[ "$state" == "completed" ]]; then
+                jq -e '.job.result.content | type == "string" and length > 0' "$RUNNER_TEMP/job-$label.json" >/dev/null
+                printf '%s' "$assistant_id" > "$RUNNER_TEMP/assistant-$label"
+                return 0
+              fi
+              if [[ "$state" == "failed" || "$state" == "cancelled" ]]; then cat "$RUNNER_TEMP/job-$label.json"; return 1; fi
+              sleep 2
+            done
+            return 1
+          }
+
+          send_turn first 'Reply with exactly FIRST_OK'
+          send_turn second 'Reply with exactly SECOND_OK'
+
+      - name: Verify both assistant replies persisted
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          first="$(cat "$RUNNER_TEMP/assistant-first")"
+          second="$(cat "$RUNNER_TEMP/assistant-second")"
+          curl -fsS --connect-timeout 10 --max-time 30 \
+            -H "apikey: $SUPABASE_ANON_KEY" -H "Authorization: Bearer $token" \
+            "$SUPABASE_URL/rest/v1/messages?select=id,content&id=in.($first,$second)" > "$RUNNER_TEMP/messages.json"
+          jq -e 'length == 2 and all(.[]; (.content | type == "string" and length > 0))' "$RUNNER_TEMP/messages.json" >/dev/null
+          echo STALE_CREATE_PRODUCTION_OK
+
+      - name: Clean up
+        if: always()
+        continue-on-error: true
+        run: |
+          test -f "$RUNNER_TEMP/token" || exit 0
+          token="$(cat "$RUNNER_TEMP/token")"
+          curl -sS -o /dev/null --connect-timeout 10 --max-time 30 -H "Authorization: Bearer $token" -X DELETE "$APP_URL/api/conversations" || true
