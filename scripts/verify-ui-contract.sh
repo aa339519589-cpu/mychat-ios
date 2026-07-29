@@ -48,10 +48,11 @@ require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
 
 require_text "$api_client" "// MARK: - Chat reply pipeline"
-require_text "$api_client" "private func waitForTerminalJob"
+require_text "$api_client" "func waitForAssistantReply"
+require_text "$api_client" "private func readAssistantMessage"
 require_text "$api_client" "api/v1/jobs/"
 require_text "$api_client" "case \"completed\""
-require_text "$api_client" "模型已完成，但回复结果为空"
+require_text "$api_client" "模型任务已完成，但持久化回复为空"
 
 if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
@@ -73,8 +74,13 @@ if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_vi
   exit 1
 fi
 
-if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for' "$api_client"; then
+if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for|eventStream|JobEvent|streamUrl' "$api_client"; then
   echo "Retired chat transport is still referenced by APIClient"
+  exit 1
+fi
+
+if regex_search 'text\.delta|thinking\.delta|job\.terminal|applyTerminal|appendThinking|resetAssistant' "$root_view"; then
+  echo "Retired event-recovery rendering path is still referenced by RootView"
   exit 1
 fi
 
@@ -94,7 +100,7 @@ if [[ "$composer_count" != "1" ]]; then
   exit 1
 fi
 
-chat_pipeline_count="$(match_count "$api_client" 'private func waitForTerminalJob')"
+chat_pipeline_count="$(match_count "$api_client" 'func waitForAssistantReply')"
 if [[ "$chat_pipeline_count" != "1" ]]; then
   echo "Expected exactly one authoritative chat delivery implementation"
   exit 1

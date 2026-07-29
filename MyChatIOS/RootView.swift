@@ -219,7 +219,7 @@ final class ChatStore: ObservableObject {
     @Published var failedMessageID: UUID?
 
     private let api: APIClient
-    private var streamTask: Task<Void, Never>?
+    private var replyTask: Task<Void, Never>?
     private var retryContext: RetryContext?
 
     init(api: APIClient) {
@@ -227,7 +227,7 @@ final class ChatStore: ObservableObject {
     }
 
     deinit {
-        streamTask?.cancel()
+        replyTask?.cancel()
     }
 
     func load() async {
@@ -262,7 +262,7 @@ final class ChatStore: ObservableObject {
 
     func select(_ conversation: Conversation) async throws {
         guard selectedConversation?.id != conversation.id || messages.isEmpty else { return }
-        streamTask?.cancel()
+        replyTask?.cancel()
         isSending = false
         failedMessageID = nil
         retryContext = nil
@@ -271,7 +271,7 @@ final class ChatStore: ObservableObject {
     }
 
     func newConversation() {
-        streamTask?.cancel()
+        replyTask?.cancel()
         selectedConversation = Conversation(id: UUID(), title: "新对话", updatedAt: nil)
         messages = []
         isSending = false
@@ -300,7 +300,7 @@ final class ChatStore: ObservableObject {
         messages.append(ChatMessage(id: assistantID, role: "assistant", content: "", createdAt: Date()))
         isSending = true
 
-        streamTask = Task {
+        replyTask = Task {
             defer { isSending = false }
             do {
                 let accepted = try await api.enqueue(
@@ -316,30 +316,13 @@ final class ChatStore: ObservableObject {
                     assistantMessageID: assistantID,
                     generationID: generationID
                 )
-                let stream = await api.eventStream(accepted)
-                for try await event in stream {
-                    if event.kind == "text.delta", let delta = event.payload["text"]?.string {
-                        append(delta, to: assistantID)
-                    }
-                    if event.kind == "thinking.delta",
-                       let delta = event.payload["thinking"]?.string {
-                        appendThinking(delta, to: assistantID)
-                    }
-                    if event.kind == "job.retry_scheduled" {
-                        resetAssistant(assistantID)
-                    }
-                    if event.kind == "job.warning", let message = event.payload["message"]?.string {
-                        error = message
-                    }
-                    if event.kind == "job.terminal",
-                       let status = event.payload["status"]?.string,
-                       status != "completed" {
-                        throw APIError.message(event.payload["error"]?.message ?? "生成未完成")
-                    }
-                    if event.kind == "job.terminal",
-                       let result = event.payload["result"]?.object {
-                        applyTerminal(result, to: assistantID)
-                    }
+                let reply = try await api.waitForAssistantReply(
+                    accepted,
+                    conversationID: conversation.id,
+                    assistantMessageID: assistantID
+                )
+                if let index = messages.firstIndex(where: { $0.id == assistantID }) {
+                    messages[index] = reply
                 }
                 try await refresh(conversationID: conversation.id)
             } catch is CancellationError {
@@ -370,32 +353,6 @@ final class ChatStore: ObservableObject {
             options: retryContext.options,
             attachments: retryContext.attachments
         )
-    }
-
-    private func append(_ delta: String, to id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].content += delta
-    }
-
-    private func appendThinking(_ delta: String, to id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].thinking = (messages[index].thinking ?? "") + delta
-    }
-
-    private func resetAssistant(_ id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        messages[index].content = ""
-        messages[index].thinking = nil
-    }
-
-    private func applyTerminal(_ result: [String: JSONValue], to id: UUID) {
-        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
-        if let content = result["content"]?.string {
-            messages[index].content = content
-        }
-        if let thinking = result["thinking"]?.string {
-            messages[index].thinking = thinking.isEmpty ? nil : thinking
-        }
     }
 
     private func refresh(conversationID: UUID) async throws {
