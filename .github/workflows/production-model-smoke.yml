@@ -58,6 +58,26 @@ jobs:
           printf '%s' "$user_id" > "$RUNNER_TEMP/user-id"
           chmod 600 "$RUNNER_TEMP/access-token" "$RUNNER_TEMP/user-id"
 
+      - name: Create isolated quota profile
+        run: |
+          set -euo pipefail
+          access_token="$(cat "$RUNNER_TEMP/access-token")"
+          user_id="$(cat "$RUNNER_TEMP/user-id")"
+          jq -n --arg user_id "$user_id" '{user_id: $user_id}' > "$RUNNER_TEMP/profile.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/profile-response.json" --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $access_token" \
+            --header 'Content-Type: application/json' \
+            --header 'Prefer: return=minimal' \
+            --request POST --data-binary "@$RUNNER_TEMP/profile.json" \
+            "$SUPABASE_URL/rest/v1/profiles")"
+          if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
+            echo "profile insert HTTP status: $status"
+            cat "$RUNNER_TEMP/profile-response.json"
+            exit 1
+          fi
+
       - name: Verify quota authority
         run: |
           set -euo pipefail
