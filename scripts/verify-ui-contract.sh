@@ -5,6 +5,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 root_view="$repo_root/MyChatIOS/RootView.swift"
 thinking_view="$repo_root/MyChatIOS/RichMessageView.swift"
 settings_view="$repo_root/MyChatIOS/SettingsViews.swift"
+api_client="$repo_root/MyChatIOS/APIClient.swift"
 project_file="$repo_root/MyChatIOS.xcodeproj/project.pbxproj"
 info_plist="$repo_root/MyChatIOS/Info.plist"
 
@@ -46,6 +47,17 @@ require_text "$project_file" "SettingsViews.swift in Sources"
 require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
 
+# Native chat has one source-of-truth path: enqueue once, poll the authoritative
+# job record, then render its terminal result. SSE and recovery layers are banned.
+require_text "$api_client" "private func waitForTerminalJob"
+require_text "$api_client" "api/v1/jobs/"
+require_text "$api_client" "snapshot.terminalEvent"
+
+if regex_search "consumeEvents|consumeConnection|pollJobUntilTerminal|streamBytes|text/event-stream|Last-Event-ID|patch-authoritative-job-recovery" "$repo_root"; then
+  echo "Retired chat streaming or patch recovery logic is still referenced"
+  exit 1
+fi
+
 if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
   exit 1
@@ -72,4 +84,4 @@ if [[ "$composer_count" != "1" ]]; then
   exit 1
 fi
 
-echo "UI contract checks passed"
+echo "UI and chat pipeline contract checks passed"
