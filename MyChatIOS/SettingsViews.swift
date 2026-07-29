@@ -536,7 +536,7 @@ private struct ModelSettingsView: View {
         .navigationTitle("模型")
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
-        .sheet(item: $editor) { target in
+        .fullScreenCover(item: $editor) { target in
             ModelEndpointEditor(api: api, endpoint: target.endpoint) { saved in
                 if let index = endpoints.firstIndex(where: { $0.id == saved.id }) {
                     endpoints[index] = saved
@@ -545,7 +545,6 @@ private struct ModelSettingsView: View {
                 }
                 editor = nil
             }
-            .presentationBackground(AppPalette.background)
         }
     }
 
