@@ -1,0 +1,49 @@
+name: Balance funded enqueue diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/balance-funded-enqueue.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diagnostics/existing-conversation-enqueue-20260730'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      APP_URL: https://mychat-nm6x.onrender.com
+      SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
+    steps:
+      - name: Create account with exhausted window and balance
+        run: |
+          set -euo pipefail
+          email="balance-turn-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          password="Balance-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$email" --arg password "$password" '{email:$email,password:$password}' > "$RUNNER_TEMP/signup.json"
+          curl --fail-with-body --silent --show-error --header "apikey: $SUPABASE_ANON_KEY" --header "Authorization: Bearer $SUPABASE_ANON_KEY" --header 'Content-Type: application/json' --request POST --data-binary "@$RUNNER_TEMP/signup.json" "$SUPABASE_URL/auth/v1/signup" > "$RUNNER_TEMP/auth.json"
+          token="$(jq -r '.access_token // .session.access_token // empty' "$RUNNER_TEMP/auth.json")"
+          uid="$(jq -r '.user.id // .session.user.id // empty' "$RUNNER_TEMP/auth.json")"
+          test -n "$token"; test -n "$uid"; echo "::add-mask::$token"
+          printf '%s' "$token" > "$RUNNER_TEMP/token"
+          printf '%s' "$uid" > "$RUNNER_TEMP/uid"
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          jq -n --arg uid "$uid" --arg now "$now" '{user_id:$uid,tokens_5h:500000,tokens_7d:500000,balance:100000,window_5h_start:$now,window_7d_start:$now}' > "$RUNNER_TEMP/profile.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/profile-response.json" --write-out '%{http_code}' --header "apikey: $SUPABASE_ANON_KEY" --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header 'Prefer: return=representation' --request POST --data-binary "@$RUNNER_TEMP/profile.json" "$SUPABASE_URL/rest/v1/profiles")"
+          echo PROFILE_STATUS=$status
+          cat "$RUNNER_TEMP/profile-response.json"
+          test "$status" -ge 200 -a "$status" -lt 300
+
+      - name: Enqueue request using balance
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          c="$(python3 -c 'import uuid; print(uuid.uuid4())')"; u="$(python3 -c 'import uuid; print(uuid.uuid4())')"; a="$(python3 -c 'import uuid; print(uuid.uuid4())')"; j="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n --arg c "$c" --arg u "$u" --arg a "$a" --arg j "$j" '{conversationId:$c,userMessageId:$u,assistantMessageId:$a,generationId:$j,messages:[{id:$u,role:"user",content:"Reply with exactly BALANCE_OK"}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:true,title:"balance diagnostic",projectId:null}}' > "$RUNNER_TEMP/chat.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/response.json" --write-out '%{http_code}' --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header 'Accept: application/json' --header "Idempotency-Key: chat:$j" --request POST --data-binary "@$RUNNER_TEMP/chat.json" "$APP_URL/api/chat")"
+          echo CHAT_STATUS=$status
+          cat "$RUNNER_TEMP/response.json"
+          test "$status" = 202 -o "$status" = 200
