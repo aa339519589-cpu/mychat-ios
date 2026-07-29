@@ -1,19 +1,35 @@
 name: iOS build
 
 on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Verify UI contracts
         run: scripts/verify-ui-contract.sh
+      - name: Validate network configuration
+        run: |
+          plutil -lint MyChatIOS/Info.plist
+          grep -F 'MYCHAT_API_BASE_URL = https:/$()/mychat-nm6x.onrender.com' Configuration/Debug.xcconfig
+          grep -F 'MYCHAT_SUPABASE_URL = https:/$()/usibkqqksgwgvdiqwpyo.supabase.co' Configuration/Debug.xcconfig
+          grep -F 'MYCHAT_SUPABASE_ANON_KEY = sb_publishable_' Configuration/Debug.xcconfig
       - name: Build iPhone app
         run: |
+          set -o pipefail
           xcodebuild \
             -project MyChatIOS.xcodeproj \
             -scheme MyChatIOS \
@@ -21,4 +37,34 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build
+            build | tee xcodebuild.log
+
+  production-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - name: Check production TLS and mobile bootstrap
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            https://mychat-nm6x.onrender.com/api/mobile/config \
+            | jq -e '.supabaseUrl == "https://usibkqqksgwgvdiqwpyo.supabase.co" and (.supabaseAnonKey | startswith("sb_publishable_"))'
+      - name: Check production readiness
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            https://mychat-nm6x.onrender.com/api/ready \
+            | jq -e '.ready == true'
+      - name: Check chat route over trusted TLS
+        run: |
+          set -euo pipefail
+          status="$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 60 \
+            --header 'Content-Type: application/json' \
+            --request POST --data '{}' \
+            https://mychat-nm6x.onrender.com/api/chat)"
+          test "$status" = "401"
+          jq -e '.error.code == "AUTH_REQUIRED" or .error == "请先建立登录或访客会话"' response.json
