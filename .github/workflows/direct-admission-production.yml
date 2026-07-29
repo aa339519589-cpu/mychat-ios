@@ -1,0 +1,65 @@
+name: Direct native admission production verification
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/direct-admission-production.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diagnostics/existing-conversation-enqueue-20260730'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      APP_URL: https://mychat-nm6x.onrender.com
+      EXPECTED_REVISION: 4425d1c68284
+      SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
+    steps:
+      - name: Wait for direct-admission production revision
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 240); do
+            payload="$(curl --silent --show-error --connect-timeout 10 --max-time 30 "$APP_URL/api/ready" || true)"
+            ready="$(jq -r '.ready // false' <<<"$payload" 2>/dev/null || true)"
+            revision="$(jq -r '.revision // empty' <<<"$payload" 2>/dev/null || true)"
+            echo "attempt=$attempt ready=$ready revision=${revision:-missing}"
+            if [[ "$ready" == true && "$revision" == "$EXPECTED_REVISION" ]]; then exit 0; fi
+            sleep 5
+          done
+          exit 1
+
+      - name: Create isolated account
+        run: |
+          set -euo pipefail
+          email="direct-admission-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          password="Direct-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$email" --arg password "$password" '{email:$email,password:$password}' > "$RUNNER_TEMP/signup.json"
+          curl --fail-with-body --silent --show-error --header "apikey: $SUPABASE_ANON_KEY" --header "Authorization: Bearer $SUPABASE_ANON_KEY" --header 'Content-Type: application/json' --request POST --data-binary "@$RUNNER_TEMP/signup.json" "$SUPABASE_URL/auth/v1/signup" > "$RUNNER_TEMP/auth.json"
+          token="$(jq -r '.access_token // .session.access_token // empty' "$RUNNER_TEMP/auth.json")"
+          uid="$(jq -r '.user.id // .session.user.id // empty' "$RUNNER_TEMP/auth.json")"
+          test -n "$token"; test -n "$uid"; echo "::add-mask::$token"
+          printf '%s' "$token" > "$RUNNER_TEMP/token"
+          curl --fail-with-body --silent --show-error --header "apikey: $SUPABASE_ANON_KEY" --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header 'Prefer: return=minimal' --request POST --data "{\"user_id\":\"$uid\"}" "$SUPABASE_URL/rest/v1/profiles" >/dev/null
+
+      - name: Verify new and existing conversation turns
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          c="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          u1="$(python3 -c 'import uuid; print(uuid.uuid4())')"; a1="$(python3 -c 'import uuid; print(uuid.uuid4())')"; j1="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n --arg c "$c" --arg u "$u1" --arg a "$a1" --arg j "$j1" '{conversationId:$c,userMessageId:$u,assistantMessageId:$a,generationId:$j,messages:[{id:$u,role:"user",content:"Reply exactly DIRECT_FIRST_OK"}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:true,title:"direct admission verification",projectId:null}}' > "$RUNNER_TEMP/first.json"
+          first_status="$(curl --silent --show-error --output "$RUNNER_TEMP/first-response.json" --write-out '%{http_code}' --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header "Idempotency-Key: chat:$j1" --request POST --data-binary "@$RUNNER_TEMP/first.json" "$APP_URL/api/chat")"
+          echo FIRST_STATUS=$first_status; cat "$RUNNER_TEMP/first-response.json"; test "$first_status" = 202 -o "$first_status" = 200
+          for i in $(seq 1 120); do curl --fail-with-body --silent --show-error --header "Authorization: Bearer $token" "$APP_URL/api/v1/jobs/$j1" > "$RUNNER_TEMP/job1.json"; s="$(jq -r '.job.status' "$RUNNER_TEMP/job1.json")"; [[ "$s" == completed ]] && break; [[ "$s" == failed || "$s" == cancelled ]] && { cat "$RUNNER_TEMP/job1.json"; exit 1; }; sleep 2; done
+          first_content="$(jq -r '.job.result.content // empty' "$RUNNER_TEMP/job1.json")"; test -n "$first_content"
+          u2="$(python3 -c 'import uuid; print(uuid.uuid4())')"; a2="$(python3 -c 'import uuid; print(uuid.uuid4())')"; j2="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n --arg c "$c" --arg u1 "$u1" --arg a1 "$a1" --arg first "$first_content" --arg u2 "$u2" --arg a2 "$a2" --arg j2 "$j2" '{conversationId:$c,userMessageId:$u2,assistantMessageId:$a2,generationId:$j2,messages:[{id:$u1,role:"user",content:"Reply exactly DIRECT_FIRST_OK"},{id:$a1,role:"assistant",content:$first},{id:$u2,role:"user",content:"Reply exactly DIRECT_SECOND_OK"}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:false,title:"direct admission verification",projectId:null}}' > "$RUNNER_TEMP/second.json"
+          second_status="$(curl --silent --show-error --output "$RUNNER_TEMP/second-response.json" --write-out '%{http_code}' --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header "Idempotency-Key: chat:$j2" --request POST --data-binary "@$RUNNER_TEMP/second.json" "$APP_URL/api/chat")"
+          echo SECOND_STATUS=$second_status; cat "$RUNNER_TEMP/second-response.json"; test "$second_status" = 202 -o "$second_status" = 200
+          for i in $(seq 1 120); do curl --fail-with-body --silent --show-error --header "Authorization: Bearer $token" "$APP_URL/api/v1/jobs/$j2" > "$RUNNER_TEMP/job2.json"; s="$(jq -r '.job.status' "$RUNNER_TEMP/job2.json")"; [[ "$s" == completed ]] && break; [[ "$s" == failed || "$s" == cancelled ]] && { cat "$RUNNER_TEMP/job2.json"; exit 1; }; sleep 2; done
+          jq -e '.job.status == "completed" and (.job.result.content | type == "string" and length > 0)' "$RUNNER_TEMP/job2.json" >/dev/null
+          echo DIRECT_ADMISSION_PRODUCTION_OK
