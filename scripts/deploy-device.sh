@@ -8,7 +8,7 @@ device_id="${MYCHAT_DEVICE_ID:-DEE9D44F-8BF7-5740-BC78-3CA4437F3FE8}"
 fresh_install="${MYCHAT_FRESH_INSTALL:-0}"
 app_path="$build_path/Build/Products/Debug-iphoneos/MyChatIOS.app"
 binary_path="$app_path/MyChatIOS"
-source_path="MyChatIOS/APIClient.swift"
+source_path="MyChatIOS/RootView.swift"
 
 branch="$(git -C "$repo_root" branch --show-current)"
 if [[ "$branch" != "main" ]]; then
@@ -33,9 +33,9 @@ if [[ "$head_sha" != "$origin_sha" ]]; then
   exit 4
 fi
 
-# The production job can finish while an SSE heartbeat keeps the iPhone stream
-# open. Patch the build source so authoritative job polling races SSE and always
-# restores the completed result. Restore the checkout after installation.
+# Native SSE delivery can remain open after the assistant reply has already
+# been persisted. Patch the build source to poll the authoritative message row
+# directly and render it as soon as its content is committed.
 restore_source() {
   git -C "$repo_root" restore --worktree -- "$source_path" >/dev/null 2>&1 || true
 }
