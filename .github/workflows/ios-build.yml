@@ -19,8 +19,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Apply authoritative job recovery
-        run: python3 scripts/patch-authoritative-job-recovery.py MyChatIOS/APIClient.swift
+      - name: Apply persisted assistant recovery
+        run: python3 scripts/patch-authoritative-job-recovery.py MyChatIOS/RootView.swift
       - name: Verify UI contracts
         run: scripts/verify-ui-contract.sh
       - name: Validate network configuration
