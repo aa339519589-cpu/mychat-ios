@@ -91,7 +91,8 @@ jobs:
             --request POST --data-binary "@$RUNNER_TEMP/chat-request.json" \
             "$APP_URL/api/chat")"
           if [[ "$status" != "202" && "$status" != "200" ]]; then
-            jq -r '.error.message // .error // .message // "chat enqueue failed"' "$response_file"
+            echo "chat enqueue HTTP status: $status"
+            jq -r 'if (.error | type) == "object" then (.error.message // (.error | tostring)) else (.error // .message // "chat enqueue failed") end' "$response_file" 2>/dev/null || cat "$response_file"
             exit 1
           fi
           job_id="$(jq -r '.jobId // empty' "$response_file")"
