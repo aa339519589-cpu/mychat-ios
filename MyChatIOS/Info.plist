@@ -34,6 +34,8 @@
 	</array>
 	<key>MYCHAT_API_BASE_URL</key>
 	<string>$(MYCHAT_API_BASE_URL)</string>
+	<key>NSCameraUsageDescription</key>
+	<string>用于拍摄并添加到当前对话。</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>用于把你的语音转换成聊天输入。</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

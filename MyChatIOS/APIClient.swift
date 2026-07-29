@@ -2,10 +2,18 @@ import Foundation
 
 enum APIError: LocalizedError {
     case message(String)
+    case retryable(String)
 
     var errorDescription: String? {
-        if case let .message(value) = self { return value }
-        return nil
+        switch self {
+        case let .message(value), let .retryable(value):
+            return value
+        }
+    }
+
+    var canRetry: Bool {
+        if case .retryable = self { return true }
+        return false
     }
 }
 
@@ -120,11 +128,242 @@ actor APIClient {
         }
     }
 
+    func account() async throws -> AccountSnapshot {
+        let config = try await loadBootstrap()
+        var request = URLRequest(url: config.supabaseUrl.appending(path: "auth/v1/user"))
+        request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        return try await send(request)
+    }
+
+    func updatePassword(_ password: String) async throws {
+        let config = try await loadBootstrap()
+        var request = URLRequest(url: config.supabaseUrl.appending(path: "auth/v1/user"))
+        request.httpMethod = "PUT"
+        request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["password": password])
+        let _: AccountSnapshot = try await send(request)
+    }
+
+    func memories() async throws -> [MemoryRecord] {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "memories", query: [
+            "select": "id,content,created_at,updated_at",
+            "order": "created_at.asc",
+            "limit": "200",
+        ])
+        return try await send(try await authorizedRequest(url, config: config))
+    }
+
+    func addMemory(_ content: String) async throws -> MemoryRecord {
+        let config = try await loadBootstrap()
+        let user = try await account()
+        let url = try restURL(config, path: "memories", query: ["select": "*"])
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("return=representation", forHTTPHeaderField: "Prefer")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "id": UUID().uuidString,
+            "user_id": user.id.uuidString,
+            "content": content,
+        ])
+        let rows: [MemoryRecord] = try await send(request)
+        guard let memory = rows.first else { throw APIError.message("记忆保存失败") }
+        return memory
+    }
+
+    func updateMemory(id: UUID, content: String) async throws {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "memories", query: ["id": "eq.\(id.uuidString)"])
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "content": content,
+            "updated_at": ISO8601DateFormatter().string(from: Date()),
+        ])
+        try await sendVoid(request)
+    }
+
+    func deleteMemory(id: UUID) async throws {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "memories", query: ["id": "eq.\(id.uuidString)"])
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "DELETE"
+        try await sendVoid(request)
+    }
+
+    func deleteAllMemories() async throws {
+        let config = try await loadBootstrap()
+        let user = try await account()
+        let url = try restURL(config, path: "memories", query: [
+            "user_id": "eq.\(user.id.uuidString)",
+        ])
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "DELETE"
+        try await sendVoid(request)
+    }
+
+    func profile() async throws -> ProfileSnapshot? {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "profiles", query: [
+            "select": "memory_enabled,custom_system_prompt,tokens_5h,window_5h_start,tokens_7d,window_7d_start,balance",
+            "limit": "1",
+        ])
+        let rows: [ProfileSnapshot] = try await send(
+            try await authorizedRequest(url, config: config)
+        )
+        return rows.first
+    }
+
+    func setMemoryEnabled(_ enabled: Bool) async throws {
+        try await upsertProfile(["memory_enabled": enabled])
+    }
+
+    func systemPrompt() async throws -> String {
+        try await profile()?.customSystemPrompt ?? ""
+    }
+
+    func saveSystemPrompt(_ prompt: String) async throws {
+        try await upsertProfile(["custom_system_prompt": prompt])
+    }
+
+    func quota() async throws -> QuotaSnapshot {
+        let snapshot = try await profile()
+        let now = Date()
+        return QuotaSnapshot(
+            tokens5h: snapshot?.tokens5h ?? 0,
+            window5hStart: snapshot?.window5hStart ?? now,
+            tokens7d: snapshot?.tokens7d ?? 0,
+            window7dStart: snapshot?.window7dStart ?? now,
+            balance: snapshot?.balance ?? 0
+        )
+    }
+
+    func redeem(code: String) async throws -> Int {
+        let config = try await loadBootstrap()
+        let url = config.supabaseUrl.appending(path: "rest/v1/rpc/redeem_invitation_code")
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["input_code": code])
+        let rows: [RedeemCodeRow] = try await send(request)
+        guard let result = rows.first else { throw APIError.message("兑换码无效或已被使用") }
+        return result.tokensAdded
+    }
+
+    func deleteAllConversations() async throws {
+        var request = try await appRequest(path: "api/conversations", method: "DELETE")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        try await sendVoid(request)
+    }
+
+    func modelEndpoints() async throws -> [ModelEndpointSummary] {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "endpoints", query: [
+            "select": "id,name,model,output_kind,base_url,auth_type",
+            "order": "updated_at.desc",
+        ])
+        let rows: [EndpointRow] = try await send(
+            try await authorizedRequest(url, config: config)
+        )
+        return rows.map {
+            ModelEndpointSummary(
+                id: $0.id,
+                name: $0.name,
+                baseURL: $0.baseURL ?? "",
+                model: $0.model,
+                outputKind: $0.outputKind ?? "chat",
+                authType: $0.authType ?? "bearer",
+                needsReconnect: false
+            )
+        }
+    }
+
+    func discoverModels(
+        baseURL: String,
+        apiKey: String,
+        endpointID: UUID? = nil
+    ) async throws -> [DiscoveredModel] {
+        var body: [String: Any] = endpointID.map { ["endpointId": $0.uuidString] } ?? [
+            "baseUrl": baseURL,
+            "apiKey": apiKey,
+            "authType": "auto",
+        ]
+        if endpointID == nil {
+            body["baseUrl"] = baseURL
+            body["apiKey"] = apiKey
+        }
+        var request = try await appRequest(path: "api/endpoints/discover", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let response: ModelDiscoveryResponse = try await send(request)
+        return response.models
+    }
+
+    func createModelEndpoint(
+        baseURL: String,
+        apiKey: String,
+        model: String,
+        displayName: String?
+    ) async throws -> ModelEndpointSummary {
+        var body: [String: Any] = [
+            "baseUrl": baseURL,
+            "apiKey": apiKey,
+            "authType": "auto",
+            "model": model,
+            "outputKind": "chat",
+        ]
+        if let displayName, !displayName.isEmpty { body["displayName"] = displayName }
+        var request = try await appRequest(path: "api/endpoints", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let response: ModelEndpointResponse = try await send(request)
+        return response.endpoint
+    }
+
+    func updateModelEndpoint(
+        id: UUID,
+        baseURL: String?,
+        apiKey: String?,
+        model: String,
+        displayName: String?
+    ) async throws -> ModelEndpointSummary {
+        var body: [String: Any] = [
+            "model": model,
+            "outputKind": "chat",
+        ]
+        if let baseURL { body["baseUrl"] = baseURL }
+        if let apiKey { body["apiKey"] = apiKey }
+        if let displayName, !displayName.isEmpty { body["displayName"] = displayName }
+        var request = try await appRequest(
+            path: "api/endpoints/\(id.uuidString)",
+            method: "PATCH"
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let response: ModelEndpointResponse = try await send(request)
+        return response.endpoint
+    }
+
+    func deleteModelEndpoint(id: UUID) async throws {
+        let request = try await appRequest(
+            path: "api/endpoints/\(id.uuidString)",
+            method: "DELETE"
+        )
+        try await sendVoid(request)
+    }
+
     func enqueue(
         text: String,
         conversationID: UUID,
         history: [ChatMessage],
         model: ModelChoice,
+        options: ChatRequestOptions,
+        attachments: [ChatAttachment],
         createConversation: Bool,
         conversationTitle: String,
         userMessageID: UUID,
@@ -166,7 +405,23 @@ actor APIClient {
                 "title": String((conversationTitle.isEmpty ? title : conversationTitle).prefix(200)),
                 "projectId": NSNull(),
             ],
+            "searchMode": options.web ? "web" : "off",
+            "historyRetrieval": options.retrieval,
+            "deepResearch": options.deepResearch,
         ]
+        if !attachments.isEmpty {
+            body["attachments"] = attachments.map { attachment -> [String: Any] in
+                var value: [String: Any] = [
+                    "name": attachment.name,
+                    "dataUrl": attachment.dataURL,
+                    "isPdf": attachment.isPDF,
+                ]
+                if let text = attachment.text, !text.isEmpty {
+                    value["text"] = text
+                }
+                return value
+            }
+        }
         switch model.selection {
         case let .platform(tier):
             body["tier"] = tier
@@ -215,6 +470,9 @@ actor APIClient {
                 retryNanoseconds = 250_000_000
             } catch is CancellationError {
                 throw CancellationError()
+            } catch let error as APIError {
+                if !error.canRetry { throw error }
+                if Date() >= deadline { throw error }
             } catch {
                 if Date() >= deadline { throw error }
             }
@@ -243,33 +501,60 @@ actor APIClient {
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         if sequence > 0 { request.setValue(String(sequence), forHTTPHeaderField: "Last-Event-ID") }
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIError.message("流式响应无效")
-        }
-        guard 200..<300 ~= http.statusCode else {
-            throw APIError.message("流式连接失败（\(http.statusCode)）")
-        }
 
-        var dataLines: [String] = []
-        for try await line in bytes.lines {
-            try Task.checkCancellation()
-            if line.isEmpty {
-                guard let event = try decodeEvent(dataLines) else {
-                    dataLines.removeAll(keepingCapacity: true)
-                    continue
+        for attempt in 0...1 {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw APIError.message("流式响应无效")
+            }
+            if http.statusCode == 401, attempt == 0 {
+                let refreshed = try await refreshSession()
+                request.setValue(
+                    "Bearer \(refreshed.accessToken)",
+                    forHTTPHeaderField: "Authorization"
+                )
+                continue
+            }
+            guard 200..<300 ~= http.statusCode else {
+                let message = "流式连接失败（\(http.statusCode)）"
+                if http.statusCode == 408 || http.statusCode == 409
+                    || http.statusCode == 425 || http.statusCode == 429
+                    || http.statusCode >= 500 {
+                    throw APIError.retryable(message)
                 }
-                dataLines.removeAll(keepingCapacity: true)
-                guard event.seq > sequence else { continue }
-                if event.seq != sequence + 1 { throw APIError.message("回复事件出现缺口，正在重连") }
+                throw APIError.message(message)
+            }
+
+            var dataLines: [String] = []
+            for try await line in bytes.lines {
+                try Task.checkCancellation()
+                if line.isEmpty {
+                    guard let event = try decodeEvent(dataLines) else {
+                        dataLines.removeAll(keepingCapacity: true)
+                        continue
+                    }
+                    dataLines.removeAll(keepingCapacity: true)
+                    guard event.seq > sequence else { continue }
+                    if event.seq != sequence + 1 {
+                        throw APIError.retryable("回复事件出现缺口，正在重连")
+                    }
+                    sequence = event.seq
+                    continuation.yield(event)
+                    if event.kind == "job.terminal" { return true }
+                } else if line.hasPrefix("data:") {
+                    dataLines.append(
+                        String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                    )
+                }
+            }
+            if let event = try decodeEvent(dataLines), event.seq > sequence {
                 sequence = event.seq
                 continuation.yield(event)
                 if event.kind == "job.terminal" { return true }
-            } else if line.hasPrefix("data:") {
-                dataLines.append(String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces))
             }
+            return false
         }
-        return false
+        throw APIError.message("登录状态已过期")
     }
 
     private func decodeEvent(_ lines: [String]) throws -> JobEvent? {
@@ -339,6 +624,27 @@ actor APIClient {
         return request
     }
 
+    private func appRequest(path: String, method: String) async throws -> URLRequest {
+        var request = URLRequest(url: baseURL.appending(path: path))
+        request.httpMethod = method
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
+    private func upsertProfile(_ values: [String: Any]) async throws {
+        let config = try await loadBootstrap()
+        let user = try await account()
+        let url = try restURL(config, path: "profiles", query: ["on_conflict": "user_id"])
+        var request = try await authorizedRequest(url, config: config)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("resolution=merge-duplicates", forHTTPHeaderField: "Prefer")
+        var body = values
+        body["user_id"] = user.id.uuidString
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        try await sendVoid(request)
+    }
+
     private func responseMessage(_ data: Data, status: Int) -> String {
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return "请求失败（\(status)）"
@@ -353,10 +659,7 @@ actor APIClient {
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIError.message("网络响应无效")
-        }
+        let (data, http) = try await data(for: request)
         guard 200..<300 ~= http.statusCode else {
             throw APIError.message(responseMessage(data, status: http.statusCode))
         }
@@ -366,4 +669,47 @@ actor APIClient {
             throw APIError.message("服务器响应格式无法识别")
         }
     }
+
+    private func sendVoid(_ request: URLRequest) async throws {
+        let (data, http) = try await data(for: request)
+        guard 200..<300 ~= http.statusCode else {
+            throw APIError.message(responseMessage(data, status: http.statusCode))
+        }
+    }
+
+    private func data(
+        for request: URLRequest,
+        allowTokenRefresh: Bool = true
+    ) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.message("网络响应无效")
+        }
+        guard http.statusCode == 401,
+              allowTokenRefresh,
+              request.value(forHTTPHeaderField: "Authorization") != nil,
+              request.url?.path.hasSuffix("/auth/v1/token") != true else {
+            return (data, http)
+        }
+        let refreshed = try await refreshSession()
+        var retry = request
+        retry.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
+        return try await self.data(for: retry, allowTokenRefresh: false)
+    }
+}
+
+private struct RedeemCodeRow: Decodable {
+    let tokensAdded: Int
+
+    enum CodingKeys: String, CodingKey {
+        case tokensAdded = "tokens_added"
+    }
+}
+
+private struct ModelDiscoveryResponse: Decodable {
+    let models: [DiscoveredModel]
+}
+
+private struct ModelEndpointResponse: Decodable {
+    let endpoint: ModelEndpointSummary
 }

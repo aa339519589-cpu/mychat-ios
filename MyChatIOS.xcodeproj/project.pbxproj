@@ -15,6 +15,8 @@
 		A10000000000000000000017 /* SpeechInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* SpeechInput.swift */; };
 		A10000000000000000000019 /* RichMessageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000D /* RichMessageView.swift */; };
 		A1000000000000000000001A /* WebAssets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E /* WebAssets */; };
+		A1000000000000000000001B /* SettingsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000F /* SettingsViews.swift */; };
+		A1000000000000000000001C /* WorkspaceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* WorkspaceViews.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +30,8 @@
 		A1000000000000000000000B /* SpeechInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechInput.swift; sourceTree = "<group>"; };
 		A1000000000000000000000D /* RichMessageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RichMessageView.swift; sourceTree = "<group>"; };
 		A1000000000000000000000E /* WebAssets */ = {isa = PBXFileReference; explicitFileType = folder; path = WebAssets; sourceTree = "<group>"; };
+		A1000000000000000000000F /* SettingsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViews.swift; sourceTree = "<group>"; };
+		A10000000000000000000010 /* WorkspaceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceViews.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* MyChatIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; path = MyChatIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000008 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
@@ -39,7 +43,7 @@
 
 /* Begin PBXGroup section */
 		A10000000000000000000031 = {isa = PBXGroup; children = (A10000000000000000000032 /* MyChatIOS */, A10000000000000000000033 /* Products */, A10000000000000000000034 /* Configuration */); sourceTree = "<group>"; };
-		A10000000000000000000032 /* MyChatIOS */ = {isa = PBXGroup; children = (A10000000000000000000001 /* MyChatIOSApp.swift */, A10000000000000000000002 /* RootView.swift */, A1000000000000000000000D /* RichMessageView.swift */, A10000000000000000000003 /* APIClient.swift */, A10000000000000000000004 /* Models.swift */, A10000000000000000000005 /* KeychainStore.swift */, A10000000000000000000006 /* AppConfig.swift */, A1000000000000000000000B /* SpeechInput.swift */, A1000000000000000000000E /* WebAssets */, A1000000000000000000000A /* Info.plist */); path = MyChatIOS; sourceTree = "<group>"; };
+		A10000000000000000000032 /* MyChatIOS */ = {isa = PBXGroup; children = (A10000000000000000000001 /* MyChatIOSApp.swift */, A10000000000000000000002 /* RootView.swift */, A1000000000000000000000F /* SettingsViews.swift */, A10000000000000000000010 /* WorkspaceViews.swift */, A1000000000000000000000D /* RichMessageView.swift */, A10000000000000000000003 /* APIClient.swift */, A10000000000000000000004 /* Models.swift */, A10000000000000000000005 /* KeychainStore.swift */, A10000000000000000000006 /* AppConfig.swift */, A1000000000000000000000B /* SpeechInput.swift */, A1000000000000000000000E /* WebAssets */, A1000000000000000000000A /* Info.plist */); path = MyChatIOS; sourceTree = "<group>"; };
 		A10000000000000000000033 /* Products */ = {isa = PBXGroup; children = (A10000000000000000000007 /* MyChatIOS.app */); name = Products; sourceTree = "<group>"; };
 		A10000000000000000000034 /* Configuration */ = {isa = PBXGroup; children = (A10000000000000000000008 /* Debug.xcconfig */, A10000000000000000000009 /* Release.xcconfig */); path = Configuration; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -57,7 +61,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A10000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000011 /* MyChatIOSApp.swift in Sources */, A10000000000000000000012 /* RootView.swift in Sources */, A10000000000000000000019 /* RichMessageView.swift in Sources */, A10000000000000000000013 /* APIClient.swift in Sources */, A10000000000000000000014 /* Models.swift in Sources */, A10000000000000000000015 /* KeychainStore.swift in Sources */, A10000000000000000000016 /* AppConfig.swift in Sources */, A10000000000000000000017 /* SpeechInput.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000011 /* MyChatIOSApp.swift in Sources */, A10000000000000000000012 /* RootView.swift in Sources */, A1000000000000000000001B /* SettingsViews.swift in Sources */, A1000000000000000000001C /* WorkspaceViews.swift in Sources */, A10000000000000000000019 /* RichMessageView.swift in Sources */, A10000000000000000000013 /* APIClient.swift in Sources */, A10000000000000000000014 /* Models.swift in Sources */, A10000000000000000000015 /* KeychainStore.swift in Sources */, A10000000000000000000016 /* AppConfig.swift in Sources */, A10000000000000000000017 /* SpeechInput.swift in Sources */); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
