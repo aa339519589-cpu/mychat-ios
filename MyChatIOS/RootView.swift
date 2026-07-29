@@ -502,7 +502,6 @@ struct NativeChatView: View {
             if sidebarVisible {
                 SidebarOverlay(
                     conversations: store.conversations,
-                    selected: store.selectedConversation,
                     close: { sidebarVisible = false },
                     select: { conversation in
                         sidebarVisible = false
@@ -1103,7 +1102,6 @@ enum WorkspaceDestination: String, Identifiable {
 
 struct SidebarOverlay: View {
     let conversations: [Conversation]
-    let selected: Conversation?
     let close: () -> Void
     let select: (Conversation) -> Void
     let newConversation: () -> Void
@@ -1143,49 +1141,16 @@ struct SidebarOverlay: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 2)
 
-                    Text("当前对话")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-                        .padding(.bottom, 6)
-
-                    if let selected {
-                        HStack(spacing: 10) {
-                            Circle()
-                                .fill(AppPalette.text)
-                                .frame(width: 5, height: 5)
-                                .frame(width: 14)
-                            Text(selected.title)
-                                .font(.system(size: 16, weight: .medium))
-                                .lineLimit(1)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 18)
-                        .frame(height: 42)
-                    } else {
-                        Text("新对话")
-                            .font(.system(size: 16, weight: .medium))
-                            .padding(.horizontal, 20)
-                            .frame(height: 42)
-                    }
-
-                    Rectangle()
-                        .fill(AppPalette.border)
-                        .frame(height: 0.5)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 8)
-
                     Text("对话记录")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 20)
-                        .padding(.top, 16)
+                        .padding(.top, 20)
                         .padding(.bottom, 7)
 
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(conversations.filter { $0.id != selected?.id }) { conversation in
+                            ForEach(conversations) { conversation in
                                 Button {
                                     lightHaptic()
                                     select(conversation)
