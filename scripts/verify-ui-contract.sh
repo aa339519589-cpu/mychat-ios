@@ -8,10 +8,20 @@ settings_view="$repo_root/MyChatIOS/SettingsViews.swift"
 project_file="$repo_root/MyChatIOS.xcodeproj/project.pbxproj"
 info_plist="$repo_root/MyChatIOS/Info.plist"
 
+if command -v rg >/dev/null 2>&1; then
+  fixed_search() { rg -Fq "$2" "$1"; }
+  regex_search() { rg -n "$1" "$2"; }
+  match_count() { rg -c "$2" "$1"; }
+else
+  fixed_search() { grep -Fq "$2" "$1"; }
+  regex_search() { grep -R -nE "$1" "$2"; }
+  match_count() { grep -c "$2" "$1"; }
+fi
+
 require_text() {
   local file="$1"
   local value="$2"
-  if ! rg -Fq "$value" "$file"; then
+  if ! fixed_search "$file" "$value"; then
     echo "Missing UI contract: $value"
     exit 1
   fi
@@ -35,12 +45,12 @@ require_text "$project_file" "SettingsViews.swift in Sources"
 require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
 
-if rg -n "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
+if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
   exit 1
 fi
 
-composer_count="$(rg -c '^struct Composer: View' "$root_view")"
+composer_count="$(match_count "$root_view" '^struct Composer: View')"
 if [[ "$composer_count" != "1" ]]; then
   echo "Expected exactly one Composer implementation"
   exit 1
