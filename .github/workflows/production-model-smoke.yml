@@ -58,27 +58,11 @@ jobs:
           printf '%s' "$user_id" > "$RUNNER_TEMP/user-id"
           chmod 600 "$RUNNER_TEMP/access-token" "$RUNNER_TEMP/user-id"
 
-      - name: Initialize quota profile and verify authority
+      - name: Verify quota authority
         run: |
           set -euo pipefail
           access_token="$(cat "$RUNNER_TEMP/access-token")"
           user_id="$(cat "$RUNNER_TEMP/user-id")"
-          profile_file="$RUNNER_TEMP/profile.json"
-          jq -n --arg user_id "$user_id" '{user_id: $user_id}' > "$profile_file"
-          profile_status="$(curl --silent --show-error --output "$RUNNER_TEMP/profile-response.json" --write-out '%{http_code}' \
-            --connect-timeout 10 --max-time 30 \
-            --header "apikey: $SUPABASE_ANON_KEY" \
-            --header "Authorization: Bearer $access_token" \
-            --header 'Content-Type: application/json' \
-            --header 'Prefer: resolution=merge-duplicates,return=minimal' \
-            --request POST --data-binary "@$profile_file" \
-            "$SUPABASE_URL/rest/v1/profiles?on_conflict=user_id")"
-          if [[ "$profile_status" -lt 200 || "$profile_status" -ge 300 ]]; then
-            echo "profile initialization HTTP status: $profile_status"
-            cat "$RUNNER_TEMP/profile-response.json"
-            exit 1
-          fi
-
           quota_status="$(curl --silent --show-error --output "$RUNNER_TEMP/quota.json" --write-out '%{http_code}' \
             --connect-timeout 10 --max-time 30 \
             --header "apikey: $SUPABASE_ANON_KEY" \
