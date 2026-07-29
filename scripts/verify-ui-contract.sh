@@ -5,6 +5,7 @@ repo_root="$(git rev-parse --show-toplevel)"
 root_view="$repo_root/MyChatIOS/RootView.swift"
 thinking_view="$repo_root/MyChatIOS/RichMessageView.swift"
 settings_view="$repo_root/MyChatIOS/SettingsViews.swift"
+api_client="$repo_root/MyChatIOS/APIClient.swift"
 project_file="$repo_root/MyChatIOS.xcodeproj/project.pbxproj"
 info_plist="$repo_root/MyChatIOS/Info.plist"
 
@@ -22,7 +23,7 @@ require_text() {
   local file="$1"
   local value="$2"
   if ! fixed_search "$file" "$value"; then
-    echo "Missing UI contract: $value"
+    echo "Missing source contract: $value"
     exit 1
   fi
 }
@@ -46,6 +47,12 @@ require_text "$project_file" "SettingsViews.swift in Sources"
 require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
 
+require_text "$api_client" "// MARK: - Chat reply pipeline"
+require_text "$api_client" "private func waitForTerminalJob"
+require_text "$api_client" "api/v1/jobs/"
+require_text "$api_client" "case \"completed\""
+require_text "$api_client" "模型已完成，但回复结果为空"
+
 if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
   exit 1
@@ -66,10 +73,21 @@ if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_vi
   exit 1
 fi
 
+if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for|patch-authoritative-job-recovery' "$repo_root"; then
+  echo "Retired chat transport or build-time patching is still referenced"
+  exit 1
+fi
+
 composer_count="$(match_count "$root_view" '^struct Composer: View')"
 if [[ "$composer_count" != "1" ]]; then
   echo "Expected exactly one Composer implementation"
   exit 1
 fi
 
-echo "UI contract checks passed"
+chat_pipeline_count="$(match_count "$api_client" 'private func waitForTerminalJob')"
+if [[ "$chat_pipeline_count" != "1" ]]; then
+  echo "Expected exactly one authoritative chat delivery implementation"
+  exit 1
+fi
+
+echo "UI and chat source contract checks passed"
