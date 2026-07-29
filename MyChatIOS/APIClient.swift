@@ -2,9 +2,36 @@ import Foundation
 
 enum APIError: LocalizedError {
     case message(String)
+    case response(
+        message: String,
+        statusCode: Int,
+        code: String?,
+        retryable: Bool,
+        retryAfter: TimeInterval?,
+        requestID: String?
+    )
 
     var errorDescription: String? {
-        if case let .message(value) = self { return value }
+        switch self {
+        case let .message(value):
+            return value
+        case let .response(message, _, _, _, _, _):
+            return message
+        }
+    }
+
+    var statusCode: Int? {
+        if case let .response(_, statusCode, _, _, _, _) = self { return statusCode }
+        return nil
+    }
+
+    var isRetryable: Bool {
+        if case let .response(_, _, _, retryable, _, _) = self { return retryable }
+        return false
+    }
+
+    var retryAfter: TimeInterval? {
+        if case let .response(_, _, _, _, retryAfter, _) = self { return retryAfter }
         return nil
     }
 }
@@ -131,15 +158,19 @@ actor APIClient {
         assistantMessageID: UUID,
         generationID: UUID
     ) async throws -> ChatEnqueueResponse {
-        let token = try await accessToken()
+        let submittedAt = Date()
         let userMessage = ChatMessage(
             id: userMessageID,
             role: "user",
             content: text,
-            createdAt: Date()
+            createdAt: submittedAt
         )
         let messages = history + [userMessage]
-        let title = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let fallbackTitle = String(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let title = String((conversationTitle.isEmpty ? fallbackTitle : conversationTitle).prefix(200))
+        let serverHasConversation = try? await conversationExists(conversationID)
+        let authoritativeCreate = serverHasConversation.map { !$0 } ?? createConversation
+
         var body: [String: Any] = [
             "conversationId": conversationID.uuidString,
             "userMessageId": userMessageID.uuidString,
@@ -151,19 +182,20 @@ actor APIClient {
                     "role": message.role,
                     "content": message.content,
                 ]
-                // The submitted turn must use server time. Device clocks can be
-                // minutes or hours ahead and the authoritative RPC intentionally
-                // rejects future timestamps. Historical timestamps remain useful
-                // context but are never authority for the new user message.
+                // The authoritative timestamp for the newly submitted user turn
+                // stays server-owned. Historical timestamps are context only.
                 if message.id != userMessageID, let createdAt = message.createdAt {
                     value["ts"] = ISO8601DateFormatter().string(from: createdAt)
                 }
                 return value
             },
+            "searchMode": "off",
+            "deepResearch": false,
+            "historyRetrieval": false,
             "turn": [
                 "schemaVersion": 1,
-                "createConversation": createConversation,
-                "title": String((conversationTitle.isEmpty ? title : conversationTitle).prefix(200)),
+                "createConversation": authoritativeCreate,
+                "title": title.isEmpty ? "新对话" : title,
                 "projectId": NSNull(),
             ],
         ]
@@ -174,12 +206,92 @@ actor APIClient {
             body["endpointId"] = id.uuidString
         }
 
+        // One command, one set of durable IDs, one byte-identical body. A retry
+        // can never create a second turn for the same tap.
+        let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+        var retryAttempt = 0
+
+        while true {
+            try Task.checkCancellation()
+            do {
+                return try await postEnqueue(bodyData, generationID: generationID)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                if Task.isCancelled { throw CancellationError() }
+
+                // The POST may have reached the server even when its acknowledgement
+                // was lost. Read the durable job before deciding to send again.
+                if let accepted = try? await reconcileEnqueue(generationID: generationID) {
+                    return accepted
+                }
+
+                guard let delay = enqueueRetryDelay(for: error, attempt: retryAttempt) else {
+                    throw error
+                }
+                retryAttempt += 1
+                try await Task.sleep(nanoseconds: delay)
+            }
+        }
+    }
+
+    private func postEnqueue(_ bodyData: Data, generationID: UUID) async throws -> ChatEnqueueResponse {
         var request = URLRequest(url: baseURL.appending(path: "api/chat"))
         request.httpMethod = "POST"
+        request.timeoutInterval = 50
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("chat:\(generationID.uuidString)", forHTTPHeaderField: "Idempotency-Key")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        request.httpBody = bodyData
         return try await send(request)
+    }
+
+    private func reconcileEnqueue(generationID: UUID) async throws -> ChatEnqueueResponse? {
+        var request = URLRequest(
+            url: baseURL.appending(path: "api/v1/jobs/\(generationID.uuidString)")
+        )
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.message("作业状态响应无效")
+        }
+        if http.statusCode == 404 { return nil }
+        guard 200..<300 ~= http.statusCode else {
+            throw responseError(data, response: http)
+        }
+        guard
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let job = root["job"] as? [String: Any],
+            let id = job["id"] as? String,
+            id.caseInsensitiveCompare(generationID.uuidString) == .orderedSame,
+            let status = job["status"] as? String
+        else {
+            throw APIError.message("作业状态格式无法识别")
+        }
+        return ChatEnqueueResponse(
+            jobId: generationID,
+            streamUrl: "/api/v1/jobs/\(generationID.uuidString)/events?from_seq=0",
+            status: status
+        )
+    }
+
+    private func conversationExists(_ conversationID: UUID) async throws -> Bool {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "conversations", query: [
+            "select": "id",
+            "id": "eq.\(conversationID.uuidString)",
+            "limit": "1",
+        ])
+        let request = try await authorizedRequest(url, config: config)
+        struct ExistingConversation: Decodable { let id: UUID }
+        let rows: [ExistingConversation] = try await send(request)
+        return !rows.isEmpty
     }
 
     func eventStream(_ accepted: ChatEnqueueResponse) -> AsyncThrowingStream<JobEvent, Error> {
@@ -339,17 +451,63 @@ actor APIClient {
         return request
     }
 
-    private func responseMessage(_ data: Data, status: Int) -> String {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return "请求失败（\(status)）"
+    private func responseError(_ data: Data, response: HTTPURLResponse) -> APIError {
+        let status = response.statusCode
+        var message = "请求失败（\(status)）"
+        var code: String?
+        var requestID: String?
+        var retryable = status == 408 || status == 425 || status == 429 || status >= 500
+
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let error = object["error"] as? String {
+                message = error
+            } else if let value = object["msg"] as? String {
+                message = value
+            } else if let value = object["message"] as? String {
+                message = value
+            } else if let value = object["error_description"] as? String {
+                message = value
+            } else if let error = object["error"] as? [String: Any] {
+                if let value = error["message"] as? String { message = value }
+                if let value = error["code"] as? String { code = value }
+                if let value = error["retryable"] as? Bool { retryable = value }
+                if let value = error["request_id"] as? String { requestID = value }
+            }
+            if requestID == nil, let value = object["request_id"] as? String { requestID = value }
         }
-        if let error = object["error"] as? String { return error }
-        if let message = object["msg"] as? String { return message }
-        if let message = object["message"] as? String { return message }
-        if let message = object["error_description"] as? String { return message }
-        if let error = object["error"] as? [String: Any],
-           let message = error["message"] as? String { return message }
-        return "请求失败（\(status)）"
+
+        let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+            .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return APIError.response(
+            message: message,
+            statusCode: status,
+            code: code,
+            retryable: retryable,
+            retryAfter: retryAfter,
+            requestID: requestID
+        )
+    }
+
+    private func enqueueRetryDelay(for error: Error, attempt: Int) -> UInt64? {
+        let fallbackSeconds: [TimeInterval] = [1, 2, 5, 10, 20, 30]
+        guard attempt < fallbackSeconds.count else { return nil }
+        let fallback = fallbackSeconds[attempt]
+
+        if let apiError = error as? APIError, apiError.isRetryable {
+            let seconds = min(60, max(0.5, apiError.retryAfter ?? fallback))
+            return UInt64(seconds * 1_000_000_000)
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+                 .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable,
+                 .internationalRoamingOff, .dataNotAllowed:
+                return UInt64(fallback * 1_000_000_000)
+            default:
+                return nil
+            }
+        }
+        return nil
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
@@ -358,7 +516,7 @@ actor APIClient {
             throw APIError.message("网络响应无效")
         }
         guard 200..<300 ~= http.statusCode else {
-            throw APIError.message(responseMessage(data, status: http.statusCode))
+            throw responseError(data, response: http)
         }
         do {
             return try decoder.decode(T.self, from: data)
