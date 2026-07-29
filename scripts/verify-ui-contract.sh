@@ -51,7 +51,7 @@ if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatI
   exit 1
 fi
 
-if regex_search 'MyChatMark|Text\("个人空间"\)|accessibilityLabel\("收起侧边栏"\)' "$root_view"; then
+if regex_search 'MyChatMark|Text\("个人空间"\)|Text\("当前对话"\)|accessibilityLabel\("收起侧边栏"\)' "$root_view"; then
   echo "Removed sidebar chrome is still referenced"
   exit 1
 fi
