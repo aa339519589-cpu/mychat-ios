@@ -1,13 +1,45 @@
 import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
+import UIKit
 
 enum AppPalette {
-    static let background = Color(uiColor: .systemBackground)
-    static let surface = Color(uiColor: .systemBackground)
-    static let mutedSurface = Color(uiColor: .secondarySystemBackground)
-    static let elevatedSurface = Color(uiColor: .tertiarySystemBackground)
-    static let border = Color(uiColor: .separator).opacity(0.52)
+    static let background = adaptive(
+        light: UIColor(red: 0.969, green: 0.965, blue: 0.949, alpha: 1),
+        dark: UIColor(red: 0.090, green: 0.094, blue: 0.102, alpha: 1)
+    )
+    static let surface = adaptive(
+        light: UIColor(red: 0.992, green: 0.988, blue: 0.973, alpha: 1),
+        dark: UIColor(red: 0.118, green: 0.125, blue: 0.133, alpha: 1)
+    )
+    static let mutedSurface = adaptive(
+        light: UIColor(red: 0.933, green: 0.929, blue: 0.906, alpha: 1),
+        dark: UIColor(red: 0.145, green: 0.153, blue: 0.165, alpha: 1)
+    )
+    static let elevatedSurface = adaptive(
+        light: .white,
+        dark: UIColor(red: 0.176, green: 0.184, blue: 0.200, alpha: 1)
+    )
+    static let sidebar = adaptive(
+        light: UIColor(red: 0.949, green: 0.945, blue: 0.925, alpha: 1),
+        dark: UIColor(red: 0.106, green: 0.110, blue: 0.118, alpha: 1)
+    )
+    static let border = adaptive(
+        light: UIColor(red: 0.745, green: 0.733, blue: 0.690, alpha: 0.48),
+        dark: UIColor(red: 0.365, green: 0.380, blue: 0.408, alpha: 0.56)
+    )
     static let text = Color(uiColor: .label)
     static let secondaryText = Color(uiColor: .secondaryLabel)
+    static let thinking = adaptive(
+        light: UIColor(red: 0.384, green: 0.451, blue: 0.537, alpha: 1),
+        dark: UIColor(red: 0.722, green: 0.769, blue: 0.839, alpha: 1)
+    )
+
+    private static func adaptive(light: UIColor, dark: UIColor) -> Color {
+        Color(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        })
+    }
 }
 
 @MainActor
@@ -118,8 +150,8 @@ struct LoginView: View {
                     .frame(height: 50)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(Color.primary)
+                .foregroundStyle(AppPalette.background)
+                .background(AppPalette.text)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .disabled(email.isEmpty || password.isEmpty || isSubmitting)
                 .opacity(email.isEmpty || password.isEmpty ? 0.45 : 1)
@@ -170,6 +202,8 @@ private extension View {
 final class ChatStore: ObservableObject {
     private struct RetryContext {
         let text: String
+        let options: ChatRequestOptions
+        let attachments: [ChatAttachment]
         let userID: UUID
         let assistantID: UUID
     }
@@ -215,6 +249,17 @@ final class ChatStore: ObservableObject {
         }
     }
 
+    func reloadModels() async {
+        do {
+            models = try await api.models()
+            if !models.contains(selectedModel) {
+                selectedModel = models.first ?? ModelChoice.platform[1]
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     func select(_ conversation: Conversation) async throws {
         guard selectedConversation?.id != conversation.id || messages.isEmpty else { return }
         streamTask?.cancel()
@@ -234,7 +279,11 @@ final class ChatStore: ObservableObject {
         retryContext = nil
     }
 
-    func send(_ value: String) {
+    func send(
+        _ value: String,
+        options: ChatRequestOptions = ChatRequestOptions(),
+        attachments: [ChatAttachment] = []
+    ) {
         let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isSending else { return }
         if selectedConversation == nil { newConversation() }
@@ -259,6 +308,8 @@ final class ChatStore: ObservableObject {
                     conversationID: conversation.id,
                     history: history,
                     model: selectedModel,
+                    options: options,
+                    attachments: attachments,
                     createConversation: createConversation,
                     conversationTitle: createConversation ? text : conversation.title,
                     userMessageID: userID,
@@ -283,7 +334,7 @@ final class ChatStore: ObservableObject {
                     if event.kind == "job.terminal",
                        let status = event.payload["status"]?.string,
                        status != "completed" {
-                        throw APIError.message(event.payload["error"]?.string ?? "生成未完成")
+                        throw APIError.message(event.payload["error"]?.message ?? "生成未完成")
                     }
                     if event.kind == "job.terminal",
                        let result = event.payload["result"]?.object {
@@ -294,9 +345,14 @@ final class ChatStore: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
-                replaceEmptyAssistant(assistantID, with: "发送失败")
                 failedMessageID = assistantID
-                retryContext = RetryContext(text: text, userID: userID, assistantID: assistantID)
+                retryContext = RetryContext(
+                    text: text,
+                    options: options,
+                    attachments: attachments,
+                    userID: userID,
+                    assistantID: assistantID
+                )
                 self.error = error.localizedDescription
             }
         }
@@ -309,7 +365,11 @@ final class ChatStore: ObservableObject {
         }
         failedMessageID = nil
         self.retryContext = nil
-        send(retryContext.text)
+        send(
+            retryContext.text,
+            options: retryContext.options,
+            attachments: retryContext.attachments
+        )
     }
 
     private func append(_ delta: String, to id: UUID) {
@@ -338,12 +398,6 @@ final class ChatStore: ObservableObject {
         }
     }
 
-    private func replaceEmptyAssistant(_ id: UUID, with value: String) {
-        guard let index = messages.firstIndex(where: { $0.id == id }),
-              messages[index].content.isEmpty else { return }
-        messages[index].content = value
-    }
-
     private func refresh(conversationID: UUID) async throws {
         failedMessageID = nil
         retryContext = nil
@@ -355,15 +409,23 @@ final class ChatStore: ObservableObject {
 }
 
 struct NativeChatView: View {
+    let api: APIClient
     let onSignOut: () -> Void
     @StateObject private var store: ChatStore
     @State private var sidebarVisible = false
     @State private var attachmentSheetVisible = false
     @State private var destination: WorkspaceDestination?
     @State private var draft = ""
+    @State private var requestOptions = ChatRequestOptions()
+    @State private var attachments: [ChatAttachment] = []
+    @State private var photoPickerVisible = false
+    @State private var fileImporterVisible = false
+    @State private var cameraVisible = false
+    @State private var selectedPhoto: PhotosPickerItem?
     @FocusState private var composerFocused: Bool
 
     init(api: APIClient, onSignOut: @escaping () -> Void) {
+        self.api = api
         _store = StateObject(wrappedValue: ChatStore(api: api))
         self.onSignOut = onSignOut
     }
@@ -395,14 +457,25 @@ struct NativeChatView: View {
                     draft: $draft,
                     isFocused: $composerFocused,
                     isSending: store.isSending,
+                    hasAdditions: !requestOptions.isEmpty || !attachments.isEmpty,
+                    canSendWithoutText: !attachments.isEmpty,
                     openAttachments: {
                         composerFocused = false
                         attachmentSheetVisible = true
                     },
                     send: {
-                        let value = draft
+                        let value = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            && !attachments.isEmpty ? "请查看附件" : draft
+                        let options = requestOptions
+                        let currentAttachments = attachments
                         draft = ""
-                        store.send(value)
+                        requestOptions = ChatRequestOptions()
+                        attachments = []
+                        store.send(
+                            value,
+                            options: options,
+                            attachments: currentAttachments
+                        )
                     },
                     reportError: { store.error = $0 }
                 )
@@ -448,22 +521,84 @@ struct NativeChatView: View {
                     }
                 )
                 .transition(.asymmetric(
-                    insertion: .opacity,
-                    removal: .opacity
+                    insertion: .move(edge: .leading).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
                 ))
                 .zIndex(2)
             }
         }
         .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.9), value: sidebarVisible)
         .sheet(isPresented: $attachmentSheetVisible) {
-            AttachmentActionsSheet()
-                .presentationDetents([.height(370)])
+            AttachmentActionsSheet(
+                options: $requestOptions,
+                choosePhoto: {
+                    attachmentSheetVisible = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        photoPickerVisible = true
+                    }
+                },
+                takePhoto: {
+                    attachmentSheetVisible = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        cameraVisible = true
+                    }
+                },
+                chooseFile: {
+                    attachmentSheetVisible = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                        fileImporterVisible = true
+                    }
+                }
+            )
+                .presentationDetents([.height(426)])
                 .presentationDragIndicator(.visible)
                 .presentationBackground(AppPalette.background)
         }
-        .sheet(item: $destination) { destination in
-            WorkspaceDestinationView(destination: destination, signOut: onSignOut)
-                .presentationBackground(AppPalette.background)
+        .fullScreenCover(item: $destination, onDismiss: {
+            Task { await store.reloadModels() }
+        }) { destination in
+            WorkspaceDestinationView(
+                destination: destination,
+                api: api,
+                signOut: onSignOut,
+                conversationsDeleted: store.newConversation
+            )
+        }
+        .photosPicker(
+            isPresented: $photoPickerVisible,
+            selection: $selectedPhoto,
+            matching: .images
+        )
+        .onChange(of: selectedPhoto) { _, item in
+            guard let item else { return }
+            Task { await importPhoto(item) }
+        }
+        .fileImporter(
+            isPresented: $fileImporterVisible,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            importFiles(result)
+        }
+        .fullScreenCover(isPresented: $cameraVisible) {
+            CameraPicker { image in
+                cameraVisible = false
+                guard let data = image.jpegData(compressionQuality: 0.86) else { return }
+                do {
+                    try appendAttachment(
+                        ChatAttachment(
+                        name: "照片-\(attachments.count + 1).jpg",
+                        dataURL: Self.dataURL(data, mimeType: "image/jpeg")
+                    )
+                    )
+                    lightHaptic()
+                } catch {
+                    store.error = error.localizedDescription
+                }
+            } cancel: {
+                cameraVisible = false
+            }
+            .ignoresSafeArea()
         }
         .alert(
             "提示",
@@ -477,6 +612,81 @@ struct NativeChatView: View {
             Text(store.error ?? "")
         }
         .task { await store.load() }
+    }
+
+    private func importPhoto(_ item: PhotosPickerItem) async {
+        defer { selectedPhoto = nil }
+        do {
+            guard let original = try await item.loadTransferable(type: Data.self) else {
+                throw APIError.message("照片读取失败")
+            }
+            let data = Self.preparedImageData(original)
+            let type = item.supportedContentTypes.first
+            let mime = data == original ? (type?.preferredMIMEType ?? "image/jpeg") : "image/jpeg"
+            let suffix = mime == "image/jpeg" ? "jpg" : (type?.preferredFilenameExtension ?? "jpg")
+            try appendAttachment(
+                ChatAttachment(
+                    name: "照片-\(attachments.count + 1).\(suffix)",
+                    dataURL: Self.dataURL(data, mimeType: mime)
+                )
+            )
+            lightHaptic()
+        } catch {
+            store.error = error.localizedDescription
+        }
+    }
+
+    private func importFiles(_ result: Result<[URL], Error>) {
+        do {
+            for url in try result.get().prefix(8) {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                guard data.count <= 5 * 1_024 * 1_024 else {
+                    throw APIError.message("\(url.lastPathComponent) 超过 5 MB")
+                }
+                let contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
+                let mime = contentType?.preferredMIMEType ?? "application/octet-stream"
+                let text = contentType?.conforms(to: .plainText) == true
+                    ? String(data: data, encoding: .utf8)
+                    : nil
+                try appendAttachment(
+                    ChatAttachment(
+                        name: url.lastPathComponent,
+                        dataURL: Self.dataURL(data, mimeType: mime),
+                        isPDF: contentType?.conforms(to: .pdf) == true,
+                        text: text
+                    )
+                )
+            }
+            lightHaptic()
+        } catch {
+            store.error = error.localizedDescription
+        }
+    }
+
+    private static func dataURL(_ data: Data, mimeType: String) -> String {
+        "data:\(mimeType);base64,\(data.base64EncodedString())"
+    }
+
+    private func appendAttachment(_ attachment: ChatAttachment) throws {
+        let attachmentSize = attachment.dataURL.utf8.count + (attachment.text?.utf8.count ?? 0)
+        let nextSize = attachments.reduce(attachmentSize) {
+            $0 + $1.dataURL.utf8.count + ($1.text?.utf8.count ?? 0)
+        }
+        guard nextSize <= 7_000_000 else {
+            throw APIError.message("附件总大小不能超过 7 MB")
+        }
+        attachments.append(attachment)
+    }
+
+    private static func preparedImageData(_ data: Data) -> Data {
+        guard data.count > 4_500_000,
+              let image = UIImage(data: data),
+              let compressed = image.jpegData(compressionQuality: 0.78) else {
+            return data
+        }
+        return compressed
     }
 }
 
@@ -500,11 +710,19 @@ struct ChatTopBar: View {
             Menu {
                 ForEach(models) { model in
                     Button {
+                        lightHaptic()
                         selectModel(model)
                     } label: {
-                        if model == selected {
-                            Label(model.name, systemImage: "checkmark")
-                        } else {
+                        HStack(spacing: 8) {
+                            Group {
+                                if model == selected {
+                                    Circle()
+                                        .fill(AppPalette.text)
+                                } else {
+                                    Color.clear
+                                }
+                            }
+                            .frame(width: 6, height: 6)
                             Text(model.name)
                         }
                     }
@@ -585,48 +803,48 @@ struct NativeMessageRow: View {
     let isActive: Bool
     let failed: Bool
     let retry: () -> Void
-    @State private var thinkingExpanded = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == "user" {
-                Spacer(minLength: 64)
-                Text(displayText)
-                    .font(.system(size: 16))
-                    .lineSpacing(3)
-                    .textSelection(.enabled)
-                    .foregroundStyle(AppPalette.text)
-                    .padding(.horizontal, 13)
-                    .padding(.vertical, 9)
-                    .background(AppPalette.mutedSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text("你")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AppPalette.secondaryText)
+                    Text(displayText)
+                        .font(.system(size: 16))
+                        .lineSpacing(4)
+                        .textSelection(.enabled)
+                        .foregroundStyle(AppPalette.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.leading, 54)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    if let thinking = message.thinking, !thinking.isEmpty {
-                        DisclosureGroup(isExpanded: $thinkingExpanded) {
-                            Text(thinking)
-                                .font(.system(size: 14))
-                                .lineSpacing(3)
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 6)
-                                .textSelection(.enabled)
-                        } label: {
-                            Label(
-                                isActive ? "正在思考" : "思考过程",
-                                systemImage: "brain"
-                            )
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundStyle(.secondary)
+                    Group {
+                        if failed && message.content.isEmpty {
+                            HStack(spacing: 12) {
+                                Text("回复失败")
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(AppPalette.secondaryText)
+                                Button(action: retry) {
+                                    Label("重试", systemImage: "arrow.clockwise")
+                                        .font(.system(size: 14, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(AppPalette.text)
+                            }
+                        } else if message.content.isEmpty && isActive {
+                            NativeThinkingIndicator()
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                        } else {
+                            RichAssistantContent(text: displayText)
+                                .transition(.opacity)
                         }
-                        .tint(.secondary)
                     }
-                    if message.content.isEmpty && isActive {
-                        NativeThinkingIndicator()
-                    } else {
-                        RichAssistantContent(text: displayText)
-                    }
-                    if failed {
+                    .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
+                    if failed && !message.content.isEmpty {
                         Button(action: retry) {
                             Label("重试", systemImage: "arrow.clockwise")
                                 .font(.system(size: 14, weight: .medium))
@@ -637,6 +855,7 @@ struct NativeMessageRow: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .animation(.easeOut(duration: 0.18), value: message.content.isEmpty)
             }
         }
         .frame(maxWidth: .infinity)
@@ -651,6 +870,8 @@ struct Composer: View {
     @Binding var draft: String
     let isFocused: FocusState<Bool>.Binding
     let isSending: Bool
+    let hasAdditions: Bool
+    let canSendWithoutText: Bool
     let openAttachments: () -> Void
     let send: () -> Void
     let reportError: (String) -> Void
@@ -665,44 +886,80 @@ struct Composer: View {
                 Image(systemName: "plus")
                     .font(.system(size: 20, weight: .regular))
                     .foregroundStyle(AppPalette.text)
-                    .frame(width: 44, height: 44)
+                    .frame(width: 40, height: 40)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(AppPalette.border, lineWidth: 0.7)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if hasAdditions {
+                            Circle()
+                                .fill(AppPalette.thinking)
+                                .frame(width: 6, height: 6)
+                                .padding(4)
+                        }
+                    }
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("添加")
+            .disabled(isSending || speech.phase.isActive)
 
-            TextField("Ask anything", text: $draft, axis: .vertical)
-                .font(.system(size: 17))
-                .lineLimit(1...6)
-                .focused(isFocused)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 9)
-                .disabled(isSending)
+            Group {
+                if speech.phase.isActive {
+                    VoiceActivityView(speech: speech)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                } else {
+                    TextField("Ask anything", text: $draft, axis: .vertical)
+                        .font(.system(size: 17))
+                        .lineLimit(1...6)
+                        .focused(isFocused)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 9)
+                        .disabled(isSending)
+                        .transition(.opacity)
+                }
+            }
+            .frame(minHeight: 40)
+            .animation(.easeOut(duration: 0.2), value: speech.phase)
 
             Button(action: primaryAction) {
-                Image(systemName: actionIcon)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(actionForeground)
-                    .frame(width: 44, height: 44)
-                    .background {
-                        if !draftIsEmpty {
-                            Circle().fill(actionBackground)
-                                .frame(width: 36, height: 36)
-                        }
+                Group {
+                    if speech.phase == .transcribing || speech.phase == .preparing {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: actionIcon)
+                            .font(.system(size: 18, weight: .semibold))
                     }
+                }
+                .foregroundStyle(actionForeground)
+                .frame(width: 40, height: 40)
+                .background(actionBackground)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .contentTransition(.symbolEffect(.replace))
             }
-            .disabled(isSending)
-            .accessibilityLabel(draftIsEmpty ? (speech.isRecording ? "停止听写" : "语音输入") : "发送")
+            .disabled(isSending || speech.phase == .preparing || speech.phase == .transcribing)
+            .accessibilityLabel(actionAccessibilityLabel)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .padding(6)
         .background(AppPalette.surface)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(AppPalette.border)
-                .frame(height: 0.5)
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(AppPalette.border, lineWidth: 0.7)
         }
-        .onChange(of: speech.transcript) { _, value in
-            if !value.isEmpty { draft = value }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.045), radius: 7, x: 0, y: 2)
+        .padding(.horizontal, 14)
+        .padding(.top, 7)
+        .padding(.bottom, 8)
+        .background(AppPalette.background)
+        .onChange(of: speech.phase) { _, phase in
+            guard phase == .ready else { return }
+            let value = speech.consumeTranscript()
+            guard !value.isEmpty else { return }
+            draft = value
+            isFocused.wrappedValue = true
+            lightHaptic()
         }
         .onChange(of: speech.error) { _, value in
             if let value {
@@ -710,7 +967,7 @@ struct Composer: View {
                 speech.error = nil
             }
         }
-        .onDisappear { speech.stop() }
+        .onDisappear { speech.cancel() }
     }
 
     private var draftIsEmpty: Bool {
@@ -718,28 +975,102 @@ struct Composer: View {
     }
 
     private var actionIcon: String {
-        if !draftIsEmpty { return "arrow.up" }
-        return speech.isRecording ? "stop.fill" : "mic"
+        if !draftIsEmpty || canSendWithoutText { return "arrow.up" }
+        return speech.isRecording ? "checkmark" : "mic"
     }
 
     private var actionForeground: Color {
-        if !draftIsEmpty { return Color(uiColor: .systemBackground) }
-        return .primary
+        if !draftIsEmpty || canSendWithoutText { return AppPalette.background }
+        return AppPalette.text
     }
 
     private var actionBackground: Color {
-        if !draftIsEmpty { return .primary }
-        return .clear
+        if !draftIsEmpty || canSendWithoutText { return AppPalette.text }
+        return AppPalette.mutedSurface
+    }
+
+    private var actionAccessibilityLabel: String {
+        if !draftIsEmpty || canSendWithoutText { return "发送" }
+        switch speech.phase {
+        case .recording: return "结束录音"
+        case .preparing: return "正在准备录音"
+        case .transcribing: return "正在转写"
+        case .idle, .ready: return "语音输入"
+        }
     }
 
     private func primaryAction() {
         lightHaptic()
-        if draftIsEmpty {
-            Task { await speech.toggle() }
-        } else {
-            speech.stop()
+        if !draftIsEmpty || canSendWithoutText {
+            speech.cancel()
             send()
+            return
         }
+        if speech.phase == .recording {
+            speech.finish()
+        } else {
+            Task { await speech.toggle() }
+        }
+    }
+}
+
+private struct VoiceActivityView: View {
+    @ObservedObject var speech: SpeechInput
+
+    var body: some View {
+        HStack(spacing: 9) {
+            VoiceWaveform(level: speech.audioLevel, active: speech.phase == .recording)
+                .frame(width: 31, height: 22)
+
+            Text(statusText)
+                .font(.system(size: 14))
+                .foregroundStyle(AppPalette.secondaryText)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(durationText)
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .foregroundStyle(AppPalette.secondaryText)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 4)
+        .frame(minHeight: 40)
+    }
+
+    private var statusText: String {
+        if speech.phase == .preparing { return "准备录音" }
+        if speech.phase == .transcribing { return "正在转写…" }
+        let transcript = speech.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        return transcript.isEmpty ? "正在收听" : transcript
+    }
+
+    private var durationText: String {
+        let total = max(0, Int(speech.elapsed))
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+private struct VoiceWaveform: View {
+    let level: CGFloat
+    let active: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 2.5) {
+            ForEach(0..<5, id: \.self) { index in
+                Capsule()
+                    .fill(AppPalette.thinking)
+                    .frame(width: 2.5, height: barHeight(index))
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .animation(.linear(duration: 0.09), value: level)
+        .opacity(active ? 1 : 0.7)
+    }
+
+    private func barHeight(_ index: Int) -> CGFloat {
+        guard active else { return index == 2 ? 7 : 4 }
+        let weights: [CGFloat] = [0.42, 0.74, 1, 0.66, 0.48]
+        return 4 + max(0.08, level) * 17 * weights[index]
     }
 }
 
@@ -747,7 +1078,6 @@ enum WorkspaceDestination: String, Identifiable {
     case projects
     case artifacts
     case code
-    case profile
     case settings
 
     var id: String { rawValue }
@@ -757,7 +1087,6 @@ enum WorkspaceDestination: String, Identifiable {
         case .projects: return "项目"
         case .artifacts: return "作品"
         case .code: return "代码"
-        case .profile: return "账户"
         case .settings: return "设置"
         }
     }
@@ -767,7 +1096,6 @@ enum WorkspaceDestination: String, Identifiable {
         case .projects: return "folder"
         case .artifacts: return "square.grid.2x2"
         case .code: return "chevron.left.forwardslash.chevron.right"
-        case .profile: return "person"
         case .settings: return "gearshape"
         }
     }
@@ -794,11 +1122,11 @@ struct SidebarOverlay: View {
                             .font(.system(size: 20, weight: .semibold))
                         Spacer()
                         Button(action: close) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 14, weight: .semibold))
+                            Image(systemName: "sidebar.left")
+                                .font(.system(size: 17, weight: .medium))
                                 .frame(width: 44, height: 44)
                         }
-                        .accessibilityLabel("关闭侧边栏")
+                        .accessibilityLabel("收起侧边栏")
                     }
                     .padding(.leading, 18)
                     .padding(.trailing, 8)
@@ -822,34 +1150,62 @@ struct SidebarOverlay: View {
                     .padding(.horizontal, 10)
                     .padding(.top, 2)
 
-                    Text("对话")
+                    Text("当前对话")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 20)
-                        .padding(.top, 22)
-                        .padding(.bottom, 8)
+                        .padding(.top, 20)
+                        .padding(.bottom, 6)
+
+                    if let selected {
+                        HStack(spacing: 10) {
+                            Circle()
+                                .fill(AppPalette.text)
+                                .frame(width: 5, height: 5)
+                                .frame(width: 14)
+                            Text(selected.title)
+                                .font(.system(size: 16, weight: .medium))
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 18)
+                        .frame(height: 42)
+                    } else {
+                        Text("新对话")
+                            .font(.system(size: 16, weight: .medium))
+                            .padding(.horizontal, 20)
+                            .frame(height: 42)
+                    }
+
+                    Rectangle()
+                        .fill(AppPalette.border)
+                        .frame(height: 0.5)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
+
+                    Text("对话记录")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 16)
+                        .padding(.bottom, 7)
 
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(conversations) { conversation in
+                            ForEach(conversations.filter { $0.id != selected?.id }) { conversation in
                                 Button {
                                     lightHaptic()
                                     select(conversation)
                                 } label: {
                                     HStack(spacing: 10) {
-                                        Rectangle()
-                                            .fill(selected?.id == conversation.id ? AppPalette.text : .clear)
-                                            .frame(width: 2, height: 18)
                                         Text(conversation.title)
-                                            .font(.system(
-                                                size: 16,
-                                                weight: selected?.id == conversation.id ? .medium : .regular
-                                            ))
+                                            .font(.system(size: 15.5))
                                             .lineLimit(1)
                                         Spacer(minLength: 0)
                                     }
                                     .foregroundStyle(AppPalette.text)
-                                    .frame(height: 45)
+                                    .padding(.horizontal, 8)
+                                    .frame(height: 43)
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
@@ -861,31 +1217,31 @@ struct SidebarOverlay: View {
                     Rectangle()
                         .fill(AppPalette.border)
                         .frame(height: 0.5)
-                    HStack {
-                        Button {
-                            openDestination(.profile)
-                        } label: {
-                            Label("账户", systemImage: "person")
-                                .font(.system(size: 15, weight: .medium))
-                                .frame(minWidth: 72, minHeight: 44, alignment: .leading)
-                        }
+                    HStack(spacing: 10) {
+                        Image(systemName: "person.crop.circle")
+                            .font(.system(size: 22, weight: .regular))
+                        Text("个人空间")
+                            .font(.system(size: 14.5, weight: .medium))
                         Spacer()
                         Button {
+                            lightHaptic()
                             openDestination(.settings)
                         } label: {
                             Image(systemName: "gearshape")
-                                .font(.system(size: 18))
-                                .frame(width: 44, height: 44)
+                                .font(.system(size: 16, weight: .medium))
+                                .frame(width: 36, height: 32)
+                                .background(AppPalette.mutedSurface)
+                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .accessibilityLabel("设置")
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(AppPalette.text)
                     .padding(.horizontal, 18)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, 9)
                 }
                 .frame(width: min(350, geometry.size.width * 0.86))
-                .background(AppPalette.background)
+                .background(AppPalette.sidebar)
                 .gesture(
                     DragGesture(minimumDistance: 18)
                         .onEnded { value in
@@ -900,13 +1256,10 @@ struct SidebarOverlay: View {
 
 private struct MyChatMark: View {
     var body: some View {
-        Text("M")
-            .font(.system(size: 18, weight: .bold, design: .rounded))
-            .frame(width: 30, height: 30)
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppPalette.border, lineWidth: 0.8)
-            }
+        Image(systemName: "sparkles")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(AppPalette.thinking)
+            .frame(width: 24, height: 24)
             .accessibilityHidden(true)
     }
 }
@@ -930,7 +1283,10 @@ private struct SidebarAction: View {
 }
 
 private struct AttachmentActionsSheet: View {
-    @Environment(\.dismiss) private var dismiss
+    @Binding var options: ChatRequestOptions
+    let choosePhoto: () -> Void
+    let takePhoto: () -> Void
+    let chooseFile: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -940,9 +1296,9 @@ private struct AttachmentActionsSheet: View {
                 .padding(.top, 8)
                 .padding(.bottom, 12)
 
-            AttachmentAction(title: "照片", symbol: "photo") { dismiss() }
-            AttachmentAction(title: "拍照", symbol: "camera") { dismiss() }
-            AttachmentAction(title: "文件", symbol: "doc") { dismiss() }
+            AttachmentAction(title: "照片", symbol: "photo", action: choosePhoto)
+            AttachmentAction(title: "拍照", symbol: "camera", action: takePhoto)
+            AttachmentAction(title: "文件", symbol: "doc", action: chooseFile)
 
             Rectangle()
                 .fill(AppPalette.border)
@@ -950,8 +1306,27 @@ private struct AttachmentActionsSheet: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 7)
 
-            AttachmentAction(title: "联网", symbol: "globe") { dismiss() }
-            AttachmentAction(title: "检索", symbol: "magnifyingglass") { dismiss() }
+            AttachmentAction(
+                title: "联网",
+                symbol: "globe",
+                selected: options.web
+            ) {
+                options.web.toggle()
+            }
+            AttachmentAction(
+                title: "检索",
+                symbol: "magnifyingglass",
+                selected: options.retrieval
+            ) {
+                options.retrieval.toggle()
+            }
+            AttachmentAction(
+                title: "深度研究",
+                symbol: "sparkles",
+                selected: options.deepResearch
+            ) {
+                options.deepResearch.toggle()
+            }
         }
         .foregroundStyle(AppPalette.text)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -962,17 +1337,46 @@ private struct AttachmentActionsSheet: View {
 private struct AttachmentAction: View {
     let title: String
     let symbol: String
+    var selected: Bool?
     let action: () -> Void
+
+    init(
+        title: String,
+        symbol: String,
+        selected: Bool? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.title = title
+        self.symbol = symbol
+        self.selected = selected
+        self.action = action
+    }
 
     var body: some View {
         Button {
             lightHaptic()
             action()
         } label: {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 17))
-                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                .contentShape(Rectangle())
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.system(size: 17))
+                    .frame(width: 22)
+                Text(title)
+                    .font(.system(size: 17))
+                Spacer()
+                if let selected {
+                    Circle()
+                        .fill(selected ? AppPalette.text : .clear)
+                        .frame(width: 6, height: 6)
+                        .overlay {
+                            Circle()
+                                .stroke(selected ? .clear : AppPalette.border, lineWidth: 0.7)
+                        }
+                        .frame(width: 20, height: 20)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 20)
@@ -981,54 +1385,82 @@ private struct AttachmentAction: View {
 
 private struct WorkspaceDestinationView: View {
     let destination: WorkspaceDestination
+    let api: APIClient
     let signOut: () -> Void
+    let conversationsDeleted: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if destination == .settings {
-                    List {
-                        Section {
-                            LabeledContent("外观", value: "跟随系统")
-                            LabeledContent("客户端", value: "iPhone 原生版")
-                        }
-                        Section {
-                            Button("退出登录", role: .destructive) {
-                                dismiss()
-                                signOut()
+        Group {
+            if destination == .settings {
+                SettingsHomeView(
+                    api: api,
+                    signOut: signOut,
+                    conversationsDeleted: conversationsDeleted
+                )
+            } else {
+                NavigationStack {
+                    WorkspaceContentView(destination: destination)
+                        .navigationTitle(destination.title)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("完成") { dismiss() }
+                                    .foregroundStyle(AppPalette.text)
                             }
                         }
-                    }
-                    .scrollContentBackground(.hidden)
-                } else if destination == .profile {
-                    List {
-                        Section {
-                            LabeledContent("账户状态", value: "已登录")
-                        }
-                    }
-                    .scrollContentBackground(.hidden)
-                } else {
-                    ContentUnavailableView(
-                        destination.title,
-                        systemImage: destination.symbol,
-                        description: Text("这里将直接连接 MyChat 的真实数据。")
-                    )
-                }
-            }
-            .background(AppPalette.background)
-            .navigationTitle(destination.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
-                        .foregroundStyle(AppPalette.text)
                 }
             }
         }
     }
 }
 
-private func lightHaptic() {
+private struct CameraPicker: UIViewControllerRepresentable {
+    let completion: (UIImage) -> Void
+    let cancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(completion: completion, cancel: cancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let controller = UIImagePickerController()
+        controller.delegate = context.coordinator
+        controller.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera)
+            ? .camera
+            : .photoLibrary
+        controller.cameraCaptureMode = .photo
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let completion: (UIImage) -> Void
+        let cancel: () -> Void
+
+        init(completion: @escaping (UIImage) -> Void, cancel: @escaping () -> Void) {
+            self.completion = completion
+            self.cancel = cancel
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            guard let image = info[.originalImage] as? UIImage else {
+                cancel()
+                return
+            }
+            completion(image)
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            cancel()
+        }
+    }
+}
+
+func lightHaptic() {
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
 }

@@ -70,16 +70,56 @@ struct RichAssistantContent: View {
 
 struct NativeThinkingIndicator: View {
     var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 16, weight: .semibold))
-                .symbolEffect(.variableColor.iterative, options: .repeating)
-            Text("思考中")
-                .font(.system(size: 15, weight: .medium))
+        HStack(spacing: 8) {
+            ThreeBodyLoader()
+                .frame(width: 20, height: 20)
+            Text("Thinking")
+                .font(.system(size: 16))
+                .foregroundStyle(AppPalette.secondaryText)
         }
-        .foregroundStyle(.secondary)
+        .frame(minHeight: 24)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("模型正在思考")
+    }
+}
+
+private struct ThreeBodyLoader: View {
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+            Canvas { context, size in
+                let t = timeline.date.timeIntervalSinceReferenceDate
+                let center = CGPoint(x: size.width / 2, y: size.height / 2)
+                let spin = t / 2 * .pi * 2
+                let radius = min(size.width, size.height) * 0.27
+                let dotRadius = min(size.width, size.height) * 0.145
+
+                for index in 0..<3 {
+                    let baseAngle = (-CGFloat.pi / 2) + CGFloat(index) * (.pi * 2 / 3)
+                    let wobblePhase = t / 0.8 * .pi * 2 - Double(index) * 0.95
+                    let wobble = CGFloat((sin(wobblePhase) + 1) / 2)
+                    let scale = 1 - 0.35 * wobble
+                    let direction: CGFloat = index == 2 ? 1 : -1
+                    let travel = direction * radius * 0.24 * wobble
+                    let angle = baseAngle + CGFloat(spin)
+                    let point = CGPoint(
+                        x: center.x + cos(angle) * (radius + travel),
+                        y: center.y + sin(angle) * (radius + travel)
+                    )
+                    let r = dotRadius * scale
+                    context.fill(
+                        Path(ellipseIn: CGRect(
+                            x: point.x - r,
+                            y: point.y - r,
+                            width: r * 2,
+                            height: r * 2
+                        )),
+                        with: .color(
+                            AppPalette.thinking.opacity(0.8 + 0.2 * Double(1 - wobble))
+                        )
+                    )
+                }
+            }
+        }
     }
 }
 

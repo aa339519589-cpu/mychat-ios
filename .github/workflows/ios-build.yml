@@ -1,0 +1,24 @@
+name: iOS build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify UI contracts
+        run: scripts/verify-ui-contract.sh
+      - name: Build iPhone app
+        run: |
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build

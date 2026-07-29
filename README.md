@@ -23,6 +23,18 @@ deployments are independent from `aa339519589-cpu/mychat`.
   `WKWebView` is used only for sandboxed rich response rendering such as
   Markdown, formulas, SVG, Mermaid, Vega, and artifacts.
 
+## Native UI contract
+
+- The app uses a continuous, content-first editorial layout in light and dark
+  appearances.
+- The composer shell is restored from commit `4c0dd66`; attachment and speech
+  states extend that shell without replacing its dimensions or keyboard inset.
+- Settings use a navigation hierarchy for account, memory, models, system
+  prompt, and usage.
+- `scripts/verify-ui-contract.sh` guards the composer geometry, Thinking
+  indicator, settings order, project sources, and removal of the retired
+  deep-network mode.
+
 ## Repeatable device deployment
 
 With the developer iPhone connected and unlocked:
