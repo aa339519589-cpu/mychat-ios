@@ -2,13 +2,13 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-project_path="$repo_root/ios/MyChatIOS/MyChatIOS.xcodeproj"
+project_path="$repo_root/MyChatIOS.xcodeproj"
 build_path="$repo_root/.device-build-native"
 device_id="${MYCHAT_DEVICE_ID:-DEE9D44F-8BF7-5740-BC78-3CA4437F3FE8}"
 app_path="$build_path/Build/Products/Debug-iphoneos/MyChatIOS.app"
 
 branch="$(git -C "$repo_root" branch --show-current)"
-if [[ "$branch" != "codex/native-ios-client" ]]; then
+if [[ "$branch" != "main" ]]; then
   print -u2 "Refusing device deployment from branch: $branch"
   exit 2
 fi
