@@ -8,7 +8,6 @@ device_id="${MYCHAT_DEVICE_ID:-DEE9D44F-8BF7-5740-BC78-3CA4437F3FE8}"
 fresh_install="${MYCHAT_FRESH_INSTALL:-0}"
 app_path="$build_path/Build/Products/Debug-iphoneos/MyChatIOS.app"
 binary_path="$app_path/MyChatIOS"
-source_path="MyChatIOS/APIClient.swift"
 
 branch="$(git -C "$repo_root" branch --show-current)"
 if [[ "$branch" != "main" ]]; then
@@ -21,8 +20,6 @@ if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
   exit 3
 fi
 
-# Always deploy the current remote main. A stale local checkout must never be
-# allowed to overwrite the phone with an older UI.
 git -C "$repo_root" fetch --prune origin main
 git -C "$repo_root" merge --ff-only origin/main
 
@@ -33,19 +30,7 @@ if [[ "$head_sha" != "$origin_sha" ]]; then
   exit 4
 fi
 
-# The production job can finish while an SSE heartbeat keeps the iPhone stream
-# open. Patch the build source so authoritative job polling races SSE and always
-# restores the completed result. Restore the checkout after installation.
-restore_source() {
-  git -C "$repo_root" restore --worktree -- "$source_path" >/dev/null 2>&1 || true
-}
-trap restore_source EXIT
-python3 "$repo_root/scripts/patch-authoritative-job-recovery.py" "$repo_root/$source_path"
-
 "$repo_root/scripts/verify-ui-contract.sh"
-
-# Never reuse an older DerivedData product. Build number follows the exact
-# source revision so iOS receives a genuinely newer package.
 rm -rf "$build_path"
 build_number="$(git -C "$repo_root" rev-list --count "$head_sha")"
 
@@ -63,8 +48,6 @@ if [[ ! -d "$app_path" || ! -f "$binary_path" ]]; then
   exit 5
 fi
 
-# These strings belong only to the retired sidebar. Stop before installation
-# if an old product somehow survived the clean build.
 if strings "$binary_path" | grep -Eq '个人空间|当前对话'; then
   print -u2 "Retired sidebar content detected in the compiled app; installation blocked."
   exit 6
