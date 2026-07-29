@@ -1,3 +1,9 @@
+// Production API used by the native client.
 // In .xcconfig files, `//` begins a comment. The empty variable expansion
 // preserves the two URL slashes in the final Info.plist value.
 MYCHAT_API_BASE_URL = https:/$()/mychat-nm6x.onrender.com
+
+// Public Supabase bootstrap values are embedded so login and session restoration
+// do not depend on the Render bootstrap route being reachable first.
+MYCHAT_SUPABASE_URL = https:/$()/usibkqqksgwgvdiqwpyo.supabase.co
+MYCHAT_SUPABASE_ANON_KEY = sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
