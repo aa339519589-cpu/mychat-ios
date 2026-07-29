@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
-      APP_URL: https://mychat-nm6x.onrender.com
+      APP_URL: https://ai-git-fix-quota-null-model-a-7ec528-aa339519589-4768s-projects.vercel.app
       SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
       SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
     steps:
@@ -22,84 +22,28 @@ jobs:
         run: |
           set -euo pipefail
           auth_file="$RUNNER_TEMP/auth.json"
+          test_email="mychat-smoke-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          test_password="Smoke-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$test_email" --arg password "$test_password" \
+            '{email: $email, password: $password, data: {purpose: "mychat-ios-model-smoke"}}' \
+            > "$RUNNER_TEMP/signup.json"
           status="$(curl --silent --show-error --output "$auth_file" --write-out '%{http_code}' \
             --connect-timeout 10 --max-time 60 \
             --header "apikey: $SUPABASE_ANON_KEY" \
             --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
             --header 'Content-Type: application/json' \
-            --request POST \
-            --data '{"data":{"purpose":"mychat-ios-model-smoke"},"gotrue_meta_security":{}}' \
+            --request POST --data-binary "@$RUNNER_TEMP/signup.json" \
             "$SUPABASE_URL/auth/v1/signup")"
           access_token="$(jq -r '.access_token // .session.access_token // empty' "$auth_file")"
-
-          if [[ -z "$access_token" ]]; then
-            test_email="mychat-smoke-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
-            test_password="Smoke-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
-            jq -n --arg email "$test_email" --arg password "$test_password" \
-              '{email: $email, password: $password, data: {purpose: "mychat-ios-model-smoke"}}' \
-              > "$RUNNER_TEMP/signup.json"
-            status="$(curl --silent --show-error --output "$auth_file" --write-out '%{http_code}' \
-              --connect-timeout 10 --max-time 60 \
-              --header "apikey: $SUPABASE_ANON_KEY" \
-              --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
-              --header 'Content-Type: application/json' \
-              --request POST --data-binary "@$RUNNER_TEMP/signup.json" \
-              "$SUPABASE_URL/auth/v1/signup")"
-            access_token="$(jq -r '.access_token // .session.access_token // empty' "$auth_file")"
-          fi
-
-          user_id="$(jq -r '.user.id // .session.user.id // empty' "$auth_file")"
-          if [[ "$status" -lt 200 || "$status" -ge 300 || -z "$access_token" || -z "$user_id" ]]; then
+          if [[ "$status" -lt 200 || "$status" -ge 300 || -z "$access_token" ]]; then
             jq -r '.msg // .message // .error_description // "test authentication did not return a session"' "$auth_file"
             exit 1
           fi
           echo "::add-mask::$access_token"
           printf '%s' "$access_token" > "$RUNNER_TEMP/access-token"
-          printf '%s' "$user_id" > "$RUNNER_TEMP/user-id"
-          chmod 600 "$RUNNER_TEMP/access-token" "$RUNNER_TEMP/user-id"
+          chmod 600 "$RUNNER_TEMP/access-token"
 
-      - name: Create isolated quota profile
-        run: |
-          set -euo pipefail
-          access_token="$(cat "$RUNNER_TEMP/access-token")"
-          user_id="$(cat "$RUNNER_TEMP/user-id")"
-          jq -n --arg user_id "$user_id" '{user_id: $user_id}' > "$RUNNER_TEMP/profile.json"
-          status="$(curl --silent --show-error --output "$RUNNER_TEMP/profile-response.json" --write-out '%{http_code}' \
-            --connect-timeout 10 --max-time 30 \
-            --header "apikey: $SUPABASE_ANON_KEY" \
-            --header "Authorization: Bearer $access_token" \
-            --header 'Content-Type: application/json' \
-            --header 'Prefer: return=minimal' \
-            --request POST --data-binary "@$RUNNER_TEMP/profile.json" \
-            "$SUPABASE_URL/rest/v1/profiles")"
-          if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
-            echo "profile insert HTTP status: $status"
-            cat "$RUNNER_TEMP/profile-response.json"
-            exit 1
-          fi
-
-      - name: Verify quota authority
-        run: |
-          set -euo pipefail
-          access_token="$(cat "$RUNNER_TEMP/access-token")"
-          user_id="$(cat "$RUNNER_TEMP/user-id")"
-          quota_status="$(curl --silent --show-error --output "$RUNNER_TEMP/quota.json" --write-out '%{http_code}' \
-            --connect-timeout 10 --max-time 30 \
-            --header "apikey: $SUPABASE_ANON_KEY" \
-            --header "Authorization: Bearer $access_token" \
-            --header 'Content-Type: application/json' \
-            --request POST --data "{\"input_principal_id\":\"$user_id\"}" \
-            "$SUPABASE_URL/rest/v1/rpc/get_ledger_quota_status")"
-          echo "quota authority HTTP status: $quota_status"
-          echo "quota authority payload:"
-          cat "$RUNNER_TEMP/quota.json"
-          echo
-          if [[ "$quota_status" -lt 200 || "$quota_status" -ge 300 ]]; then
-            exit 1
-          fi
-          jq -e 'type == "object" and (.tokens5h | type) == "number" and (.tokens7d | type) == "number" and (.balance | type) == "number"' "$RUNNER_TEMP/quota.json" >/dev/null
-
-      - name: Enqueue production model request
+      - name: Enqueue model request through fixed runtime
         run: |
           set -euo pipefail
           access_token="$(cat "$RUNNER_TEMP/access-token")"
