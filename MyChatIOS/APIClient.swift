@@ -40,6 +40,8 @@ actor APIClient {
     private let baseURL: URL
     private let decoder: JSONDecoder
     private let encoder = JSONEncoder()
+    private let primarySession: URLSession
+    private let tls12Session: URLSession
     private var bootstrap: MobileBootstrap?
     private var session: AuthSession?
 
@@ -59,6 +61,25 @@ actor APIClient {
                 debugDescription: "Invalid ISO-8601 date"
             )
         }
+
+        let primary = URLSessionConfiguration.ephemeral
+        primary.waitsForConnectivity = true
+        primary.timeoutIntervalForRequest = 60
+        primary.timeoutIntervalForResource = 20 * 60
+        primary.requestCachePolicy = .reloadIgnoringLocalCacheData
+        primary.urlCache = nil
+        primary.tlsMinimumSupportedProtocolVersion = .TLSv12
+        self.primarySession = URLSession(configuration: primary)
+
+        let compatibility = URLSessionConfiguration.ephemeral
+        compatibility.waitsForConnectivity = true
+        compatibility.timeoutIntervalForRequest = 60
+        compatibility.timeoutIntervalForResource = 20 * 60
+        compatibility.requestCachePolicy = .reloadIgnoringLocalCacheData
+        compatibility.urlCache = nil
+        compatibility.tlsMinimumSupportedProtocolVersion = .TLSv12
+        compatibility.tlsMaximumSupportedProtocolVersion = .TLSv12
+        self.tls12Session = URLSession(configuration: compatibility)
     }
 
     func restoreSession() async -> Bool {
@@ -66,17 +87,24 @@ actor APIClient {
         do {
             let config = try await loadBootstrap()
             var request = URLRequest(url: config.supabaseUrl.appending(path: "auth/v1/user"))
+            request.timeoutInterval = 20
             request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
             request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return false }
+            let (_, http) = try await data(for: request)
+            if 200..<300 ~= http.statusCode { return true }
             if http.statusCode == 401 {
-                _ = try await refreshSession()
-                return true
+                do {
+                    _ = try await refreshSession()
+                    return true
+                } catch {
+                    if shouldPreserveSession(after: error) { return true }
+                    signOut()
+                    return false
+                }
             }
-            return 200..<300 ~= http.statusCode
+            return http.statusCode >= 500
         } catch {
-            return false
+            return shouldPreserveSession(after: error)
         }
     }
 
@@ -89,10 +117,16 @@ actor APIClient {
         components.queryItems = [URLQueryItem(name: "grant_type", value: "password")]
         var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
+        request.timeoutInterval = 30
         request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try encoder.encode(["email": email, "password": password])
-        try saveSession(try await send(request))
+        do {
+            try saveSession(try await send(request))
+        } catch {
+            throw localizedNetworkError(error, host: config.supabaseUrl.host)
+        }
     }
 
     func signOut() {
@@ -413,8 +447,6 @@ actor APIClient {
                     "role": message.role,
                     "content": message.content,
                 ]
-                // The authoritative timestamp for the newly submitted user turn
-                // stays server-owned. Historical timestamps are context only.
                 if message.id != userMessageID, let createdAt = message.createdAt {
                     value["ts"] = ISO8601DateFormatter().string(from: createdAt)
                 }
@@ -450,8 +482,6 @@ actor APIClient {
             body["endpointId"] = id.uuidString
         }
 
-        // One command, one set of durable IDs, one byte-identical body. A retry
-        // can never create a second turn for the same tap.
         let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         var retryAttempt = 0
 
@@ -463,15 +493,11 @@ actor APIClient {
                 throw CancellationError()
             } catch {
                 if Task.isCancelled { throw CancellationError() }
-
-                // The POST may have reached the server even when its acknowledgement
-                // was lost. Read the durable job before deciding to send again.
                 if let accepted = try? await reconcileEnqueue(generationID: generationID) {
                     return accepted
                 }
-
                 guard let delay = enqueueRetryDelay(for: error, attempt: retryAttempt) else {
-                    throw error
+                    throw localizedNetworkError(error, host: baseURL.host)
                 }
                 retryAttempt += 1
                 try await Task.sleep(nanoseconds: delay)
@@ -493,35 +519,22 @@ actor APIClient {
     }
 
     private func reconcileEnqueue(generationID: UUID) async throws -> ChatEnqueueResponse? {
-        var request = URLRequest(
-            url: baseURL.appending(path: "api/v1/jobs/\(generationID.uuidString)")
-        )
+        var request = URLRequest(url: jobURL(generationID))
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw APIError.message("作业状态响应无效")
-        }
+        let (data, http) = try await self.data(for: request)
         if http.statusCode == 404 { return nil }
         guard 200..<300 ~= http.statusCode else {
             throw responseError(data, response: http)
         }
-        guard
-            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let job = root["job"] as? [String: Any],
-            let id = job["id"] as? String,
-            id.caseInsensitiveCompare(generationID.uuidString) == .orderedSame,
-            let status = job["status"] as? String
-        else {
-            throw APIError.message("作业状态格式无法识别")
-        }
+        let snapshot = try parseJobSnapshot(data, expectedID: generationID)
         return ChatEnqueueResponse(
             jobId: generationID,
             streamUrl: "/api/v1/jobs/\(generationID.uuidString)/events?from_seq=0",
-            status: status
+            status: snapshot.status
         )
     }
 
@@ -545,7 +558,7 @@ actor APIClient {
                     try await consumeEvents(accepted, continuation: continuation)
                     continuation.finish()
                 } catch {
-                    continuation.finish(throwing: error)
+                    continuation.finish(throwing: localizedNetworkError(error, host: baseURL.host))
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -558,6 +571,7 @@ actor APIClient {
     ) async throws {
         var sequence = 0
         var retryNanoseconds: UInt64 = 250_000_000
+        var connectionFailures = 0
         let deadline = Date().addingTimeInterval(20 * 60)
 
         while !Task.isCancelled && Date() < deadline {
@@ -568,14 +582,37 @@ actor APIClient {
                     continuation: continuation
                 )
                 if terminal { return }
+                connectionFailures = 0
                 retryNanoseconds = 250_000_000
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as APIError {
                 if !error.isRetryable { throw error }
+                connectionFailures += 1
                 if Date() >= deadline { throw error }
+                if connectionFailures >= 2 {
+                    let terminal = try await pollJobUntilTerminal(
+                        accepted.jobId,
+                        sequence: &sequence,
+                        deadline: deadline,
+                        continuation: continuation
+                    )
+                    if terminal { return }
+                    connectionFailures = 0
+                }
             } catch {
+                connectionFailures += 1
                 if Date() >= deadline { throw error }
+                if connectionFailures >= 2 || isTLSFailure(error) {
+                    let terminal = try await pollJobUntilTerminal(
+                        accepted.jobId,
+                        sequence: &sequence,
+                        deadline: deadline,
+                        continuation: continuation
+                    )
+                    if terminal { return }
+                    connectionFailures = 0
+                }
             }
             try await Task.sleep(nanoseconds: retryNanoseconds)
             retryNanoseconds = min(5_000_000_000, retryNanoseconds * 2)
@@ -599,12 +636,14 @@ actor APIClient {
         guard let url = components.url else { throw APIError.message("流式地址无效") }
 
         var request = URLRequest(url: url)
+        request.timeoutInterval = 120
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         if sequence > 0 { request.setValue(String(sequence), forHTTPHeaderField: "Last-Event-ID") }
 
         for attempt in 0...1 {
-            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            let (bytes, response) = try await streamBytes(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw APIError.message("流式响应无效")
             }
@@ -643,7 +682,7 @@ actor APIClient {
                     guard event.seq > sequence else { continue }
                     if event.seq != sequence + 1 {
                         throw APIError.response(
-                            message: "回复事件出现缺口，正在重连",
+                            message: "回复事件出现缺口，正在恢复",
                             statusCode: 409,
                             code: "event_sequence_gap",
                             retryable: true,
@@ -670,6 +709,105 @@ actor APIClient {
         throw APIError.message("登录状态已过期")
     }
 
+    private func pollJobUntilTerminal(
+        _ jobID: UUID,
+        sequence: inout Int,
+        deadline: Date,
+        continuation: AsyncThrowingStream<JobEvent, Error>.Continuation
+    ) async throws -> Bool {
+        var delay: UInt64 = 500_000_000
+        var lastError: Error?
+
+        while !Task.isCancelled && Date() < deadline {
+            do {
+                let snapshot = try await readJobSnapshot(jobID)
+                lastError = nil
+                if snapshot.isTerminal {
+                    sequence = max(sequence + 1, snapshot.eventSequence + 1)
+                    continuation.yield(snapshot.terminalEvent(sequence: sequence))
+                    return true
+                }
+                delay = 500_000_000
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if !shouldRetryJobRead(error) { throw error }
+                delay = min(5_000_000_000, delay * 2)
+            }
+            try await Task.sleep(nanoseconds: delay)
+        }
+
+        if let lastError { throw lastError }
+        return false
+    }
+
+    private struct JobSnapshot {
+        let id: UUID
+        let status: String
+        let result: JSONValue?
+        let errorCode: String?
+        let eventSequence: Int
+
+        var isTerminal: Bool {
+            status == "completed" || status == "failed" || status == "cancelled"
+        }
+
+        func terminalEvent(sequence: Int) -> JobEvent {
+            var payload: [String: JSONValue] = ["status": .string(status)]
+            if let result { payload["result"] = result }
+            if status != "completed" {
+                payload["error"] = .string(errorCode ?? "生成未完成")
+            }
+            return JobEvent(jobId: id, seq: sequence, kind: "job.terminal", payload: payload)
+        }
+    }
+
+    private func readJobSnapshot(_ jobID: UUID) async throws -> JobSnapshot {
+        var request = URLRequest(url: jobURL(jobID))
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        let (data, http) = try await self.data(for: request)
+        guard 200..<300 ~= http.statusCode else {
+            throw responseError(data, response: http)
+        }
+        return try parseJobSnapshot(data, expectedID: jobID)
+    }
+
+    private func parseJobSnapshot(_ data: Data, expectedID: UUID) throws -> JobSnapshot {
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let job = root["job"] as? [String: Any],
+              let rawID = job["id"] as? String,
+              let id = UUID(uuidString: rawID),
+              id == expectedID,
+              let status = job["status"] as? String else {
+            throw APIError.message("作业状态格式无法识别")
+        }
+
+        let eventSequence = (job["eventSequence"] as? NSNumber)?.intValue
+            ?? (job["event_sequence"] as? NSNumber)?.intValue
+            ?? 0
+        let errorCode = job["errorCode"] as? String ?? job["error_code"] as? String
+        var result: JSONValue?
+        if let rawResult = job["result"], !(rawResult is NSNull) {
+            let resultData = try JSONSerialization.data(withJSONObject: rawResult, options: [.fragmentsAllowed])
+            result = try decoder.decode(JSONValue.self, from: resultData)
+        }
+        return JobSnapshot(
+            id: id,
+            status: status,
+            result: result,
+            errorCode: errorCode,
+            eventSequence: eventSequence
+        )
+    }
+
+    private func jobURL(_ jobID: UUID) -> URL {
+        baseURL.appending(path: "api/v1/jobs/\(jobID.uuidString)")
+    }
+
     private func decodeEvent(_ lines: [String]) throws -> JobEvent? {
         guard !lines.isEmpty else { return nil }
         let raw = lines.joined(separator: "\n")
@@ -679,7 +817,12 @@ actor APIClient {
 
     private func loadBootstrap() async throws -> MobileBootstrap {
         if let bootstrap { return bootstrap }
-        let request = URLRequest(url: baseURL.appending(path: "api/mobile/config"))
+        if let embedded = AppConfig.embeddedBootstrap {
+            bootstrap = embedded
+            return embedded
+        }
+        var request = URLRequest(url: baseURL.appending(path: "api/mobile/config"))
+        request.timeoutInterval = 20
         let value: MobileBootstrap = try await send(request)
         bootstrap = value
         return value
@@ -703,8 +846,10 @@ actor APIClient {
         components.queryItems = [URLQueryItem(name: "grant_type", value: "refresh_token")]
         var request = URLRequest(url: components.url!)
         request.httpMethod = "POST"
+        request.timeoutInterval = 30
         request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try encoder.encode(["refresh_token": current.refreshToken])
         let refreshed: AuthSession = try await send(request)
         try saveSession(refreshed)
@@ -732,14 +877,17 @@ actor APIClient {
 
     private func authorizedRequest(_ url: URL, config: MobileBootstrap) async throws -> URLRequest {
         var request = URLRequest(url: url)
+        request.timeoutInterval = 30
         request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
 
     private func appRequest(path: String, method: String) async throws -> URLRequest {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = method
+        request.timeoutInterval = 60
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
         return request
     }
@@ -804,17 +952,93 @@ actor APIClient {
             let seconds = min(60, max(0.5, apiError.retryAfter ?? fallback))
             return UInt64(seconds * 1_000_000_000)
         }
-        if let urlError = error as? URLError {
+        if let urlError = urlError(from: error) {
             switch urlError.code {
             case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
                  .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable,
-                 .internationalRoamingOff, .dataNotAllowed:
+                 .internationalRoamingOff, .dataNotAllowed, .secureConnectionFailed:
                 return UInt64(fallback * 1_000_000_000)
             default:
                 return nil
             }
         }
         return nil
+    }
+
+    private func shouldRetryJobRead(_ error: Error) -> Bool {
+        if let apiError = error as? APIError { return apiError.isRetryable }
+        guard let urlError = urlError(from: error) else { return false }
+        switch urlError.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable,
+             .secureConnectionFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func shouldPreserveSession(after error: Error) -> Bool {
+        if let apiError = error as? APIError { return apiError.isRetryable }
+        return urlError(from: error) != nil
+    }
+
+    private func localizedNetworkError(_ error: Error, host: String?) -> Error {
+        guard let urlError = urlError(from: error) else { return error }
+        let target = host.map { "（\($0)）" } ?? ""
+        switch urlError.code {
+        case .secureConnectionFailed, .serverCertificateHasBadDate,
+             .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid:
+            return APIError.message("安全连接失败\(target)，已自动尝试兼容连接，请重试")
+        case .cannotFindHost, .dnsLookupFailed:
+            return APIError.message("无法解析服务器地址\(target)")
+        case .notConnectedToInternet:
+            return APIError.message("当前网络不可用")
+        case .timedOut:
+            return APIError.message("连接服务器超时\(target)")
+        default:
+            return error
+        }
+    }
+
+    private func isTLSFailure(_ error: Error) -> Bool {
+        guard let code = urlError(from: error)?.code else { return false }
+        switch code {
+        case .secureConnectionFailed, .serverCertificateHasBadDate,
+             .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid, .clientCertificateRejected,
+             .clientCertificateRequired:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func urlError(from error: Error) -> URLError? {
+        if let value = error as? URLError { return value }
+        let value = error as NSError
+        guard value.domain == NSURLErrorDomain else { return nil }
+        let code = URLError.Code(rawValue: value.code)
+        return URLError(code, userInfo: value.userInfo)
+    }
+
+    private func dataWithTLSFallback(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await primarySession.data(for: request)
+        } catch {
+            guard isTLSFailure(error) else { throw error }
+            return try await tls12Session.data(for: request)
+        }
+    }
+
+    private func streamBytes(for request: URLRequest) async throws -> (URLSession.AsyncBytes, URLResponse) {
+        do {
+            return try await primarySession.bytes(for: request)
+        } catch {
+            guard isTLSFailure(error) else { throw error }
+            return try await tls12Session.bytes(for: request)
+        }
     }
 
     private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
@@ -840,7 +1064,7 @@ actor APIClient {
         for request: URLRequest,
         allowTokenRefresh: Bool = true
     ) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await dataWithTLSFallback(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw APIError.message("网络响应无效")
         }
