@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 25
     env:
       APP_URL: https://mychat-nm6x.onrender.com
-      EXPECTED_REVISION: 4425d1c68284
+      EXPECTED_REVISION: d324773bef25
       SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
       SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
     steps:
