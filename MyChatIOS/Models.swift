@@ -185,50 +185,6 @@ struct QuotaSnapshot: Equatable {
 
 struct ChatEnqueueResponse: Decodable {
     let jobId: UUID
-    let streamUrl: String
+    let assistantMessageId: UUID
     let status: String
-}
-
-struct JobEvent: Decodable {
-    let jobId: UUID
-    let seq: Int
-    let kind: String
-    let payload: [String: JSONValue]
-}
-
-enum JSONValue: Decodable {
-    case string(String)
-    case number(Double)
-    case bool(Bool)
-    case object([String: JSONValue])
-    case array([JSONValue])
-    case null
-
-    init(from decoder: Decoder) throws {
-        let box = try decoder.singleValueContainer()
-        if box.decodeNil() { self = .null }
-        else if let value = try? box.decode(String.self) { self = .string(value) }
-        else if let value = try? box.decode(Bool.self) { self = .bool(value) }
-        else if let value = try? box.decode(Double.self) { self = .number(value) }
-        else if let value = try? box.decode([String: JSONValue].self) { self = .object(value) }
-        else { self = .array(try box.decode([JSONValue].self)) }
-    }
-
-    var string: String? {
-        if case let .string(value) = self { return value }
-        return nil
-    }
-
-    var object: [String: JSONValue]? {
-        if case let .object(value) = self { return value }
-        return nil
-    }
-
-    var message: String? {
-        if let string { return string }
-        guard let object else { return nil }
-        return object["message"]?.string
-            ?? object["error"]?.message
-            ?? object["detail"]?.string
-    }
 }

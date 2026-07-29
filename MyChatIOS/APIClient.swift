@@ -75,9 +75,13 @@ actor APIClient {
             request.setValue(config.supabaseAnonKey, forHTTPHeaderField: "apikey")
             request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
             let (_, response) = try await data(for: request)
-            if 200..<300 ~= response.statusCode { return true }
+            if 200..<300 ~= response.statusCode {
+                await runNativeReplyProbeIfRequested()
+                return true
+            }
             if response.statusCode == 401 {
                 _ = try await refreshSession()
+                await runNativeReplyProbeIfRequested()
                 return true
             }
             return false
@@ -396,31 +400,31 @@ actor APIClient {
         assistantMessageID: UUID,
         generationID: UUID
     ) async throws -> ChatEnqueueResponse {
-        let userMessage = ChatMessage(
-            id: userMessageID,
-            role: "user",
-            content: text,
-            createdAt: Date()
-        )
         let titleSeed = conversationTitle.isEmpty ? text : conversationTitle
         let title = String(titleSeed.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        var requestMessages = history.map { message -> [String: Any] in
+            var value: [String: Any] = [
+                "id": message.id.uuidString.lowercased(),
+                "role": message.role,
+                "content": message.content,
+            ]
+            if let createdAt = message.createdAt {
+                value["ts"] = ISO8601DateFormatter().string(from: createdAt)
+            }
+            return value
+        }
+        requestMessages.append([
+            "id": userMessageID.uuidString.lowercased(),
+            "role": "user",
+            "content": text,
+        ])
 
         var body: [String: Any] = [
-            "conversationId": conversationID.uuidString,
-            "userMessageId": userMessageID.uuidString,
-            "assistantMessageId": assistantMessageID.uuidString,
-            "generationId": generationID.uuidString,
-            "messages": (history + [userMessage]).map { message -> [String: Any] in
-                var value: [String: Any] = [
-                    "id": message.id.uuidString,
-                    "role": message.role,
-                    "content": message.content,
-                ]
-                if let createdAt = message.createdAt {
-                    value["ts"] = ISO8601DateFormatter().string(from: createdAt)
-                }
-                return value
-            },
+            "conversationId": conversationID.uuidString.lowercased(),
+            "userMessageId": userMessageID.uuidString.lowercased(),
+            "assistantMessageId": assistantMessageID.uuidString.lowercased(),
+            "generationId": generationID.uuidString.lowercased(),
+            "messages": requestMessages,
             "turn": [
                 "schemaVersion": 1,
                 "createConversation": createConversation,
@@ -448,7 +452,7 @@ actor APIClient {
         case let .platform(tier):
             body["tier"] = tier
         case let .endpoint(id):
-            body["endpointId"] = id.uuidString
+            body["endpointId"] = id.uuidString.lowercased()
         }
 
         var request = URLRequest(url: baseURL.appending(path: "api/chat"))
@@ -457,57 +461,55 @@ actor APIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.setValue("chat:\(generationID.uuidString)", forHTTPHeaderField: "Idempotency-Key")
+        request.setValue(
+            "chat:\(generationID.uuidString.lowercased())",
+            forHTTPHeaderField: "Idempotency-Key"
+        )
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-        return try await send(request)
-    }
-
-    func eventStream(_ accepted: ChatEnqueueResponse) -> AsyncThrowingStream<JobEvent, Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    let event = try await self.waitForTerminalJob(accepted.jobId)
-                    continuation.yield(event)
-                    continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
+        let accepted: ChatEnqueueResponse = try await send(request)
+        guard accepted.jobId == generationID,
+              accepted.assistantMessageId == assistantMessageID else {
+            throw APIError.message("服务器返回了不匹配的模型任务")
         }
+        return accepted
     }
 
     private struct JobSnapshot {
         let id: UUID
         let status: String
-        let result: JSONValue?
         let errorMessage: String?
     }
 
-    private func waitForTerminalJob(_ jobID: UUID) async throws -> JobEvent {
+    func waitForAssistantReply(
+        _ accepted: ChatEnqueueResponse,
+        conversationID: UUID,
+        assistantMessageID: UUID
+    ) async throws -> ChatMessage {
+        guard accepted.assistantMessageId == assistantMessageID else {
+            throw APIError.message("模型任务与回复消息不匹配")
+        }
+
         let deadline = Date().addingTimeInterval(3 * 60)
         var missingReads = 0
+        var completedWithoutMessageReads = 0
 
         while Date() < deadline {
             try Task.checkCancellation()
-            if let snapshot = try await readJobSnapshot(jobID) {
+            if let snapshot = try await readJobSnapshot(accepted.jobId) {
+                missingReads = 0
                 switch snapshot.status {
                 case "completed":
-                    guard let result = snapshot.result?.object else {
-                        throw APIError.message("模型已完成，但回复结果为空")
+                    if let message = try await readAssistantMessage(
+                        id: assistantMessageID,
+                        conversationID: conversationID
+                    ), !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        return message
                     }
-                    return JobEvent(
-                        jobId: snapshot.id,
-                        seq: 1,
-                        kind: "job.terminal",
-                        payload: [
-                            "status": .string("completed"),
-                            "result": .object(result),
-                        ]
-                    )
+                    completedWithoutMessageReads += 1
+                    if completedWithoutMessageReads >= 10 {
+                        throw APIError.message("模型任务已完成，但持久化回复为空")
+                    }
                 case "failed", "cancelled":
                     throw APIError.message(snapshot.errorMessage ?? "模型回复失败")
                 default:
@@ -523,8 +525,32 @@ actor APIClient {
         throw APIError.message("模型回复超时")
     }
 
+    private func readAssistantMessage(
+        id: UUID,
+        conversationID: UUID
+    ) async throws -> ChatMessage? {
+        let config = try await loadBootstrap()
+        let url = try restURL(config, path: "messages", query: [
+            "select": "id,role,content,thinking,created_at",
+            "id": "eq.\(id.uuidString.lowercased())",
+            "conversation_id": "eq.\(conversationID.uuidString.lowercased())",
+            "role": "eq.assistant",
+            "limit": "1",
+        ])
+        let rows: [ChatMessage] = try await send(
+            try await authorizedRequest(url, config: config)
+        )
+        guard let message = rows.first else { return nil }
+        guard message.id == id, message.role == "assistant" else {
+            throw APIError.message("持久化回复身份不匹配")
+        }
+        return message
+    }
+
     private func readJobSnapshot(_ jobID: UUID) async throws -> JobSnapshot? {
-        var request = URLRequest(url: baseURL.appending(path: "api/v1/jobs/\(jobID.uuidString)"))
+        var request = URLRequest(
+            url: baseURL.appending(path: "api/v1/jobs/\(jobID.uuidString.lowercased())")
+        )
         request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
@@ -545,16 +571,48 @@ actor APIClient {
             throw APIError.message("模型任务状态格式无法识别")
         }
 
-        var result: JSONValue?
-        if let rawResult = job["result"], !(rawResult is NSNull) {
-            let encoded = try JSONSerialization.data(withJSONObject: rawResult, options: [.fragmentsAllowed])
-            result = try decoder.decode(JSONValue.self, from: encoded)
-        }
-
         let errorMessage = (job["error"] as? [String: Any])?["message"] as? String
             ?? job["errorCode"] as? String
             ?? job["error_code"] as? String
-        return JobSnapshot(id: id, status: status, result: result, errorMessage: errorMessage)
+        return JobSnapshot(id: id, status: status, errorMessage: errorMessage)
+    }
+
+    private func runNativeReplyProbeIfRequested() async {
+#if DEBUG
+        guard ProcessInfo.processInfo.environment["NATIVE_REPLY_PROBE"] == "1" else { return }
+        let conversationID = UUID()
+        let userMessageID = UUID()
+        let assistantMessageID = UUID()
+        let generationID = UUID()
+        do {
+            print("[MyChatProbe] starting single-path native reply probe")
+            let accepted = try await enqueue(
+                text: "仅回复：原生链路正常",
+                conversationID: conversationID,
+                history: [],
+                model: ModelChoice.platform[2],
+                options: ChatRequestOptions(),
+                attachments: [],
+                createConversation: true,
+                conversationTitle: "原生链路验收",
+                userMessageID: userMessageID,
+                assistantMessageID: assistantMessageID,
+                generationID: generationID
+            )
+            print("[MyChatProbe] enqueue accepted job=\(accepted.jobId.uuidString.lowercased())")
+            let reply = try await waitForAssistantReply(
+                accepted,
+                conversationID: conversationID,
+                assistantMessageID: assistantMessageID
+            )
+            print(
+                "[MyChatProbe] completed assistant=\(reply.id.uuidString.lowercased()) "
+                    + "content=\(reply.content)"
+            )
+        } catch {
+            print("[MyChatProbe] failed: \(error.localizedDescription)")
+        }
+#endif
     }
 
     // MARK: - Shared transport
