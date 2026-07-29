@@ -1,0 +1,5 @@
+Native iPhone build trigger after production chat recovery deployment.
+
+Server revision: 851251c41e3b057c15cb0384483f98d8b8fc427d
+Required iOS branch: main
+Triggered at: 2026-07-29T21:28:00+08:00
