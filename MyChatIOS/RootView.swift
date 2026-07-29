@@ -1116,20 +1116,13 @@ struct SidebarOverlay: View {
                     .ignoresSafeArea()
                     .onTapGesture(perform: close)
                 VStack(alignment: .leading, spacing: 0) {
-                    HStack(spacing: 11) {
-                        MyChatMark()
+                    HStack {
                         Text("MyChat")
                             .font(.system(size: 20, weight: .semibold))
                         Spacer()
-                        Button(action: close) {
-                            Image(systemName: "sidebar.left")
-                                .font(.system(size: 17, weight: .medium))
-                                .frame(width: 44, height: 44)
-                        }
-                        .accessibilityLabel("收起侧边栏")
                     }
                     .padding(.leading, 18)
-                    .padding(.trailing, 8)
+                    .padding(.trailing, 18)
                     .frame(height: 62)
 
                     VStack(spacing: 0) {
@@ -1214,14 +1207,7 @@ struct SidebarOverlay: View {
                         .padding(.horizontal, 12)
                     }
 
-                    Rectangle()
-                        .fill(AppPalette.border)
-                        .frame(height: 0.5)
-                    HStack(spacing: 10) {
-                        Image(systemName: "person.crop.circle")
-                            .font(.system(size: 22, weight: .regular))
-                        Text("个人空间")
-                            .font(.system(size: 14.5, weight: .medium))
+                    HStack {
                         Spacer()
                         Button {
                             lightHaptic()
@@ -1238,7 +1224,8 @@ struct SidebarOverlay: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(AppPalette.text)
                     .padding(.horizontal, 18)
-                    .padding(.vertical, 9)
+                    .padding(.top, 4)
+                    .padding(.bottom, 12)
                 }
                 .frame(width: min(350, geometry.size.width * 0.86))
                 .background(AppPalette.sidebar)
@@ -1251,16 +1238,6 @@ struct SidebarOverlay: View {
                 )
             }
         }
-    }
-}
-
-private struct MyChatMark: View {
-    var body: some View {
-        Image(systemName: "sparkles")
-            .font(.system(size: 17, weight: .medium))
-            .foregroundStyle(AppPalette.thinking)
-            .frame(width: 24, height: 24)
-            .accessibilityHidden(true)
     }
 }
 

@@ -34,6 +34,7 @@ require_text "$root_view" ".padding(.top, 7)"
 require_text "$root_view" ".padding(.bottom, 8)"
 require_text "$root_view" "VoiceActivityView"
 require_text "$root_view" "title: \"深度研究\""
+require_text "$root_view" "Image(systemName: \"gearshape\")"
 require_text "$thinking_view" "ThreeBodyLoader"
 require_text "$thinking_view" "Text(\"Thinking\")"
 require_text "$settings_view" "SettingsRoute.account"
@@ -47,6 +48,21 @@ require_text "$info_plist" "NSCameraUsageDescription"
 
 if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
+  exit 1
+fi
+
+if regex_search 'MyChatMark|Text\("个人空间"\)|accessibilityLabel\("收起侧边栏"\)' "$root_view"; then
+  echo "Removed sidebar chrome is still referenced"
+  exit 1
+fi
+
+if regex_search '\.sheet\(item: \$editor\)' "$settings_view"; then
+  echo "Model editor still uses a card-like sheet"
+  exit 1
+fi
+
+if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_view"; then
+  echo "Settings pages regressed to card or grouped-form chrome"
   exit 1
 fi
 
