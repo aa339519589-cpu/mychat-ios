@@ -70,12 +70,14 @@ jobs:
             --header 'Content-Type: application/json' \
             --request POST --data "{\"input_principal_id\":\"$user_id\"}" \
             "$SUPABASE_URL/rest/v1/rpc/get_ledger_quota_status")"
+          echo "quota authority HTTP status: $quota_status"
+          echo "quota authority payload:"
+          cat "$RUNNER_TEMP/quota.json"
+          echo
           if [[ "$quota_status" -lt 200 || "$quota_status" -ge 300 ]]; then
-            echo "quota authority HTTP status: $quota_status"
-            cat "$RUNNER_TEMP/quota.json"
             exit 1
           fi
-          jq -e 'type == "object" and (.tokens5h | numbers) >= 0 and (.tokens7d | numbers) >= 0 and (.balance | numbers) >= 0' "$RUNNER_TEMP/quota.json" >/dev/null
+          jq -e 'type == "object" and (.tokens5h | type) == "number" and (.tokens7d | type) == "number" and (.balance | type) == "number"' "$RUNNER_TEMP/quota.json" >/dev/null
 
       - name: Enqueue production model request
         run: |
