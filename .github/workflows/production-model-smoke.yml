@@ -18,7 +18,7 @@ jobs:
       SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
       SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
     steps:
-      - name: Create isolated anonymous session
+      - name: Create isolated test session
         run: |
           set -euo pipefail
           auth_file="$RUNNER_TEMP/auth.json"
@@ -30,12 +30,28 @@ jobs:
             --request POST \
             --data '{"data":{"purpose":"mychat-ios-model-smoke"},"gotrue_meta_security":{}}' \
             "$SUPABASE_URL/auth/v1/signup")"
-          if [[ "$status" -lt 200 || "$status" -ge 300 ]]; then
-            jq -r '.msg // .message // .error_description // "anonymous authentication failed"' "$auth_file"
+          access_token="$(jq -r '.access_token // .session.access_token // empty' "$auth_file")"
+
+          if [[ -z "$access_token" ]]; then
+            test_email="mychat-smoke-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+            test_password="Smoke-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+            jq -n --arg email "$test_email" --arg password "$test_password" \
+              '{email: $email, password: $password, data: {purpose: "mychat-ios-model-smoke"}}' \
+              > "$RUNNER_TEMP/signup.json"
+            status="$(curl --silent --show-error --output "$auth_file" --write-out '%{http_code}' \
+              --connect-timeout 10 --max-time 60 \
+              --header "apikey: $SUPABASE_ANON_KEY" \
+              --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
+              --header 'Content-Type: application/json' \
+              --request POST --data-binary "@$RUNNER_TEMP/signup.json" \
+              "$SUPABASE_URL/auth/v1/signup")"
+            access_token="$(jq -r '.access_token // .session.access_token // empty' "$auth_file")"
+          fi
+
+          if [[ "$status" -lt 200 || "$status" -ge 300 || -z "$access_token" ]]; then
+            jq -r '.msg // .message // .error_description // "test authentication did not return a session"' "$auth_file"
             exit 1
           fi
-          access_token="$(jq -r '.access_token // .session.access_token // empty' "$auth_file")"
-          test -n "$access_token"
           echo "::add-mask::$access_token"
           printf '%s' "$access_token" > "$RUNNER_TEMP/access-token"
           chmod 600 "$RUNNER_TEMP/access-token"
