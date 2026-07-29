@@ -1,6 +1,10 @@
 name: Native iOS Build
 
 on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
   pull_request:
     branches:
       - main
