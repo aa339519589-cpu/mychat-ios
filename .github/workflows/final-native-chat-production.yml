@@ -1,0 +1,166 @@
+name: Final native chat production verification
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/final-native-chat-production.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.head_ref == 'diagnostics/final-native-chat-20260729'
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      APP_URL: https://mychat-nm6x.onrender.com
+      EXPECTED_REVISION: c626abed337b
+      SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
+    steps:
+      - name: Wait for exact backend revision
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 150); do
+            payload="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --header 'Accept: application/json' "$APP_URL/api/ready" || true)"
+            ready="$(jq -r '.ready // false' <<<"$payload" 2>/dev/null || true)"
+            revision="$(jq -r '.revision // empty' <<<"$payload" 2>/dev/null || true)"
+            echo "attempt=$attempt ready=$ready revision=${revision:-missing}"
+            if [[ "$ready" == "true" && "$revision" == "$EXPECTED_REVISION" ]]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'Expected backend revision did not become ready.' >&2
+          exit 1
+
+      - name: Create isolated authenticated session
+        run: |
+          set -euo pipefail
+          email="native-final-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          password="Native-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$email" --arg password "$password" \
+            '{email:$email,password:$password,data:{purpose:"final-native-chat-verification"}}' \
+            > "$RUNNER_TEMP/signup.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/auth.json" --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 60 \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            --header 'Content-Type: application/json' \
+            --request POST --data-binary "@$RUNNER_TEMP/signup.json" \
+            "$SUPABASE_URL/auth/v1/signup")"
+          access_token="$(jq -r '.access_token // .session.access_token // empty' "$RUNNER_TEMP/auth.json")"
+          user_id="$(jq -r '.user.id // .session.user.id // empty' "$RUNNER_TEMP/auth.json")"
+          test "$status" -ge 200 -a "$status" -lt 300
+          test -n "$access_token"
+          test -n "$user_id"
+          echo "::add-mask::$access_token"
+          printf '%s' "$access_token" > "$RUNNER_TEMP/access-token"
+          printf '%s' "$user_id" > "$RUNNER_TEMP/user-id"
+
+      - name: Create quota profile
+        run: |
+          set -euo pipefail
+          access_token="$(cat "$RUNNER_TEMP/access-token")"
+          user_id="$(cat "$RUNNER_TEMP/user-id")"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/profile.json" --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 30 \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $access_token" \
+            --header 'Content-Type: application/json' \
+            --header 'Prefer: return=minimal' \
+            --request POST --data "{\"user_id\":\"$user_id\"}" \
+            "$SUPABASE_URL/rest/v1/profiles")"
+          test "$status" -ge 200 -a "$status" -lt 300
+
+      - name: Enqueue balanced model request
+        run: |
+          set -euo pipefail
+          access_token="$(cat "$RUNNER_TEMP/access-token")"
+          conversation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          user_message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          assistant_message_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          generation_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n \
+            --arg conversationId "$conversation_id" \
+            --arg userMessageId "$user_message_id" \
+            --arg assistantMessageId "$assistant_message_id" \
+            --arg generationId "$generation_id" \
+            '{
+              conversationId:$conversationId,
+              userMessageId:$userMessageId,
+              assistantMessageId:$assistantMessageId,
+              generationId:$generationId,
+              messages:[{id:$userMessageId,role:"user",content:"Reply with exactly NATIVE_PIPELINE_OK"}],
+              tier:"正构",
+              searchMode:"off",
+              historyRetrieval:false,
+              deepResearch:false,
+              turn:{schemaVersion:1,createConversation:true,title:"final native verification",projectId:null}
+            }' > "$RUNNER_TEMP/chat-request.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/chat-response.json" --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 90 \
+            --header "Authorization: Bearer $access_token" \
+            --header 'Accept: application/json' \
+            --header 'Content-Type: application/json' \
+            --header "Idempotency-Key: chat:$generation_id" \
+            --request POST --data-binary "@$RUNNER_TEMP/chat-request.json" \
+            "$APP_URL/api/chat")"
+          test "$status" = "202" -o "$status" = "200"
+          test "$(jq -r '.jobId // empty' "$RUNNER_TEMP/chat-response.json")" = "$generation_id"
+          printf '%s' "$generation_id" > "$RUNNER_TEMP/job-id"
+          printf '%s' "$assistant_message_id" > "$RUNNER_TEMP/assistant-message-id"
+
+      - name: Poll authoritative job and persisted reply
+        run: |
+          set -euo pipefail
+          access_token="$(cat "$RUNNER_TEMP/access-token")"
+          job_id="$(cat "$RUNNER_TEMP/job-id")"
+          assistant_message_id="$(cat "$RUNNER_TEMP/assistant-message-id")"
+          for attempt in $(seq 1 120); do
+            status="$(curl --silent --show-error --output "$RUNNER_TEMP/job.json" --write-out '%{http_code}' \
+              --connect-timeout 10 --max-time 30 \
+              --header "Authorization: Bearer $access_token" \
+              --header 'Accept: application/json' \
+              "$APP_URL/api/v1/jobs/$job_id")"
+            test "$status" = "200"
+            state="$(jq -r '.job.status // empty' "$RUNNER_TEMP/job.json")"
+            echo "attempt=$attempt state=$state"
+            if [[ "$state" == "completed" ]]; then
+              content="$(jq -r '.job.result.content // empty' "$RUNNER_TEMP/job.json")"
+              test -n "$content"
+              curl --fail-with-body --silent --show-error \
+                --connect-timeout 10 --max-time 30 \
+                --header "apikey: $SUPABASE_ANON_KEY" \
+                --header "Authorization: Bearer $access_token" \
+                --header 'Accept: application/json' \
+                "$SUPABASE_URL/rest/v1/messages?select=id,content&id=eq.$assistant_message_id" \
+                > "$RUNNER_TEMP/message.json"
+              jq -e 'length == 1 and (.[0].content | type == "string" and length > 0)' \
+                "$RUNNER_TEMP/message.json" >/dev/null
+              echo "FINAL_NATIVE_CHAT_OK content_length=${#content}"
+              exit 0
+            fi
+            if [[ "$state" == "failed" || "$state" == "cancelled" ]]; then
+              cat "$RUNNER_TEMP/job.json"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo 'Native chat verification timed out.' >&2
+          exit 1
+
+      - name: Clean up isolated conversation
+        if: always()
+        continue-on-error: true
+        run: |
+          test -f "$RUNNER_TEMP/access-token" || exit 0
+          access_token="$(cat "$RUNNER_TEMP/access-token")"
+          curl --silent --show-error --output /dev/null \
+            --connect-timeout 10 --max-time 30 \
+            --header "Authorization: Bearer $access_token" \
+            --request DELETE "$APP_URL/api/conversations" || true
