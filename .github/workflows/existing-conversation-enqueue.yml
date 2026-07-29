@@ -1,0 +1,102 @@
+name: Existing conversation enqueue diagnostic
+
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/existing-conversation-enqueue.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.head_ref == 'diagnostics/existing-conversation-enqueue-20260730'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      APP_URL: https://mychat-nm6x.onrender.com
+      SUPABASE_URL: https://usibkqqksgwgvdiqwpyo.supabase.co
+      SUPABASE_ANON_KEY: sb_publishable_yYWthfTKT4K0vYT-dKPFLQ_gavblOSj
+    steps:
+      - name: Create isolated account
+        run: |
+          set -euo pipefail
+          email="existing-turn-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')@example.invalid"
+          password="Existing-$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')-7aA!"
+          jq -n --arg email "$email" --arg password "$password" '{email:$email,password:$password}' > "$RUNNER_TEMP/signup.json"
+          curl --fail-with-body --silent --show-error \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            --header 'Content-Type: application/json' \
+            --request POST --data-binary "@$RUNNER_TEMP/signup.json" \
+            "$SUPABASE_URL/auth/v1/signup" > "$RUNNER_TEMP/auth.json"
+          token="$(jq -r '.access_token // .session.access_token // empty' "$RUNNER_TEMP/auth.json")"
+          uid="$(jq -r '.user.id // .session.user.id // empty' "$RUNNER_TEMP/auth.json")"
+          test -n "$token"; test -n "$uid"
+          echo "::add-mask::$token"
+          printf '%s' "$token" > "$RUNNER_TEMP/token"
+          printf '%s' "$uid" > "$RUNNER_TEMP/uid"
+          curl --fail-with-body --silent --show-error \
+            --header "apikey: $SUPABASE_ANON_KEY" \
+            --header "Authorization: Bearer $token" \
+            --header 'Content-Type: application/json' \
+            --header 'Prefer: return=minimal' \
+            --request POST --data "{\"user_id\":\"$uid\"}" \
+            "$SUPABASE_URL/rest/v1/profiles" >/dev/null
+
+      - name: Enqueue and complete first turn
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          conversation="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          user1="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          assistant1="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          job1="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n --arg c "$conversation" --arg u "$user1" --arg a "$assistant1" --arg j "$job1" '{conversationId:$c,userMessageId:$u,assistantMessageId:$a,generationId:$j,messages:[{id:$u,role:"user",content:"Reply with exactly FIRST_OK"}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:true,title:"existing conversation diagnostic",projectId:null}}' > "$RUNNER_TEMP/first.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/first-response.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header 'Accept: application/json' \
+            --header "Idempotency-Key: chat:$job1" --request POST --data-binary "@$RUNNER_TEMP/first.json" "$APP_URL/api/chat")"
+          echo "FIRST_ENQUEUE_STATUS=$status"
+          cat "$RUNNER_TEMP/first-response.json"
+          test "$status" = 202 -o "$status" = 200
+          for i in $(seq 1 90); do
+            curl --fail-with-body --silent --show-error --header "Authorization: Bearer $token" "$APP_URL/api/v1/jobs/$job1" > "$RUNNER_TEMP/job1.json"
+            state="$(jq -r '.job.status // empty' "$RUNNER_TEMP/job1.json")"
+            if [[ "$state" == completed ]]; then break; fi
+            if [[ "$state" == failed || "$state" == cancelled ]]; then cat "$RUNNER_TEMP/job1.json"; exit 1; fi
+            sleep 2
+          done
+          jq -e '.job.status == "completed" and (.job.result.content | type == "string" and length > 0)' "$RUNNER_TEMP/job1.json" >/dev/null
+          first_content="$(jq -r '.job.result.content' "$RUNNER_TEMP/job1.json")"
+          printf '%s' "$conversation" > "$RUNNER_TEMP/conversation"
+          printf '%s' "$user1" > "$RUNNER_TEMP/user1"
+          printf '%s' "$assistant1" > "$RUNNER_TEMP/assistant1"
+          printf '%s' "$first_content" > "$RUNNER_TEMP/first-content"
+
+      - name: Enqueue second turn in same conversation
+        run: |
+          set -euo pipefail
+          token="$(cat "$RUNNER_TEMP/token")"
+          conversation="$(cat "$RUNNER_TEMP/conversation")"
+          user1="$(cat "$RUNNER_TEMP/user1")"
+          assistant1="$(cat "$RUNNER_TEMP/assistant1")"
+          first_content="$(cat "$RUNNER_TEMP/first-content")"
+          user2="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          assistant2="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          job2="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+          jq -n --arg c "$conversation" --arg u1 "$user1" --arg a1 "$assistant1" --arg first "$first_content" --arg u2 "$user2" --arg a2 "$assistant2" --arg j2 "$job2" '{conversationId:$c,userMessageId:$u2,assistantMessageId:$a2,generationId:$j2,messages:[{id:$u1,role:"user",content:"Reply with exactly FIRST_OK"},{id:$a1,role:"assistant",content:$first},{id:$u2,role:"user",content:"Reply with exactly SECOND_OK"}],tier:"正构",searchMode:"off",historyRetrieval:false,deepResearch:false,turn:{schemaVersion:1,createConversation:false,title:"existing conversation diagnostic",projectId:null}}' > "$RUNNER_TEMP/second.json"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/second-response.json" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $token" --header 'Content-Type: application/json' --header 'Accept: application/json' \
+            --header "Idempotency-Key: chat:$job2" --request POST --data-binary "@$RUNNER_TEMP/second.json" "$APP_URL/api/chat")"
+          echo "SECOND_ENQUEUE_STATUS=$status"
+          cat "$RUNNER_TEMP/second-response.json"
+          test "$status" = 202 -o "$status" = 200
+          for i in $(seq 1 90); do
+            curl --fail-with-body --silent --show-error --header "Authorization: Bearer $token" "$APP_URL/api/v1/jobs/$job2" > "$RUNNER_TEMP/job2.json"
+            state="$(jq -r '.job.status // empty' "$RUNNER_TEMP/job2.json")"
+            if [[ "$state" == completed ]]; then break; fi
+            if [[ "$state" == failed || "$state" == cancelled ]]; then cat "$RUNNER_TEMP/job2.json"; exit 1; fi
+            sleep 2
+          done
+          jq -e '.job.status == "completed" and (.job.result.content | type == "string" and length > 0)' "$RUNNER_TEMP/job2.json" >/dev/null
+          echo SECOND_TURN_OK
