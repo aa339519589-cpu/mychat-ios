@@ -34,6 +34,10 @@
 	</array>
 	<key>MYCHAT_API_BASE_URL</key>
 	<string>$(MYCHAT_API_BASE_URL)</string>
+	<key>MYCHAT_SUPABASE_URL</key>
+	<string>$(MYCHAT_SUPABASE_URL)</string>
+	<key>MYCHAT_SUPABASE_ANON_KEY</key>
+	<string>$(MYCHAT_SUPABASE_ANON_KEY)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>用于拍摄并添加到当前对话。</string>
 	<key>NSMicrophoneUsageDescription</key>
