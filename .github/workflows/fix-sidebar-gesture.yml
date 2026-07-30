@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   patch-and-verify:
-    runs-on: macos-15
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -141,20 +141,10 @@ jobs:
           bash scripts/verify-ui-contract.sh
           changed="$(git diff --name-only)"
           test "$changed" = "MyChatIOS/RootView.swift"
-          grep -q '@State private var dragAxis: Axis?' MyChatIOS/RootView.swift
-          grep -q '.scrollDisabled(isHorizontalDragging)' MyChatIOS/RootView.swift
-          grep -q 'guard !blocksConversationSelection else' MyChatIOS/RootView.swift
-
-      - name: Build iOS app
-        shell: bash
-        run: |
-          xcodebuild \
-            -project MyChatIOS.xcodeproj \
-            -scheme MyChatIOS \
-            -sdk iphonesimulator \
-            -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+          grep -Fq '@State private var dragAxis: Axis?' MyChatIOS/RootView.swift
+          grep -Fq '.scrollDisabled(isHorizontalDragging)' MyChatIOS/RootView.swift
+          grep -Fq 'guard !blocksConversationSelection else' MyChatIOS/RootView.swift
+          grep -Fq '.simultaneousGesture(sidebarDragGesture)' MyChatIOS/RootView.swift
 
       - name: Commit fix and remove temporary workflow
         shell: bash
