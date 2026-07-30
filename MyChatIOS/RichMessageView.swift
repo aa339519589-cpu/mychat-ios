@@ -359,11 +359,14 @@ private struct RichMessageRepresentable: UIViewRepresentable {
 
         func scheduleRender(_ content: String) {
             pendingContent = content
-            guard ready, content != renderedContent else { return }
-            renderWorkItem?.cancel()
-            let item = DispatchWorkItem { [weak self] in self?.renderPendingContent() }
+            guard ready, content != renderedContent, renderWorkItem == nil else { return }
+            let item = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.renderWorkItem = nil
+                self.renderPendingContent()
+            }
             renderWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03, execute: item)
         }
 
         func scheduleFontSize(_ value: CGFloat) {
