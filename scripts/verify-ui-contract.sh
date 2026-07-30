@@ -14,11 +14,11 @@ renderer_core="$repo_root/MyChatIOS/WebAssets/renderer-core.js"
 
 if command -v rg >/dev/null 2>&1; then
   fixed_search() { rg -Fq "$2" "$1"; }
-  regex_search() { rg -n "$1" "$2"; }
+  regex_search() { rg -n -- "$1" "$2"; }
   match_count() { rg -c "$2" "$1"; }
 else
   fixed_search() { grep -Fq "$2" "$1"; }
-  regex_search() { grep -R -nE "$1" "$2"; }
+  regex_search() { grep -R -nE -- "$1" "$2"; }
   match_count() { grep -c "$2" "$1"; }
 fi
 
@@ -38,14 +38,34 @@ require_text "$root_view" ".padding(.top, 7)"
 require_text "$root_view" ".padding(.bottom, 8)"
 require_text "$root_view" "VoiceActivityView"
 require_text "$root_view" "title: \"深度研究\""
-require_text "$root_view" "Image(systemName: \"gearshape\")"
+require_text "$root_view" "Image(systemName: \"gearshape.fill\")"
+require_text "$root_view" "static let myChatAccent = Color("
+require_text "$root_view" "red: Double(0xD9) / 255.0"
+require_text "$root_view" "green: Double(0x4B) / 255.0"
+require_text "$root_view" "blue: Double(0x4B) / 255.0"
+require_text "$root_view" "static let accent = Color.myChatAccent"
+require_text "$root_view" "static let thinking = accent"
+require_text "$root_view" "Image(systemName: selected ? \"circle.fill\" : \"circle\")"
+require_text "$root_view" ".fill(AppPalette.accent.opacity(0.12))"
+require_text "$root_view" "@State private var sidebarProgress: CGFloat = 0"
+require_text "$root_view" "let drawerWidth = min(176, geometry.size.width * 0.44)"
+require_text "$root_view" ".simultaneousGesture(sidebarGesture(width: drawerWidth))"
+require_text "$root_view" "coordinateSpace: .named(\"nativeChatDrawer\")"
+require_text "$root_view" "private struct SidebarCanvasMotion: AnimatableModifier"
+require_text "$root_view" ".smooth(duration: 0.26, extraBounce: 0)"
+require_text "$root_view" "private struct ChatBottomPreferenceKey: PreferenceKey"
+require_text "$root_view" ".accessibilityLabel(\"回到最新消息\")"
+require_text "$root_view" "guard isNearBottom else { return }"
+require_text "$root_view" "guard store.send("
+require_text "$root_view" "composerFocused = false"
 require_text "$thinking_view" "ThreeBodyLoader"
 require_text "$thinking_view" "Text(\"Thinking\")"
-require_text "$settings_view" "SettingsRoute.account"
-require_text "$settings_view" ".memory"
-require_text "$settings_view" ".models"
-require_text "$settings_view" ".systemPrompt"
-require_text "$settings_view" ".usage"
+require_text "$settings_view" "private enum SettingsRoute: Hashable"
+require_text "$settings_view" "case account"
+require_text "$settings_view" "case memory"
+require_text "$settings_view" "case models"
+require_text "$settings_view" "case systemPrompt"
+require_text "$settings_view" "case usage"
 require_text "$project_file" "SettingsViews.swift in Sources"
 require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
@@ -89,13 +109,23 @@ if regex_search 'MyChatMark|Text\("个人空间"\)|Text\("当前对话"\)|access
   exit 1
 fi
 
+if regex_search 'Text\("你"\)|@GestureState.*sidebar|sidebarVisible|\.disabled\(isSending\)|onChange\(of: messages\.last\?\.content\.count\)' "$root_view"; then
+  echo "Retired message, composer, scroll, or dual-source drawer state is still referenced"
+  exit 1
+fi
+
+if regex_search '-ui-preview' "$root_view" || regex_search '-ui-preview' "$settings_view"; then
+  echo "Temporary native UI preview hooks are still referenced"
+  exit 1
+fi
+
 if regex_search '\.sheet\(item: \$editor\)' "$settings_view"; then
   echo "Model editor still uses a card-like sheet"
   exit 1
 fi
 
-if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_view"; then
-  echo "Settings pages regressed to card or grouped-form chrome"
+if regex_search 'GroupBox|Form\s*\{|Section\s*\{|Divider\(' "$settings_view"; then
+  echo "Settings pages regressed to grouped-form or divider-heavy chrome"
   exit 1
 fi
 

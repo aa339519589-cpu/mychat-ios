@@ -26,6 +26,16 @@ private enum SettingsRoute: Hashable {
         case .usage: return "chart.line.uptrend.xyaxis"
         }
     }
+
+    var detail: String {
+        switch self {
+        case .account: return "登录信息与安全"
+        case .memory: return "管理模型记住的内容"
+        case .models: return "连接与管理 API"
+        case .systemPrompt: return "设定长期回复偏好"
+        case .usage: return "查看额度与兑换"
+        }
+    }
 }
 
 struct SettingsHomeView: View {
@@ -33,31 +43,32 @@ struct SettingsHomeView: View {
     let signOut: () -> Void
     let conversationsDeleted: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var path: [SettingsRoute] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(
-                        [
-                            SettingsRoute.account,
-                            .memory,
-                            .models,
-                            .systemPrompt,
-                            .usage,
-                        ],
-                        id: \.self
-                    ) { route in
-                        NavigationLink(value: route) {
-                            SettingsNavigationRow(route: route)
-                        }
-                        .buttonStyle(.plain)
-                        EditorialDivider()
-                            .padding(.leading, 50)
-                    }
+                VStack(alignment: .leading, spacing: 28) {
+                    Text("管理你的账户、AI 偏好与使用情况。")
+                        .font(.system(size: 15))
+                        .foregroundStyle(AppPalette.secondaryText)
+
+                    SettingsRouteGroup(
+                        title: "个人",
+                        routes: [.account, .memory]
+                    )
+                    SettingsRouteGroup(
+                        title: "AI",
+                        routes: [.models, .systemPrompt]
+                    )
+                    SettingsRouteGroup(
+                        title: "用量",
+                        routes: [.usage]
+                    )
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 8)
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 36)
             }
             .background(AppPalette.background)
             .navigationTitle("设置")
@@ -94,24 +105,58 @@ struct SettingsHomeView: View {
     }
 }
 
+private struct SettingsRouteGroup: View {
+    let title: String
+    let routes: [SettingsRoute]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(AppPalette.secondaryText)
+                .padding(.leading, 3)
+
+            VStack(spacing: 3) {
+                ForEach(routes, id: \.self) { route in
+                    NavigationLink(value: route) {
+                        SettingsNavigationRow(route: route)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(7)
+            .background(AppPalette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+    }
+}
+
 private struct SettingsNavigationRow: View {
     let route: SettingsRoute
 
     var body: some View {
         HStack(spacing: 13) {
             Image(systemName: route.symbol)
-                .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(AppPalette.secondaryText)
-                .frame(width: 20)
-            Text(route.title)
-                .font(.system(size: 17))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(AppPalette.text)
+                .frame(width: 34, height: 34)
+                .background(AppPalette.mutedSurface)
+                .clipShape(Circle())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(route.title)
+                    .font(.system(size: 16.5, weight: .medium))
+                    .foregroundStyle(AppPalette.text)
+                Text(route.detail)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(AppPalette.secondaryText)
+            }
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(AppPalette.secondaryText)
         }
-        .frame(minHeight: 54)
+        .padding(.horizontal, 10)
+        .frame(minHeight: 62)
         .contentShape(Rectangle())
     }
 }
@@ -126,55 +171,81 @@ private struct AccountSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                EditorialLabel("邮箱")
-                    .padding(.top, 20)
-                Text(email.isEmpty ? "加载中…" : email)
-                    .font(.system(size: 17))
-                    .foregroundStyle(email.isEmpty ? AppPalette.secondaryText : AppPalette.text)
-                    .padding(.vertical, 14)
-                EditorialDivider()
-
-                EditorialLabel("修改密码")
-                    .padding(.top, 28)
-                SecureField("输入新密码", text: $password)
-                    .textContentType(.newPassword)
-                    .font(.system(size: 17))
-                    .padding(.vertical, 14)
-                EditorialDivider()
-
-                Button {
-                    updatePassword()
-                } label: {
-                    HStack {
-                        Text(saving ? "保存中…" : "保存密码")
-                        Spacer()
-                        if saving { ProgressView().controlSize(.small) }
+            VStack(alignment: .leading, spacing: 30) {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "登录账户",
+                        caption: "当前用于同步对话与偏好的邮箱"
+                    )
+                    HStack(spacing: 13) {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .frame(width: 38, height: 38)
+                            .background(AppPalette.mutedSurface)
+                            .clipShape(Circle())
+                        Text(email.isEmpty ? "加载中…" : email)
+                            .font(.system(size: 16))
+                            .foregroundStyle(
+                                email.isEmpty
+                                    ? AppPalette.secondaryText
+                                    : AppPalette.text
+                            )
+                            .lineLimit(2)
                     }
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(minHeight: 50)
+                    .padding(15)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppPalette.surface)
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    )
                 }
-                .buttonStyle(.plain)
-                .disabled(password.count < 8 || saving)
-                .opacity(password.count < 8 ? 0.42 : 1)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "修改密码",
+                        caption: "至少 8 个字符，保存后立即生效"
+                    )
+                    SecureField("输入新密码", text: $password)
+                        .textContentType(.newPassword)
+                        .settingsInput()
+
+                    Button {
+                        updatePassword()
+                    } label: {
+                        HStack {
+                            Text(saving ? "保存中…" : "保存密码")
+                            Spacer()
+                            if saving { ProgressView().tint(AppPalette.background) }
+                        }
+                    }
+                    .buttonStyle(SettingsPrimaryButtonStyle())
+                    .disabled(password.count < 8 || saving)
+                    .opacity(password.count < 8 ? 0.42 : 1)
+                }
 
                 if let message {
                     Text(message)
                         .font(.footnote)
                         .foregroundStyle(AppPalette.secondaryText)
-                        .padding(.top, 4)
                 }
 
-                EditorialDivider()
-                    .padding(.top, 30)
-                Button(role: .destructive, action: signOut) {
-                    Text("退出登录")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                VStack(alignment: .leading, spacing: 9) {
+                    SettingsSectionHeading(
+                        title: "会话",
+                        caption: "退出后，本机将不再保留当前登录状态"
+                    )
+                    Button(role: .destructive, action: signOut) {
+                        Label("退出登录", systemImage: "rectangle.portrait.and.arrow.right")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(maxWidth: .infinity, minHeight: 50, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 2)
                 }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 20)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
         }
         .background(AppPalette.background)
         .navigationTitle("账户")
@@ -263,13 +334,13 @@ private struct MemorySettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 28) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 5) {
                         Text("使用记忆")
-                            .font(.system(size: 17))
+                            .font(.system(size: 17, weight: .medium))
                         Text("允许模型在后续对话中使用已保存内容")
-                            .font(.system(size: 12.5))
+                            .font(.system(size: 13))
                             .foregroundStyle(AppPalette.secondaryText)
                     }
                     Spacer()
@@ -279,72 +350,115 @@ private struct MemorySettingsView: View {
                     ))
                     .labelsHidden()
                 }
-                .padding(.vertical, 16)
-                EditorialDivider()
+                .padding(16)
+                .background(AppPalette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
 
-                EditorialLabel("添加记忆")
-                    .padding(.top, 24)
-                HStack(spacing: 12) {
-                    TextField("输入希望模型记住的内容", text: $newMemory, axis: .vertical)
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "添加记忆",
+                        caption: "例如偏好的语言、称呼或长期目标"
+                    )
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField(
+                            "输入希望模型记住的内容",
+                            text: $newMemory,
+                            axis: .vertical
+                        )
                         .lineLimit(1...4)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                    Button("添加") { addMemory() }
-                        .font(.system(size: 15, weight: .medium))
-                        .disabled(newMemory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                EditorialDivider()
+                        .settingsInput()
 
-                EditorialLabel("已记住的内容")
-                    .padding(.top, 28)
-                    .padding(.bottom, 8)
-
-                if store.loading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 30)
-                } else if store.memories.isEmpty {
-                    Text("还没有保存的记忆")
-                        .font(.system(size: 15))
-                        .foregroundStyle(AppPalette.secondaryText)
-                        .padding(.vertical, 24)
-                } else {
-                    ForEach(store.memories) { memory in
-                        memoryRow(memory)
-                        EditorialDivider()
+                        Button("添加") { addMemory() }
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 58, minHeight: 50)
+                            .background(AppPalette.accent)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            )
+                            .disabled(
+                                newMemory
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty
+                            )
+                            .opacity(
+                                newMemory
+                                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                                    .isEmpty ? 0.42 : 1
+                            )
                     }
                 }
 
-                Button(role: .destructive) {
-                    confirmation = .memories
-                } label: {
-                    Text("删除全部记忆")
-                        .font(.system(size: 16))
-                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-                .padding(.top, 26)
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "已记住的内容",
+                        caption: "你可以随时编辑或删除"
+                    )
 
-                EditorialDivider()
-
-                Button(role: .destructive) {
-                    confirmation = .conversations
-                } label: {
-                    Text("删除全部对话")
-                        .font(.system(size: 16))
-                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                    if store.loading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 30)
+                    } else if store.memories.isEmpty {
+                        Text("还没有保存的记忆")
+                            .font(.system(size: 15))
+                            .foregroundStyle(AppPalette.secondaryText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(17)
+                            .background(AppPalette.surface)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            )
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(store.memories) { memory in
+                                memoryRow(memory)
+                                    .padding(.horizontal, 14)
+                                    .background(AppPalette.surface)
+                                    .clipShape(
+                                        RoundedRectangle(
+                                            cornerRadius: 18,
+                                            style: .continuous
+                                        )
+                                    )
+                            }
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    SettingsSectionHeading(
+                        title: "数据管理",
+                        caption: "这些操作不可撤销"
+                    )
+                    Button(role: .destructive) {
+                        confirmation = .memories
+                    } label: {
+                        Label("删除全部记忆", systemImage: "brain.head.profile.fill")
+                            .font(.system(size: 15.5, weight: .medium))
+                            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(role: .destructive) {
+                        confirmation = .conversations
+                    } label: {
+                        Label("删除全部对话", systemImage: "trash")
+                            .font(.system(size: 15.5, weight: .medium))
+                            .frame(maxWidth: .infinity, minHeight: 46, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 if let error = store.error {
                     Text(error)
                         .font(.footnote)
                         .foregroundStyle(.red)
-                        .padding(.top, 8)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
         }
         .background(AppPalette.background)
         .navigationTitle("记忆")
@@ -468,47 +582,71 @@ private struct ModelSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                EditorialLabel("已添加的模型")
-                    .padding(.top, 20)
-                    .padding(.bottom, 8)
+            VStack(alignment: .leading, spacing: 22) {
+                SettingsSectionHeading(
+                    title: "自定义模型",
+                    caption: "添加兼容 OpenAI 接口的 API，聊天时即可切换使用"
+                )
 
                 if loading {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 30)
                 } else if endpoints.isEmpty {
-                    Text("还没有添加模型")
-                        .font(.system(size: 15))
-                        .foregroundStyle(AppPalette.secondaryText)
-                        .padding(.vertical, 22)
+                    VStack(alignment: .leading, spacing: 7) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 20, weight: .medium))
+                        Text("还没有添加模型")
+                            .font(.system(size: 16, weight: .medium))
+                        Text("平台模型仍可正常使用。")
+                            .font(.system(size: 13))
+                            .foregroundStyle(AppPalette.secondaryText)
+                    }
+                    .padding(17)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppPalette.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 } else {
-                    ForEach(endpoints) { endpoint in
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(endpoint.name)
-                                    .font(.system(size: 16, weight: .medium))
-                                Text(endpoint.model)
-                                    .font(.system(size: 12.5))
-                                    .foregroundStyle(AppPalette.secondaryText)
-                                    .lineLimit(1)
+                    VStack(spacing: 10) {
+                        ForEach(endpoints) { endpoint in
+                            HStack(spacing: 12) {
+                                Image(systemName: "cpu")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .frame(width: 36, height: 36)
+                                    .background(AppPalette.mutedSurface)
+                                    .clipShape(Circle())
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(endpoint.name)
+                                        .font(.system(size: 16, weight: .medium))
+                                    Text(endpoint.model)
+                                        .font(.system(size: 12.5))
+                                        .foregroundStyle(AppPalette.secondaryText)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                Menu {
+                                    Button {
+                                        editor = EndpointEditorTarget(endpoint: endpoint)
+                                    } label: {
+                                        Label("编辑", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        delete(endpoint)
+                                    } label: {
+                                        Label("删除", systemImage: "trash")
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis")
+                                        .frame(width: 38, height: 42)
+                                }
+                                .foregroundStyle(AppPalette.secondaryText)
                             }
-                            Spacer()
-                            Button {
-                                editor = EndpointEditorTarget(endpoint: endpoint)
-                            } label: {
-                                Image(systemName: "pencil")
-                                    .frame(width: 36, height: 40)
-                            }
-                            Button(role: .destructive) {
-                                delete(endpoint)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .frame(width: 36, height: 40)
-                            }
+                            .padding(14)
+                            .background(AppPalette.surface)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 19, style: .continuous)
+                            )
                         }
-                        .frame(minHeight: 60)
-                        EditorialDivider()
                     }
                 }
 
@@ -516,21 +654,19 @@ private struct ModelSettingsView: View {
                     editor = EndpointEditorTarget(endpoint: nil)
                 } label: {
                     Label("添加 API", systemImage: "plus")
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
-                .buttonStyle(.plain)
-                .padding(.top, 14)
+                .buttonStyle(SettingsPrimaryButtonStyle())
 
                 if let error {
                     Text(error)
                         .font(.footnote)
                         .foregroundStyle(.red)
-                        .padding(.top, 8)
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.bottom, 30)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
         }
         .background(AppPalette.background)
         .navigationTitle("模型")
@@ -601,21 +737,32 @@ private struct ModelEndpointEditor: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    EditorialLabel("Base URL").padding(.top, 18)
-                    TextField("https://api.example.com/v1", text: $baseURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                    EditorialDivider()
+                VStack(alignment: .leading, spacing: 26) {
+                    VStack(alignment: .leading, spacing: 11) {
+                        SettingsSectionHeading(
+                            title: "连接地址",
+                            caption: "填写兼容 OpenAI API 的 Base URL"
+                        )
+                        TextField("https://api.example.com/v1", text: $baseURL)
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.URL)
+                            .settingsInput()
+                    }
 
-                    EditorialLabel("API Key").padding(.top, 22)
-                    SecureField(endpoint == nil ? "输入 API Key" : "留空则保持现有密钥", text: $apiKey)
+                    VStack(alignment: .leading, spacing: 11) {
+                        SettingsSectionHeading(
+                            title: "API Key",
+                            caption: endpoint == nil
+                                ? "密钥只用于请求你配置的服务"
+                                : "留空会继续使用现有密钥"
+                        )
+                        SecureField(
+                            endpoint == nil ? "输入 API Key" : "留空则保持现有密钥",
+                            text: $apiKey
+                        )
                         .textContentType(.password)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                    EditorialDivider()
+                        .settingsInput()
+                    }
 
                     Button {
                         discover()
@@ -625,56 +772,75 @@ private struct ModelEndpointEditor: View {
                             Spacer()
                             if loadingModels { ProgressView().controlSize(.small) }
                         }
-                        .font(.system(size: 16, weight: .medium))
-                        .frame(minHeight: 52)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || loadingModels)
+                    .buttonStyle(SettingsSoftButtonStyle())
+                    .disabled(
+                        baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || loadingModels
+                    )
 
                     if !discovered.isEmpty {
-                        EditorialLabel("模型列表").padding(.top, 20)
-                        ForEach(discovered) { model in
-                            Button {
-                                selectedModel = model.id
-                                manualModel = ""
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Circle()
-                                        .fill(selectedModel == model.id ? AppPalette.text : .clear)
-                                        .frame(width: 6, height: 6)
-                                        .frame(width: 14)
-                                    Text(model.displayName)
-                                        .font(.system(size: 15.5))
-                                    Spacer()
+                        VStack(alignment: .leading, spacing: 11) {
+                            SettingsSectionHeading(
+                                title: "可用模型",
+                                caption: "选择一个用于聊天的模型"
+                            )
+                            VStack(spacing: 2) {
+                                ForEach(discovered) { model in
+                                    Button {
+                                        selectedModel = model.id
+                                        manualModel = ""
+                                    } label: {
+                                        HStack(spacing: 11) {
+                                            Text(model.displayName)
+                                                .font(.system(size: 15.5))
+                                            Spacer()
+                                            if selectedModel == model.id {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 13, weight: .bold))
+                                            }
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .frame(minHeight: 48)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .frame(minHeight: 44)
                             }
-                            .buttonStyle(.plain)
+                            .padding(5)
+                            .background(AppPalette.surface)
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            )
                         }
-                        EditorialDivider()
                     }
 
-                    EditorialLabel("手动添加模型").padding(.top, 22)
-                    TextField("模型 ID", text: $manualModel)
-                        .textInputAutocapitalization(.never)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                        .onChange(of: manualModel) { _, value in
-                            if !value.isEmpty { selectedModel = "" }
-                        }
-                    EditorialDivider()
+                    VStack(alignment: .leading, spacing: 11) {
+                        SettingsSectionHeading(
+                            title: "手动填写模型",
+                            caption: "列表中没有时，直接输入模型 ID"
+                        )
+                        TextField("模型 ID", text: $manualModel)
+                            .textInputAutocapitalization(.never)
+                            .settingsInput()
+                            .onChange(of: manualModel) { _, value in
+                                if !value.isEmpty { selectedModel = "" }
+                            }
+                    }
 
-                    EditorialLabel("显示名称").padding(.top, 22)
-                    TextField("可选", text: $displayName)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                    EditorialDivider()
+                    VStack(alignment: .leading, spacing: 11) {
+                        SettingsSectionHeading(
+                            title: "显示名称",
+                            caption: "可选，会出现在聊天顶部的模型菜单"
+                        )
+                        TextField("可选", text: $displayName)
+                            .settingsInput()
+                    }
 
                     if let error {
                         Text(error)
                             .font(.footnote)
                             .foregroundStyle(.red)
-                            .padding(.top, 12)
                     }
 
                     Button {
@@ -683,18 +849,16 @@ private struct ModelEndpointEditor: View {
                         HStack {
                             Text(saving ? "保存中…" : "保存")
                             Spacer()
-                            if saving { ProgressView().controlSize(.small) }
+                            if saving { ProgressView().tint(AppPalette.background) }
                         }
-                        .font(.system(size: 16, weight: .semibold))
-                        .frame(minHeight: 54)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SettingsPrimaryButtonStyle())
                     .disabled(effectiveModel.isEmpty || baseURL.isEmpty || saving)
                     .opacity(effectiveModel.isEmpty || baseURL.isEmpty ? 0.42 : 1)
-                    .padding(.top, 16)
                 }
                 .padding(.horizontal, 20)
-                .padding(.bottom, 30)
+                .padding(.top, 22)
+                .padding(.bottom, 36)
             }
             .background(AppPalette.background)
             .navigationTitle(endpoint == nil ? "添加 API" : "编辑模型")
@@ -770,36 +934,50 @@ private struct SystemPromptSettingsView: View {
     @State private var error: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            TextEditor(text: $prompt)
-                .font(.system(size: 16))
-                .lineSpacing(5)
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, 15)
-                .padding(.top, 12)
-                .disabled(loading)
-            EditorialDivider()
-                .padding(.horizontal, 20)
-            Button {
-                save()
-            } label: {
-                HStack {
-                    Text(saving ? "保存中…" : "保存")
-                    Spacer()
-                    if saving { ProgressView().controlSize(.small) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SettingsSectionHeading(
+                    title: "长期回复偏好",
+                    caption: "这里的内容会作为每次新对话的系统指引"
+                )
+
+                ZStack {
+                    TextEditor(text: $prompt)
+                        .font(.system(size: 16))
+                        .lineSpacing(5)
+                        .scrollContentBackground(.hidden)
+                        .padding(12)
+                        .disabled(loading)
+
+                    if loading {
+                        ProgressView()
+                    }
                 }
-                .font(.system(size: 16, weight: .semibold))
-                .frame(minHeight: 54)
-                .padding(.horizontal, 20)
+                .frame(minHeight: 350)
+                .background(AppPalette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+
+                Button {
+                    save()
+                } label: {
+                    HStack {
+                        Text(saving ? "保存中…" : "保存")
+                        Spacer()
+                        if saving { ProgressView().tint(AppPalette.background) }
+                    }
+                }
+                .buttonStyle(SettingsPrimaryButtonStyle())
+                .disabled(loading || saving)
             }
-            .buttonStyle(.plain)
-            .disabled(loading || saving)
+            .padding(.horizontal, 20)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
         }
         .background(AppPalette.background)
         .navigationTitle("系统提示词")
         .navigationBarTitleDisplayMode(.inline)
         .alert(
-            "保存失败",
+            "暂时无法完成操作",
             isPresented: Binding(
                 get: { error != nil },
                 set: { if !$0 { error = nil } }
@@ -838,52 +1016,74 @@ private struct UsageSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                UsageMetric(
-                    title: "5 小时用量",
-                    value: quota?.tokens5h ?? 0,
-                    limit: 500_000,
-                    reset: quota?.window5hStart.addingTimeInterval(5 * 60 * 60)
-                )
-                .padding(.top, 18)
-                EditorialDivider()
-                    .padding(.vertical, 22)
-                UsageMetric(
-                    title: "一周用量",
-                    value: quota?.tokens7d ?? 0,
-                    limit: 10_000_000,
-                    reset: quota?.window7dStart.addingTimeInterval(7 * 24 * 60 * 60)
-                )
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "当前用量",
+                        caption: "额度会在对应时间窗口自动恢复"
+                    )
 
-                EditorialDivider()
-                    .padding(.vertical, 26)
-                EditorialLabel("兑换码")
-                HStack(spacing: 12) {
-                    TextField("输入兑换码", text: $code)
-                        .textInputAutocapitalization(.characters)
-                        .font(.system(size: 16))
-                        .padding(.vertical, 13)
-                    Button(redeeming ? "兑换中…" : "兑换") {
-                        redeem()
+                    VStack(spacing: 26) {
+                        UsageMetric(
+                            title: "5 小时用量",
+                            value: quota?.tokens5h ?? 0,
+                            limit: 500_000,
+                            reset: quota?.window5hStart
+                                .addingTimeInterval(5 * 60 * 60)
+                        )
+                        UsageMetric(
+                            title: "一周用量",
+                            value: quota?.tokens7d ?? 0,
+                            limit: 10_000_000,
+                            reset: quota?.window7dStart
+                                .addingTimeInterval(7 * 24 * 60 * 60)
+                        )
                     }
-                    .font(.system(size: 15, weight: .medium))
-                    .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || redeeming)
+                    .padding(17)
+                    .background(AppPalette.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                 }
-                EditorialDivider()
+
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeading(
+                        title: "兑换额度",
+                        caption: "输入兑换码后，额度会立即加入账户"
+                    )
+                    HStack(alignment: .bottom, spacing: 10) {
+                        TextField("输入兑换码", text: $code)
+                            .textInputAutocapitalization(.characters)
+                            .settingsInput()
+                        Button(redeeming ? "兑换中…" : "兑换") {
+                            redeem()
+                        }
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 66, minHeight: 50)
+                        .background(AppPalette.accent)
+                        .clipShape(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        )
+                        .disabled(
+                            code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || redeeming
+                        )
+                    }
+                }
 
                 if loading {
                     ProgressView()
                         .frame(maxWidth: .infinity)
-                        .padding(.top, 24)
                 }
+
                 if let message {
                     Text(message)
                         .font(.footnote)
                         .foregroundStyle(AppPalette.secondaryText)
-                        .padding(.top, 12)
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 22)
+            .padding(.bottom, 36)
         }
         .background(AppPalette.background)
         .navigationTitle("使用额度")
@@ -954,20 +1154,64 @@ private struct UsageMetric: View {
     }
 }
 
-private struct EditorialLabel: View {
-    let value: String
-
-    init(_ value: String) {
-        self.value = value
-    }
+private struct SettingsSectionHeading: View {
+    let title: String
+    let caption: String
 
     var body: some View {
-        Text(value)
-            .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(AppPalette.secondaryText)
-            .textCase(.uppercase)
-            .tracking(0.35)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(AppPalette.text)
+            Text(caption)
+                .font(.system(size: 13))
+                .foregroundStyle(AppPalette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private extension View {
+    func settingsInput() -> some View {
+        self
+            .font(.system(size: 16))
+            .padding(.horizontal, 15)
+            .padding(.vertical, 12)
+            .frame(minHeight: 50)
+            .background(AppPalette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+private struct SettingsPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 17)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(AppPalette.accent)
+            .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.42)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+    }
+}
+
+private struct SettingsSoftButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(AppPalette.text)
+            .padding(.horizontal, 15)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(AppPalette.mutedSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .opacity(isEnabled ? (configuration.isPressed ? 0.72 : 1) : 0.4)
     }
 }
 
