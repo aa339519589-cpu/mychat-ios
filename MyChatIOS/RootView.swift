@@ -463,7 +463,7 @@ struct NativeChatView: View {
                         DragGesture(minimumDistance: 18)
                             .onEnded { value in
                                 guard value.translation.width > 54,
-                                      abs(value.translation.height) < 90 else { return }
+                                      value.translation.width > abs(value.translation.height) else { return }
                                 lightHaptic()
                                 withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.9)) {
                                     sidebarVisible = true
@@ -1089,6 +1089,8 @@ struct SidebarOverlay: View {
     let select: (Conversation) -> Void
     let newConversation: () -> Void
     let openDestination: (WorkspaceDestination) -> Void
+    @State private var dragAxis: Axis?
+    @State private var blocksConversationSelection = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -1135,6 +1137,7 @@ struct SidebarOverlay: View {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(conversations) { conversation in
                                 Button {
+                                    guard !blocksConversationSelection else { return }
                                     lightHaptic()
                                     select(conversation)
                                 } label: {
@@ -1153,7 +1156,9 @@ struct SidebarOverlay: View {
                             }
                         }
                         .padding(.horizontal, 12)
+                        .allowsHitTesting(!blocksConversationSelection)
                     }
+                    .scrollDisabled(isHorizontalDragging)
 
                     HStack {
                         Spacer()
@@ -1177,15 +1182,42 @@ struct SidebarOverlay: View {
                 }
                 .frame(width: min(350, geometry.size.width * 0.86))
                 .background(AppPalette.sidebar)
-                .gesture(
-                    DragGesture(minimumDistance: 18)
-                        .onEnded { value in
-                            guard value.translation.width < -48 else { return }
-                            close()
-                        }
-                )
+                .simultaneousGesture(sidebarDragGesture)
             }
         }
+    }
+
+    private var isHorizontalDragging: Bool {
+        dragAxis == .horizontal
+    }
+
+    private var sidebarDragGesture: some Gesture {
+        DragGesture(minimumDistance: 10, coordinateSpace: .local)
+            .onChanged { value in
+                guard dragAxis == nil else { return }
+                let horizontalDistance = abs(value.translation.width)
+                let verticalDistance = abs(value.translation.height)
+                guard max(horizontalDistance, verticalDistance) >= 10 else { return }
+
+                dragAxis = horizontalDistance > verticalDistance ? .horizontal : .vertical
+                if dragAxis == .horizontal {
+                    blocksConversationSelection = true
+                }
+            }
+            .onEnded { value in
+                let shouldClose = dragAxis == .horizontal && value.translation.width < -48
+                let shouldKeepBlockingSelection = blocksConversationSelection
+                dragAxis = nil
+
+                if shouldClose {
+                    close()
+                }
+
+                guard shouldKeepBlockingSelection else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    blocksConversationSelection = false
+                }
+            }
     }
 }
 
