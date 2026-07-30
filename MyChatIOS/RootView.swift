@@ -289,15 +289,16 @@ final class ChatStore: ObservableObject {
         retryContext = nil
     }
 
+    @discardableResult
     func send(
         _ value: String,
         options: ChatRequestOptions = ChatRequestOptions(),
         attachments: [ChatAttachment] = []
-    ) {
+    ) -> Bool {
         let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isSending else { return }
+        guard !text.isEmpty, !isSending else { return false }
         if selectedConversation == nil { newConversation() }
-        guard let conversation = selectedConversation else { return }
+        guard let conversation = selectedConversation else { return false }
 
         let history = messages
         let userID = UUID()
@@ -358,6 +359,7 @@ final class ChatStore: ObservableObject {
                 self.error = error.localizedDescription
             }
         }
+        return true
     }
 
     func retryFailedMessage() {
@@ -470,14 +472,15 @@ struct NativeChatView: View {
                                 && !attachments.isEmpty ? "请查看附件" : draft
                             let options = requestOptions
                             let currentAttachments = attachments
-                            draft = ""
-                            requestOptions = ChatRequestOptions()
-                            attachments = []
-                            store.send(
+                            guard store.send(
                                 value,
                                 options: options,
                                 attachments: currentAttachments
-                            )
+                            ) else { return }
+                            draft = ""
+                            requestOptions = ChatRequestOptions()
+                            attachments = []
+                            composerFocused = false
                         },
                         reportError: { store.error = $0 }
                     )
