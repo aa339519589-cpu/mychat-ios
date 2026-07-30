@@ -1,0 +1,48 @@
+name: Apply Accent Color
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-accent-color.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact accent color
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('MyChatIOS/RootView.swift')
+          text = path.read_text()
+          replacements = {
+              '''    static let thinking = adaptive(
+                  light: UIColor(red: 0.384, green: 0.451, blue: 0.537, alpha: 1),
+                  dark: UIColor(red: 0.722, green: 0.769, blue: 0.839, alpha: 1)
+              )''': '''    static let thinking = adaptive(
+                  light: UIColor(red: 0.160784, green: 0.333333, blue: 0.501961, alpha: 1),
+                  dark: UIColor(red: 0.160784, green: 0.333333, blue: 0.501961, alpha: 1)
+              )''',
+              '.fill(selected ? AppPalette.text : .clear)': '.fill(selected ? AppPalette.thinking : .clear)',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'Expected source not found: {old!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Commit exact change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MyChatIOS/RootView.swift
+          git diff --cached --quiet || git commit -m "Set accent color to #295580"
+          git push origin HEAD:main
