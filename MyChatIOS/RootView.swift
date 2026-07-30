@@ -434,6 +434,13 @@ struct NativeChatView: View {
                             && !attachments.isEmpty ? "请查看附件" : draft
                         let options = requestOptions
                         let currentAttachments = attachments
+                        composerFocused = false
+                        UIApplication.shared.sendAction(
+                            #selector(UIResponder.resignFirstResponder),
+                            to: nil,
+                            from: nil,
+                            for: nil
+                        )
                         draft = ""
                         requestOptions = ChatRequestOptions()
                         attachments = []
