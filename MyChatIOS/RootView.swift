@@ -31,8 +31,8 @@ enum AppPalette {
     static let text = Color(uiColor: .label)
     static let secondaryText = Color(uiColor: .secondaryLabel)
     static let thinking = adaptive(
-        light: UIColor(red: 0.384, green: 0.451, blue: 0.537, alpha: 1),
-        dark: UIColor(red: 0.722, green: 0.769, blue: 0.839, alpha: 1)
+        light: UIColor(red: 0.160784, green: 0.333333, blue: 0.501961, alpha: 1),
+        dark: UIColor(red: 0.160784, green: 0.333333, blue: 0.501961, alpha: 1)
     )
 
     private static func adaptive(light: UIColor, dark: UIColor) -> Color {
@@ -1291,7 +1291,7 @@ private struct AttachmentAction: View {
                 Spacer()
                 if let selected {
                     Circle()
-                        .fill(selected ? AppPalette.text : .clear)
+                        .fill(selected ? AppPalette.thinking : .clear)
                         .frame(width: 6, height: 6)
                         .overlay {
                             Circle()
