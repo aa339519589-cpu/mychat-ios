@@ -48,7 +48,7 @@ struct RichRendererPreview: View {
       "encoding": {
         "x": {"field": "能力", "type": "nominal", "axis": {"title": null}},
         "y": {"field": "完成度", "type": "quantitative", "axis": {"title": null}},
-        "color": {"value": "#52677f"}
+        "color": {"value": "#D94B4B"}
       },
       "height": 180
     }
@@ -58,7 +58,7 @@ struct RichRendererPreview: View {
     {
       "xAxis": {"domain": [-6.3, 6.3]},
       "yAxis": {"domain": [-1.5, 1.5]},
-      "data": [{"fn": "sin(x)", "color": "#52677f"}]
+      "data": [{"fn": "sin(x)", "color": "#D94B4B"}]
     }
     </function-plot>
 
@@ -84,7 +84,7 @@ struct RichRendererPreview: View {
       "encoding": {
         "x": {"field": "能力", "type": "nominal", "axis": {"title": null}},
         "y": {"field": "完成度", "type": "quantitative", "axis": {"title": null}},
-        "color": {"value": "#52677f"}
+        "color": {"value": "#D94B4B"}
       },
       "height": 180
     }
@@ -94,7 +94,7 @@ struct RichRendererPreview: View {
     {
       "xAxis": {"domain": [-6.3, 6.3]},
       "yAxis": {"domain": [-1.5, 1.5]},
-      "data": [{"fn": "sin(x)", "color": "#52677f"}]
+      "data": [{"fn": "sin(x)", "color": "#D94B4B"}]
     }
     </function-plot>
 

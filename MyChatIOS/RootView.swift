@@ -3,6 +3,17 @@ import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 
+extension Color {
+    /// MyChat's single product accent. Keep brand color usage on this token.
+    static let myChatAccent = Color(
+        .sRGB,
+        red: Double(0xD9) / 255.0,
+        green: Double(0x4B) / 255.0,
+        blue: Double(0x4B) / 255.0,
+        opacity: 1
+    )
+}
+
 enum AppPalette {
     static let background = adaptive(
         light: UIColor(red: 0.969, green: 0.965, blue: 0.949, alpha: 1),
@@ -30,10 +41,8 @@ enum AppPalette {
     )
     static let text = Color(uiColor: .label)
     static let secondaryText = Color(uiColor: .secondaryLabel)
-    static let thinking = adaptive(
-        light: UIColor(red: 0.384, green: 0.451, blue: 0.537, alpha: 1),
-        dark: UIColor(red: 0.722, green: 0.769, blue: 0.839, alpha: 1)
-    )
+    static let accent = Color.myChatAccent
+    static let thinking = accent
 
     private static func adaptive(light: UIColor, dark: UIColor) -> Color {
         Color(uiColor: UIColor { traits in
@@ -151,8 +160,8 @@ struct LoginView: View {
                     .frame(height: 50)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(AppPalette.background)
-                .background(AppPalette.text)
+                .foregroundStyle(.white)
+                .background(AppPalette.accent)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .disabled(email.isEmpty || password.isEmpty || isSubmitting)
                 .opacity(email.isEmpty || password.isEmpty ? 0.45 : 1)
@@ -378,7 +387,9 @@ struct NativeChatView: View {
     let api: APIClient
     let onSignOut: () -> Void
     @StateObject private var store: ChatStore
-    @State private var sidebarVisible = false
+    @State private var sidebarProgress: CGFloat = 0
+    @State private var sidebarDragStart: CGFloat?
+    @State private var sidebarDragRejected = false
     @State private var attachmentSheetVisible = false
     @State private var destination: WorkspaceDestination?
     @State private var draft = ""
@@ -397,80 +408,15 @@ struct NativeChatView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            AppPalette.background.ignoresSafeArea()
-            VStack(spacing: 0) {
-                ChatTopBar(
-                    models: store.models,
-                    selected: store.selectedModel,
-                    openSidebar: { sidebarVisible = true },
-                    selectModel: { store.selectedModel = $0 },
-                    newConversation: store.newConversation
-                )
-                if store.messages.isEmpty {
-                    Color.clear
-                } else {
-                    MessageList(
-                        messages: store.messages,
-                        isSending: store.isSending,
-                        failedMessageID: store.failedMessageID,
-                        retry: store.retryFailedMessage
-                    )
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                Composer(
-                    draft: $draft,
-                    isFocused: $composerFocused,
-                    isSending: store.isSending,
-                    hasAdditions: !requestOptions.isEmpty || !attachments.isEmpty,
-                    canSendWithoutText: !attachments.isEmpty,
-                    openAttachments: {
-                        composerFocused = false
-                        attachmentSheetVisible = true
-                    },
-                    send: {
-                        let value = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            && !attachments.isEmpty ? "请查看附件" : draft
-                        let options = requestOptions
-                        let currentAttachments = attachments
-                        draft = ""
-                        requestOptions = ChatRequestOptions()
-                        attachments = []
-                        store.send(
-                            value,
-                            options: options,
-                            attachments: currentAttachments
-                        )
-                    },
-                    reportError: { store.error = $0 }
-                )
-            }
-            .disabled(sidebarVisible)
+        GeometryReader { geometry in
+            let drawerWidth = min(176, geometry.size.width * 0.44)
+            let isOpen = sidebarProgress > 0.999
 
-            if !sidebarVisible {
-                Color.clear
-                    .frame(width: 18)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 18)
-                            .onEnded { value in
-                                guard value.translation.width > 54,
-                                      abs(value.translation.height) < 90 else { return }
-                                lightHaptic()
-                                withAnimation(.interactiveSpring(response: 0.3, dampingFraction: 0.9)) {
-                                    sidebarVisible = true
-                                }
-                            }
-                    )
-            }
-
-            if sidebarVisible {
-                SidebarOverlay(
+            ZStack(alignment: .leading) {
+                SidebarContent(
                     conversations: store.conversations,
-                    close: { sidebarVisible = false },
                     select: { conversation in
-                        sidebarVisible = false
+                        settleSidebar(open: false)
                         Task {
                             do { try await store.select(conversation) }
                             catch { store.error = error.localizedDescription }
@@ -478,21 +424,85 @@ struct NativeChatView: View {
                     },
                     newConversation: {
                         store.newConversation()
-                        sidebarVisible = false
+                        settleSidebar(open: false)
                     },
                     openDestination: {
                         destination = $0
-                        sidebarVisible = false
+                        settleSidebar(open: false)
                     }
                 )
-                .transition(.asymmetric(
-                    insertion: .move(edge: .leading).combined(with: .opacity),
-                    removal: .move(edge: .leading).combined(with: .opacity)
-                ))
-                .zIndex(2)
+                .frame(width: drawerWidth)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .accessibilityHidden(sidebarProgress < 0.5)
+
+                VStack(spacing: 0) {
+                    ChatTopBar(
+                        models: store.models,
+                        selected: store.selectedModel,
+                        openSidebar: { settleSidebar(open: true) },
+                        selectModel: { store.selectedModel = $0 },
+                        newConversation: store.newConversation
+                    )
+                    if store.messages.isEmpty {
+                        Color.clear
+                    } else {
+                        MessageList(
+                            messages: store.messages,
+                            isSending: store.isSending,
+                            failedMessageID: store.failedMessageID,
+                            retry: store.retryFailedMessage
+                        )
+                    }
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Composer(
+                        draft: $draft,
+                        isFocused: $composerFocused,
+                        isSending: store.isSending,
+                        hasAdditions: !requestOptions.isEmpty || !attachments.isEmpty,
+                        canSendWithoutText: !attachments.isEmpty,
+                        openAttachments: {
+                            composerFocused = false
+                            attachmentSheetVisible = true
+                        },
+                        send: {
+                            let value = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                && !attachments.isEmpty ? "请查看附件" : draft
+                            let options = requestOptions
+                            let currentAttachments = attachments
+                            draft = ""
+                            requestOptions = ChatRequestOptions()
+                            attachments = []
+                            store.send(
+                                value,
+                                options: options,
+                                attachments: currentAttachments
+                            )
+                        },
+                        reportError: { store.error = $0 }
+                    )
+                }
+                .background(AppPalette.background)
+                .overlay {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .allowsHitTesting(isOpen)
+                        .accessibilityHidden(!isOpen)
+                        .onTapGesture { settleSidebar(open: false) }
+                }
+                .modifier(
+                    SidebarCanvasMotion(
+                        progress: sidebarProgress,
+                        width: drawerWidth
+                    )
+                )
+                .accessibilityHidden(isOpen)
             }
+            .coordinateSpace(name: "nativeChatDrawer")
+            .simultaneousGesture(sidebarGesture(width: drawerWidth))
+            .background(AppPalette.sidebar)
         }
-        .animation(.interactiveSpring(response: 0.3, dampingFraction: 0.9), value: sidebarVisible)
+        .background(AppPalette.sidebar.ignoresSafeArea())
         .sheet(isPresented: $attachmentSheetVisible) {
             AttachmentActionsSheet(
                 options: $requestOptions,
@@ -579,6 +589,69 @@ struct NativeChatView: View {
         .task { await store.load() }
     }
 
+    private func sidebarGesture(width: CGFloat) -> some Gesture {
+        DragGesture(
+            minimumDistance: 5,
+            coordinateSpace: .named("nativeChatDrawer")
+        )
+            .onChanged { value in
+                guard !sidebarDragRejected else { return }
+
+                let start: CGFloat
+                if let existing = sidebarDragStart {
+                    start = existing
+                } else {
+                    guard sidebarProgress > 0.001 || value.startLocation.x <= 26 else {
+                        sidebarDragRejected = true
+                        return
+                    }
+                    guard abs(value.translation.width)
+                        > abs(value.translation.height) * 1.12 else {
+                        sidebarDragRejected = true
+                        return
+                    }
+                    start = sidebarProgress
+                    sidebarDragStart = start
+                }
+
+                var transaction = Transaction()
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    sidebarProgress = min(
+                        max(start + value.translation.width / width, 0),
+                        1
+                    )
+                }
+            }
+            .onEnded { value in
+                defer {
+                    sidebarDragStart = nil
+                    sidebarDragRejected = false
+                }
+                guard let start = sidebarDragStart, !sidebarDragRejected else {
+                    return
+                }
+                let projected = min(
+                    max(start + value.predictedEndTranslation.width / width, 0),
+                    1
+                )
+                settleSidebar(open: projected > 0.22)
+            }
+    }
+
+    private func settleSidebar(open: Bool) {
+        let target: CGFloat = open ? 1 : 0
+        if abs(sidebarProgress - target) < 0.001 { return }
+        if (sidebarProgress >= 0.5) != open {
+            lightHaptic()
+        }
+        withAnimation(
+            .smooth(duration: 0.26, extraBounce: 0)
+        ) {
+            sidebarProgress = target
+        }
+    }
+
     private func importPhoto(_ item: PhotosPickerItem) async {
         defer { selectedPhoto = nil }
         do {
@@ -655,6 +728,37 @@ struct NativeChatView: View {
     }
 }
 
+/// One animatable scalar owns translation, clipping and depth. This prevents
+/// gesture state and settled state from handing the canvas between two layouts.
+private struct SidebarCanvasMotion: AnimatableModifier {
+    var progress: CGFloat
+    let width: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        let clamped = min(max(progress, 0), 1)
+
+        content
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: 22 * clamped,
+                    style: .continuous
+                )
+            )
+            .shadow(
+                color: .black.opacity(0.13 * Double(clamped)),
+                radius: 16 * clamped,
+                x: -3 * clamped,
+                y: 0
+            )
+            .offset(x: width * clamped)
+    }
+}
+
 struct ChatTopBar: View {
     let models: [ModelChoice]
     let selected: ModelChoice
@@ -682,7 +786,7 @@ struct ChatTopBar: View {
                             Group {
                                 if model == selected {
                                     Circle()
-                                        .fill(AppPalette.text)
+                                        .fill(AppPalette.accent)
                                 } else {
                                     Color.clear
                                 }
@@ -727,43 +831,104 @@ struct MessageList: View {
     let isSending: Bool
     let failedMessageID: UUID?
     let retry: () -> Void
+    @State private var isNearBottom = true
+    private let bottomID = "native-chat-bottom"
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
-                    ForEach(messages) { message in
-                        NativeMessageRow(
-                            message: message,
-                            isActive: isSending && message.id == messages.last?.id,
-                            failed: failedMessageID == message.id,
-                            retry: retry
-                        )
-                            .id(message.id)
+        GeometryReader { viewport in
+            ScrollViewReader { proxy in
+                ZStack(alignment: .bottomTrailing) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 22) {
+                            ForEach(messages) { message in
+                                NativeMessageRow(
+                                    message: message,
+                                    isActive: isSending && message.id == messages.last?.id,
+                                    failed: failedMessageID == message.id,
+                                    retry: retry
+                                )
+                                .id(message.id)
+                            }
+
+                            Color.clear
+                                .frame(height: 1)
+                                .id(bottomID)
+                                .background {
+                                    GeometryReader { marker in
+                                        Color.clear.preference(
+                                            key: ChatBottomPreferenceKey.self,
+                                            value: marker.frame(
+                                                in: .named("native-chat-scroll")
+                                            ).maxY
+                                        )
+                                    }
+                                }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.top, 18)
+                        .padding(.bottom, 24)
+                        .frame(maxWidth: 760)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .coordinateSpace(name: "native-chat-scroll")
+                    .scrollDismissesKeyboard(.interactively)
+
+                    if !isNearBottom {
+                        Button {
+                            lightHaptic()
+                            withAnimation(.easeOut(duration: 0.24)) {
+                                proxy.scrollTo(bottomID, anchor: .bottom)
+                            }
+                        } label: {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(AppPalette.text)
+                                .frame(width: 44, height: 44)
+                                .background(.ultraThinMaterial)
+                                .overlay {
+                                    Circle()
+                                        .stroke(Color.white.opacity(0.42), lineWidth: 0.8)
+                                }
+                                .clipShape(Circle())
+                                .shadow(
+                                    color: .black.opacity(0.16),
+                                    radius: 9,
+                                    x: 0,
+                                    y: 4
+                                )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("回到最新消息")
+                        .padding(.trailing, 18)
+                        .padding(.bottom, 12)
+                        .transition(.scale(scale: 0.88).combined(with: .opacity))
                     }
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 18)
-                .padding(.bottom, 24)
-                .frame(maxWidth: 760)
-                .frame(maxWidth: .infinity)
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .onChange(of: messages.count) { _, _ in
-                guard let id = messages.last?.id else { return }
-                withAnimation(.easeOut(duration: 0.16)) {
-                    proxy.scrollTo(id, anchor: .bottom)
+                .animation(.easeOut(duration: 0.16), value: isNearBottom)
+                .onPreferenceChange(ChatBottomPreferenceKey.self) { bottomY in
+                    isNearBottom = bottomY <= viewport.size.height + 54
+                }
+                .onAppear {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo(bottomID, anchor: .bottom)
+                    }
+                }
+                .onChange(of: messages.last?.id) { _, _ in
+                    guard isNearBottom else { return }
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo(bottomID, anchor: .bottom)
+                    }
                 }
             }
-            .onChange(of: messages.last?.content.count) { _, _ in
-                guard isSending, let id = messages.last?.id else { return }
-                proxy.scrollTo(id, anchor: .bottom)
-            }
-            .onChange(of: isSending) { _, _ in
-                guard let id = messages.last?.id else { return }
-                proxy.scrollTo(id, anchor: .bottom)
-            }
         }
+    }
+}
+
+private struct ChatBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -776,19 +941,25 @@ struct NativeMessageRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             if message.role == "user" {
-                VStack(alignment: .trailing, spacing: 5) {
-                    Text("你")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AppPalette.secondaryText)
-                    Text(displayText)
-                        .font(.system(size: 16))
-                        .lineSpacing(4)
-                        .textSelection(.enabled)
-                        .foregroundStyle(AppPalette.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.leading, 54)
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                Spacer(minLength: 52)
+                Text(displayText)
+                    .font(.system(size: 16))
+                    .lineSpacing(4)
+                    .textSelection(.enabled)
+                    .foregroundStyle(AppPalette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 11)
+                    .background(AppPalette.mutedSurface)
+                    .clipShape(
+                        RoundedRectangle(cornerRadius: 19, style: .continuous)
+                    )
+                    .shadow(
+                        color: .black.opacity(0.035),
+                        radius: 4,
+                        x: 0,
+                        y: 1
+                    )
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     Group {
@@ -877,7 +1048,7 @@ struct Composer: View {
                     .contentShape(Rectangle())
             }
             .accessibilityLabel("添加")
-            .disabled(isSending || speech.phase.isActive)
+            .disabled(speech.phase.isActive)
 
             Group {
                 if speech.phase.isActive {
@@ -890,7 +1061,6 @@ struct Composer: View {
                         .focused(isFocused)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 9)
-                        .disabled(isSending)
                         .transition(.opacity)
                 }
             }
@@ -913,7 +1083,11 @@ struct Composer: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .contentTransition(.symbolEffect(.replace))
             }
-            .disabled(isSending || speech.phase == .preparing || speech.phase == .transcribing)
+            .disabled(
+                (isSending && (!draftIsEmpty || canSendWithoutText))
+                    || speech.phase == .preparing
+                    || speech.phase == .transcribing
+            )
             .accessibilityLabel(actionAccessibilityLabel)
         }
         .padding(6)
@@ -955,12 +1129,18 @@ struct Composer: View {
     }
 
     private var actionForeground: Color {
-        if !draftIsEmpty || canSendWithoutText { return AppPalette.background }
+        if (!draftIsEmpty || canSendWithoutText) && isSending {
+            return AppPalette.secondaryText
+        }
+        if !draftIsEmpty || canSendWithoutText { return .white }
         return AppPalette.text
     }
 
     private var actionBackground: Color {
-        if !draftIsEmpty || canSendWithoutText { return AppPalette.text }
+        if (!draftIsEmpty || canSendWithoutText) && isSending {
+            return AppPalette.mutedSurface
+        }
+        if !draftIsEmpty || canSendWithoutText { return AppPalette.accent }
         return AppPalette.mutedSurface
     }
 
@@ -1076,109 +1256,104 @@ enum WorkspaceDestination: String, Identifiable {
     }
 }
 
-struct SidebarOverlay: View {
+struct SidebarContent: View {
     let conversations: [Conversation]
-    let close: () -> Void
     let select: (Conversation) -> Void
     let newConversation: () -> Void
     let openDestination: (WorkspaceDestination) -> Void
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Color.black.opacity(0.22)
-                    .ignoresSafeArea()
-                    .onTapGesture(perform: close)
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text("MyChat")
-                            .font(.system(size: 20, weight: .semibold))
-                        Spacer()
-                    }
-                    .padding(.leading, 18)
-                    .padding(.trailing, 18)
-                    .frame(height: 62)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("MyChat")
+                    .font(.system(size: 23, weight: .semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .frame(height: 60)
 
-                    VStack(spacing: 0) {
-                        SidebarAction(title: "新对话", symbol: "square.and.pencil") {
-                            lightHaptic()
-                            newConversation()
-                        }
-                        SidebarAction(title: "项目", symbol: WorkspaceDestination.projects.symbol) {
-                            openDestination(.projects)
-                        }
-                        SidebarAction(title: "作品", symbol: WorkspaceDestination.artifacts.symbol) {
-                            openDestination(.artifacts)
-                        }
-                        SidebarAction(title: "代码", symbol: WorkspaceDestination.code.symbol) {
-                            openDestination(.code)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 2)
+            VStack(spacing: 2) {
+                SidebarAction(title: "新对话", symbol: "square.and.pencil") {
+                    lightHaptic()
+                    newConversation()
+                }
+                SidebarAction(title: "项目", symbol: WorkspaceDestination.projects.symbol) {
+                    openDestination(.projects)
+                }
+                SidebarAction(title: "作品", symbol: WorkspaceDestination.artifacts.symbol) {
+                    openDestination(.artifacts)
+                }
+                SidebarAction(title: "代码", symbol: WorkspaceDestination.code.symbol) {
+                    openDestination(.code)
+                }
+            }
 
-                    Text("对话记录")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-                        .padding(.bottom, 7)
+            Text("对话记录")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 19)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
 
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(conversations) { conversation in
-                                Button {
-                                    lightHaptic()
-                                    select(conversation)
-                                } label: {
-                                    HStack(spacing: 10) {
-                                        Text(conversation.title)
-                                            .font(.system(size: 15.5))
-                                            .lineLimit(1)
-                                        Spacer(minLength: 0)
-                                    }
-                                    .foregroundStyle(AppPalette.text)
-                                    .padding(.horizontal, 8)
-                                    .frame(height: 43)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                    }
-
-                    HStack {
-                        Spacer()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 1) {
+                    ForEach(conversations) { conversation in
                         Button {
                             lightHaptic()
-                            openDestination(.settings)
+                            select(conversation)
                         } label: {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 16, weight: .medium))
-                                .frame(width: 36, height: 32)
-                                .background(AppPalette.mutedSurface)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            HStack(spacing: 10) {
+                                Text(conversation.title)
+                                    .font(.system(size: 15.5))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .foregroundStyle(AppPalette.text)
+                            .padding(.horizontal, 9)
+                            .frame(height: 41)
+                            .contentShape(Rectangle())
                         }
-                        .accessibilityLabel("设置")
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AppPalette.text)
-                    .padding(.horizontal, 18)
-                    .padding(.top, 4)
-                    .padding(.bottom, 12)
                 }
-                .frame(width: min(350, geometry.size.width * 0.86))
-                .background(AppPalette.sidebar)
-                .gesture(
-                    DragGesture(minimumDistance: 18)
-                        .onEnded { value in
-                            guard value.translation.width < -48 else { return }
-                            close()
-                        }
-                )
+                .padding(.horizontal, 11)
             }
+
+            Button {
+                lightHaptic()
+                openDestination(.settings)
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(AppPalette.text)
+                .frame(width: 46, height: 46)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            AppPalette.elevatedSurface,
+                            AppPalette.mutedSurface.opacity(0.78),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .overlay {
+                    Circle()
+                        .stroke(Color.white.opacity(0.5), lineWidth: 0.9)
+                }
+                .clipShape(Circle())
+                .shadow(color: .black.opacity(0.14), radius: 7, x: 0, y: 4)
+                .shadow(color: .white.opacity(0.52), radius: 1, x: 0, y: -1)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("设置")
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.top, 7)
+            .padding(.bottom, 12)
         }
+        .foregroundStyle(AppPalette.text)
+        .background(AppPalette.sidebar)
     }
 }
 
@@ -1189,14 +1364,20 @@ private struct SidebarAction: View {
 
     var body: some View {
         Button(action: action) {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 16, weight: .medium))
-                .frame(maxWidth: .infinity, minHeight: 45, alignment: .leading)
-                .contentShape(Rectangle())
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 23, alignment: .center)
+                Text(title)
+                    .font(.system(size: 16, weight: .medium))
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(AppPalette.text)
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 16)
     }
 }
 
@@ -1283,17 +1464,21 @@ private struct AttachmentAction: View {
                     .font(.system(size: 17))
                 Spacer()
                 if let selected {
-                    Circle()
-                        .fill(selected ? AppPalette.text : .clear)
-                        .frame(width: 6, height: 6)
-                        .overlay {
-                            Circle()
-                                .stroke(selected ? .clear : AppPalette.border, lineWidth: 0.7)
-                        }
-                        .frame(width: 20, height: 20)
+                    Image(systemName: selected ? "circle.fill" : "circle")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(
+                            selected ? AppPalette.accent : AppPalette.secondaryText
+                        )
+                        .frame(width: 24, height: 24)
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .background {
+                if selected == true {
+                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(AppPalette.accent.opacity(0.12))
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
