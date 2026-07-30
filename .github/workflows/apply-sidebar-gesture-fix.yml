@@ -1,0 +1,146 @@
+name: Apply Sidebar Gesture Fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/apply-sidebar-gesture-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact sidebar gesture fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('MyChatIOS/RootView.swift')
+          text = path.read_text()
+          replacements = [
+              (
+                  '''    let newConversation: () -> Void
+    let openDestination: (WorkspaceDestination) -> Void
+
+    var body: some View {''',
+                  '''    let newConversation: () -> Void
+    let openDestination: (WorkspaceDestination) -> Void
+    @State private var dragAxis: Axis?
+    @State private var blocksConversationSelection = false
+
+    var body: some View {'''
+              ),
+              (
+                  '''                                guard value.translation.width > 54,
+                                      abs(value.translation.height) < 90 else { return }''',
+                  '''                                guard value.translation.width > 54,
+                                      value.translation.width > abs(value.translation.height) else { return }'''
+              ),
+              (
+                  '''                                Button {
+                                    lightHaptic()
+                                    select(conversation)
+                                } label: {''',
+                  '''                                Button {
+                                    guard !blocksConversationSelection else { return }
+                                    lightHaptic()
+                                    select(conversation)
+                                } label: {'''
+              ),
+              (
+                  '''                        .padding(.horizontal, 12)
+                    }
+
+                    HStack {''',
+                  '''                        .padding(.horizontal, 12)
+                        .allowsHitTesting(!blocksConversationSelection)
+                    }
+                    .scrollDisabled(isHorizontalDragging)
+
+                    HStack {'''
+              ),
+              (
+                  '''                .frame(width: min(350, geometry.size.width * 0.86))
+                .background(AppPalette.sidebar)
+                .gesture(
+                    DragGesture(minimumDistance: 18)
+                        .onEnded { value in
+                            guard value.translation.width < -48 else { return }
+                            close()
+                        }
+                )
+            }
+        }
+    }
+}''',
+                  '''                .frame(width: min(350, geometry.size.width * 0.86))
+                .background(AppPalette.sidebar)
+                .simultaneousGesture(sidebarDragGesture)
+            }
+        }
+    }
+
+    private var isHorizontalDragging: Bool {
+        dragAxis == .horizontal
+    }
+
+    private var sidebarDragGesture: some Gesture {
+        DragGesture(minimumDistance: 10, coordinateSpace: .local)
+            .onChanged { value in
+                guard dragAxis == nil else { return }
+                let horizontalDistance = abs(value.translation.width)
+                let verticalDistance = abs(value.translation.height)
+                guard max(horizontalDistance, verticalDistance) >= 10 else { return }
+
+                dragAxis = horizontalDistance > verticalDistance ? .horizontal : .vertical
+                if dragAxis == .horizontal {
+                    blocksConversationSelection = true
+                }
+            }
+            .onEnded { value in
+                let shouldClose = dragAxis == .horizontal && value.translation.width < -48
+                let shouldKeepBlockingSelection = blocksConversationSelection
+                dragAxis = nil
+
+                if shouldClose {
+                    close()
+                }
+
+                guard shouldKeepBlockingSelection else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    blocksConversationSelection = false
+                }
+            }
+    }
+}'''
+              ),
+          ]
+
+          for old, new in replacements:
+              if text.count(old) != 1:
+                  raise SystemExit(f'Exact source mismatch: {old[:80]!r}')
+              text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+      - name: Verify and commit exact change
+        run: |
+          git diff --check
+          bash scripts/verify-ui-contract.sh
+          test "$(git diff --name-only)" = "MyChatIOS/RootView.swift"
+          grep -Fq '@State private var dragAxis: Axis?' MyChatIOS/RootView.swift
+          grep -Fq '.scrollDisabled(isHorizontalDragging)' MyChatIOS/RootView.swift
+          grep -Fq 'guard !blocksConversationSelection else' MyChatIOS/RootView.swift
+          grep -Fq '.simultaneousGesture(sidebarDragGesture)' MyChatIOS/RootView.swift
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MyChatIOS/RootView.swift
+          git rm .github/workflows/apply-sidebar-gesture-fix.yml
+          git rm .github/workflows/fix-sidebar-gesture.yml
+          git commit -m "Fix sidebar gesture conflicts"
+          git push origin HEAD:main
