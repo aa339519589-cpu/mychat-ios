@@ -6,8 +6,11 @@ root_view="$repo_root/MyChatIOS/RootView.swift"
 thinking_view="$repo_root/MyChatIOS/RichMessageView.swift"
 settings_view="$repo_root/MyChatIOS/SettingsViews.swift"
 api_client="$repo_root/MyChatIOS/APIClient.swift"
+models="$repo_root/MyChatIOS/Models.swift"
 project_file="$repo_root/MyChatIOS.xcodeproj/project.pbxproj"
 info_plist="$repo_root/MyChatIOS/Info.plist"
+renderer="$repo_root/MyChatIOS/WebAssets/renderer.html"
+renderer_core="$repo_root/MyChatIOS/WebAssets/renderer-core.js"
 
 if command -v rg >/dev/null 2>&1; then
   fixed_search() { rg -Fq "$2" "$1"; }
@@ -46,13 +49,35 @@ require_text "$settings_view" ".usage"
 require_text "$project_file" "SettingsViews.swift in Sources"
 require_text "$project_file" "WorkspaceViews.swift in Sources"
 require_text "$info_plist" "NSCameraUsageDescription"
+require_text "$renderer" "renderMathInElement"
+require_text "$renderer" "sanitizeSvg"
+require_text "$renderer" "state.frameRenderedRaw"
+require_text "$renderer" "validatedFunctionPlotSpec"
+require_text "$renderer" 'renderer:"svg",ast:true'
+require_text "$renderer" "mermaid.min.js"
+require_text "$renderer" "vega-embed.min.js"
+require_text "$renderer" "function-plot.js"
+require_text "$renderer_core" "repairCollapsedGfmTables"
+require_text "$renderer_core" "normalizeMathDelimiters"
+require_text "$root_view" "isStreaming: isActive"
+require_text "$root_view" "RichRendererPrewarmer.shared.prepare()"
 
 require_text "$api_client" "// MARK: - Chat reply pipeline"
-require_text "$api_client" "func waitForAssistantReply"
+require_text "$api_client" "func streamAssistantReply"
 require_text "$api_client" "private func readAssistantMessage"
-require_text "$api_client" "api/v1/jobs/"
-require_text "$api_client" "case \"completed\""
+require_text "$api_client" "text/event-stream"
+require_text "$api_client" 'rawLine.last == "\r"'
+require_text "$api_client" "Foundation's AsyncLineSequence can omit empty"
+require_text "$api_client" "from_seq"
+require_text "$api_client" "text.delta"
+require_text "$api_client" "thinking.delta"
+require_text "$api_client" "job.terminal"
 require_text "$api_client" "模型任务已完成，但持久化回复为空"
+require_text "$api_client" "case terminal(status: String, errorClass: String?, errorCode: String?)"
+require_text "$models" "let generationId: UUID"
+require_text "$models" "let userMessageId: UUID"
+require_text "$models" "let assistantMessageId: UUID"
+require_text "$models" "let streamUrl: String"
 
 if regex_search "深度联网|deepWebSearch|deep_web_search" "$repo_root/MyChatIOS"; then
   echo "Removed deep-network feature is still referenced"
@@ -74,13 +99,13 @@ if regex_search 'RoundedRectangle|GroupBox|Form\s*\{|Section\s*\{' "$settings_vi
   exit 1
 fi
 
-if regex_search 'consumeEvents|consumeConnection|pollJobUntilTerminal|text/event-stream|streamBytes\(for|eventStream|JobEvent|streamUrl' "$api_client"; then
-  echo "Retired chat transport is still referenced by APIClient"
+if regex_search 'waitForAssistantReply|readJobSnapshot|pollJobUntilTerminal|applyTerminal|synthetic|fallback' "$api_client"; then
+  echo "Retired polling or synthetic chat transport is still referenced by APIClient"
   exit 1
 fi
 
-if regex_search 'text\.delta|thinking\.delta|job\.terminal|applyTerminal|appendThinking|resetAssistant' "$root_view"; then
-  echo "Retired event-recovery rendering path is still referenced by RootView"
+if ! regex_search 'streamAssistantReply|messages\[index\]\.content = content' "$root_view"; then
+  echo "RootView is not wired to the authoritative streaming reply"
   exit 1
 fi
 
@@ -100,10 +125,12 @@ if [[ "$composer_count" != "1" ]]; then
   exit 1
 fi
 
-chat_pipeline_count="$(match_count "$api_client" 'func waitForAssistantReply')"
+chat_pipeline_count="$(match_count "$api_client" 'func streamAssistantReply')"
 if [[ "$chat_pipeline_count" != "1" ]]; then
   echo "Expected exactly one authoritative chat delivery implementation"
   exit 1
 fi
+
+node "$repo_root/scripts/verify-renderer.mjs"
 
 echo "UI and chat source contract checks passed"
