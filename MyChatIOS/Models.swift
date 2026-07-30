@@ -184,7 +184,12 @@ struct QuotaSnapshot: Equatable {
 }
 
 struct ChatEnqueueResponse: Decodable {
+    let schemaVersion: Int
     let jobId: UUID
+    let generationId: UUID
+    let userMessageId: UUID
     let assistantMessageId: UUID
     let status: String
+    let created: Bool
+    let streamUrl: String
 }

@@ -468,113 +468,589 @@ actor APIClient {
         request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
         let accepted: ChatEnqueueResponse = try await send(request)
-        guard accepted.jobId == generationID,
-              accepted.assistantMessageId == assistantMessageID else {
+        let acceptedStatuses = Set([
+            "queued", "leased", "running", "awaiting_input", "cancelling",
+            "completed", "failed", "cancelled",
+        ])
+        guard accepted.schemaVersion == 1,
+              accepted.jobId == generationID,
+              accepted.generationId == generationID,
+              accepted.userMessageId == userMessageID,
+              accepted.assistantMessageId == assistantMessageID,
+              acceptedStatuses.contains(accepted.status) else {
             throw APIError.message("服务器返回了不匹配的模型任务")
         }
         return accepted
     }
 
-    private struct JobSnapshot {
-        let id: UUID
-        let status: String
-        let errorMessage: String?
+    private struct JobEventPayload: Decodable {
+        let text: String?
+        let thinking: String?
+        let status: String?
+        let errorClass: String?
+        let errorCode: String?
     }
 
-    func waitForAssistantReply(
+    private struct JobEventEnvelope: Decodable {
+        let seq: Int
+        let kind: String
+        let schemaVersion: Int
+        let jobId: UUID
+        let payload: JobEventPayload
+    }
+
+    private struct JobStreamErrorEnvelope: Decodable {
+        let schemaVersion: Int
+        let jobId: UUID
+        let code: String
+        let retryable: Bool
+    }
+
+    private enum ParsedJobEvent {
+        case duplicate
+        case text(sequence: Int, value: String)
+        case thinking(sequence: Int, value: String)
+        case terminal(
+            sequence: Int,
+            status: String,
+            errorClass: String?,
+            errorCode: String?
+        )
+        case ignored(sequence: Int)
+    }
+
+    private enum JobStreamOutcome {
+        case disconnected
+        case terminal(status: String, errorClass: String?, errorCode: String?)
+    }
+
+    func streamAssistantReply(
         _ accepted: ChatEnqueueResponse,
         conversationID: UUID,
-        assistantMessageID: UUID
+        assistantMessageID: UUID,
+        turnStartedAt: Date,
+        onUpdate: @escaping @MainActor @Sendable (_ content: String, _ thinking: String?) -> Void
     ) async throws -> ChatMessage {
         guard accepted.assistantMessageId == assistantMessageID else {
             throw APIError.message("模型任务与回复消息不匹配")
         }
 
-        let deadline = Date().addingTimeInterval(3 * 60)
-        var missingReads = 0
-        var completedWithoutMessageReads = 0
+        let streamURL = try validatedJobEventURL(accepted)
+        let deadline = Date().addingTimeInterval(15 * 60)
+        var sequence = 0
+        var content = ""
+        var thinking = ""
+        var reconnects = 0
+        var firstEventLogged = false
+        var firstTextLogged = false
 
         while Date() < deadline {
-            try Task.checkCancellation()
-            if let snapshot = try await readJobSnapshot(accepted.jobId) {
-                missingReads = 0
-                switch snapshot.status {
-                case "completed":
-                    if let message = try await readAssistantMessage(
+            do {
+                let outcome = try await readJobEventConnection(
+                    baseStreamURL: streamURL,
+                    jobID: accepted.jobId,
+                    afterSequence: &sequence,
+                    content: &content,
+                    thinking: &thinking,
+                    turnStartedAt: turnStartedAt,
+                    firstEventLogged: &firstEventLogged,
+                    firstTextLogged: &firstTextLogged,
+                    onUpdate: onUpdate
+                )
+                switch outcome {
+                case .disconnected:
+                    throw APIError.response(
+                        message: "模型事件流提前断开",
+                        statusCode: 503,
+                        code: "JOB_STREAM_DISCONNECTED",
+                        retryable: true,
+                        retryAfter: nil,
+                        requestID: nil
+                    )
+                case let .terminal(status, errorClass, errorCode):
+                    guard status == "completed" else {
+                        let code = errorCode ?? "JOB_\(status.uppercased())"
+                        let detail = errorClass.map { "\($0)/\(code)" } ?? code
+                        throw APIError.response(
+                            message: "模型回复失败（\(detail)）",
+                            statusCode: status == "cancelled" ? 409 : 500,
+                            code: code,
+                            // A terminal Job is definitive. `retryable` describes whether
+                            // the user may create a new Job, never whether this SSE should
+                            // reconnect after consuming its terminal sequence.
+                            retryable: false,
+                            retryAfter: nil,
+                            requestID: nil
+                        )
+                    }
+                    let reply = try await readCommittedAssistantMessage(
                         id: assistantMessageID,
-                        conversationID: conversationID
-                    ), !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        return message
-                    }
-                    completedWithoutMessageReads += 1
-                    if completedWithoutMessageReads >= 10 {
-                        throw APIError.message("模型任务已完成，但持久化回复为空")
-                    }
-                case "failed", "cancelled":
-                    throw APIError.message(snapshot.errorMessage ?? "模型回复失败")
-                default:
-                    break
+                        conversationID: conversationID,
+                        generationID: accepted.jobId
+                    )
+                    let elapsed = Int(Date().timeIntervalSince(turnStartedAt) * 1_000)
+                    print(
+                        "[MyChatStream] terminal job=\(accepted.jobId.uuidString.lowercased()) "
+                            + "sequence=\(sequence) elapsedMs=\(elapsed)"
+                    )
+                    return reply
                 }
-            } else {
-                missingReads += 1
-                if missingReads > 10 { throw APIError.message("模型任务不存在") }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard isRetryableStreamError(error), reconnects < 4 else { throw error }
+                reconnects += 1
+                let delay = min(2.0, 0.2 * pow(2.0, Double(reconnects - 1)))
+                print(
+                    "[MyChatStream] resume job=\(accepted.jobId.uuidString.lowercased()) "
+                        + "fromSequence=\(sequence) attempt=\(reconnects)"
+                )
+                try await Task.sleep(for: .seconds(delay))
             }
-            try await Task.sleep(nanoseconds: 500_000_000)
         }
 
-        throw APIError.message("模型回复超时")
+        throw APIError.response(
+            message: "模型回复超时",
+            statusCode: 504,
+            code: "JOB_STREAM_TIMEOUT",
+            retryable: true,
+            retryAfter: nil,
+            requestID: nil
+        )
+    }
+
+    private func validatedJobEventURL(_ accepted: ChatEnqueueResponse) throws -> URL {
+        guard let candidate = URL(string: accepted.streamUrl, relativeTo: baseURL)?.absoluteURL,
+              candidate.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+              candidate.host?.lowercased() == baseURL.host?.lowercased(),
+              candidate.port == baseURL.port else {
+            throw APIError.message("模型事件流地址无效")
+        }
+
+        let expectedPath = "/api/v1/jobs/\(accepted.jobId.uuidString.lowercased())/events"
+        guard candidate.path.lowercased() == expectedPath,
+              let components = URLComponents(url: candidate, resolvingAgainstBaseURL: false),
+              components.queryItems?.first(where: { $0.name == "from_seq" })?.value == "0" else {
+            throw APIError.message("模型事件流与任务不匹配")
+        }
+        return candidate
+    }
+
+    private func readJobEventConnection(
+        baseStreamURL: URL,
+        jobID: UUID,
+        afterSequence: inout Int,
+        content: inout String,
+        thinking: inout String,
+        turnStartedAt: Date,
+        firstEventLogged: inout Bool,
+        firstTextLogged: inout Bool,
+        onUpdate: @escaping @MainActor @Sendable (_ content: String, _ thinking: String?) -> Void
+    ) async throws -> JobStreamOutcome {
+        var components = URLComponents(url: baseStreamURL, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "from_seq", value: String(afterSequence))]
+        guard let url = components?.url else { throw APIError.message("模型事件流地址无效") }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        request.setValue(String(afterSequence), forHTTPHeaderField: "Last-Event-ID")
+        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
+
+        let (bytes, response) = try await streamBytes(for: request)
+        guard response.value(forHTTPHeaderField: "Content-Type")?
+            .lowercased().hasPrefix("text/event-stream") == true else {
+            throw APIError.message("服务器没有返回模型事件流")
+        }
+
+        var eventName: String?
+        var eventID: String?
+        var dataLines: [String] = []
+
+        func resetFrame() {
+            eventName = nil
+            eventID = nil
+            dataLines.removeAll(keepingCapacity: true)
+        }
+
+        for try await rawLine in bytes.lines {
+            try Task.checkCancellation()
+            let line = rawLine.last == "\r" ? String(rawLine.dropLast()) : rawLine
+            if line.isEmpty {
+                if let outcome = try await applyJobEventFrame(
+                    eventName: eventName,
+                    eventID: eventID,
+                    data: dataLines.joined(separator: "\n"),
+                    jobID: jobID,
+                    afterSequence: &afterSequence,
+                    content: &content,
+                    thinking: &thinking,
+                    turnStartedAt: turnStartedAt,
+                    firstEventLogged: &firstEventLogged,
+                    firstTextLogged: &firstTextLogged,
+                    onUpdate: onUpdate
+                ) {
+                    return outcome
+                }
+                resetFrame()
+                continue
+            }
+            if line.hasPrefix(":") { continue }
+            let field: Substring
+            let rawValue: Substring
+            if let colon = line.firstIndex(of: ":") {
+                field = line[..<colon]
+                let start = line.index(after: colon)
+                rawValue = line[start...]
+            } else {
+                field = Substring(line)
+                rawValue = ""
+            }
+            let value = rawValue.first == " " ? rawValue.dropFirst() : rawValue
+            switch field {
+            case "event":
+                eventName = String(value)
+            case "id":
+                eventID = String(value)
+            case "data":
+                dataLines.append(String(value))
+                if let outcome = try await applyJobEventFrame(
+                    eventName: eventName,
+                    eventID: eventID,
+                    data: dataLines.joined(separator: "\n"),
+                    jobID: jobID,
+                    afterSequence: &afterSequence,
+                    content: &content,
+                    thinking: &thinking,
+                    turnStartedAt: turnStartedAt,
+                    firstEventLogged: &firstEventLogged,
+                    firstTextLogged: &firstTextLogged,
+                    onUpdate: onUpdate
+                ) {
+                    return outcome
+                }
+                // The authoritative Job stream emits exactly one JSON `data:`
+                // line per event. Foundation's AsyncLineSequence can omit empty
+                // separator lines, so committing here preserves true deltas.
+                resetFrame()
+            default:
+                break
+            }
+        }
+
+        if !dataLines.isEmpty,
+           let outcome = try await applyJobEventFrame(
+               eventName: eventName,
+               eventID: eventID,
+               data: dataLines.joined(separator: "\n"),
+               jobID: jobID,
+               afterSequence: &afterSequence,
+               content: &content,
+               thinking: &thinking,
+               turnStartedAt: turnStartedAt,
+               firstEventLogged: &firstEventLogged,
+               firstTextLogged: &firstTextLogged,
+               onUpdate: onUpdate
+           ) {
+            return outcome
+        }
+        return .disconnected
+    }
+
+    private func applyJobEventFrame(
+        eventName: String?,
+        eventID: String?,
+        data: String,
+        jobID: UUID,
+        afterSequence: inout Int,
+        content: inout String,
+        thinking: inout String,
+        turnStartedAt: Date,
+        firstEventLogged: inout Bool,
+        firstTextLogged: inout Bool,
+        onUpdate: @escaping @MainActor @Sendable (_ content: String, _ thinking: String?) -> Void
+    ) async throws -> JobStreamOutcome? {
+        guard let eventName, !data.isEmpty else { return nil }
+        if eventName == "stream.error" {
+            guard let raw = data.data(using: .utf8),
+                  let value = try? decoder.decode(JobStreamErrorEnvelope.self, from: raw),
+                  value.schemaVersion == 1,
+                  value.jobId == jobID else {
+                throw APIError.message("模型事件流错误格式无效")
+            }
+            throw APIError.response(
+                message: "模型事件流暂时不可用（\(value.code)）",
+                statusCode: 503,
+                code: value.code,
+                retryable: value.retryable,
+                retryAfter: nil,
+                requestID: nil
+            )
+        }
+
+        let parsed = try parseJobEvent(
+            eventName: eventName,
+            eventID: eventID,
+            data: data,
+            jobID: jobID,
+            afterSequence: afterSequence
+        )
+        switch parsed {
+        case .duplicate:
+            return nil
+        case let .text(sequence, value):
+            afterSequence = sequence
+            content += value
+            logFirstJobEventIfNeeded(
+                jobID: jobID,
+                turnStartedAt: turnStartedAt,
+                firstEventLogged: &firstEventLogged
+            )
+            if !value.isEmpty && !firstTextLogged {
+                firstTextLogged = true
+                let elapsed = Int(Date().timeIntervalSince(turnStartedAt) * 1_000)
+                print(
+                    "[MyChatStream] firstText job=\(jobID.uuidString.lowercased()) "
+                        + "sequence=\(sequence) elapsedMs=\(elapsed)"
+                )
+            }
+            await onUpdate(content, thinking.isEmpty ? nil : thinking)
+            return nil
+        case let .thinking(sequence, value):
+            afterSequence = sequence
+            thinking += value
+            logFirstJobEventIfNeeded(
+                jobID: jobID,
+                turnStartedAt: turnStartedAt,
+                firstEventLogged: &firstEventLogged
+            )
+            await onUpdate(content, thinking.isEmpty ? nil : thinking)
+            return nil
+        case let .terminal(sequence, status, errorClass, errorCode):
+            afterSequence = sequence
+            logFirstJobEventIfNeeded(
+                jobID: jobID,
+                turnStartedAt: turnStartedAt,
+                firstEventLogged: &firstEventLogged
+            )
+            return .terminal(
+                status: status,
+                errorClass: errorClass,
+                errorCode: errorCode
+            )
+        case let .ignored(sequence):
+            afterSequence = sequence
+            logFirstJobEventIfNeeded(
+                jobID: jobID,
+                turnStartedAt: turnStartedAt,
+                firstEventLogged: &firstEventLogged
+            )
+            return nil
+        }
+    }
+
+    private func parseJobEvent(
+        eventName: String,
+        eventID: String?,
+        data: String,
+        jobID: UUID,
+        afterSequence: Int
+    ) throws -> ParsedJobEvent {
+        guard let raw = data.data(using: .utf8) else {
+            throw APIError.message("模型事件编码无效")
+        }
+        let event: JobEventEnvelope
+        do {
+            event = try decoder.decode(JobEventEnvelope.self, from: raw)
+        } catch {
+            throw APIError.message("模型事件格式无法识别")
+        }
+        guard event.schemaVersion == 1,
+              event.jobId == jobID,
+              event.kind == eventName,
+              event.seq > 0,
+              eventID == String(event.seq) else {
+            throw APIError.message("模型事件身份校验失败")
+        }
+        if event.seq <= afterSequence { return .duplicate }
+        guard event.seq == afterSequence + 1 else {
+            throw APIError.message(
+                "模型事件序号不连续（expected \(afterSequence + 1), received \(event.seq)）"
+            )
+        }
+
+        switch event.kind {
+        case "text.delta":
+            guard let text = event.payload.text else {
+                throw APIError.message("模型文本事件缺少内容")
+            }
+            return .text(sequence: event.seq, value: text)
+        case "thinking.delta":
+            guard let thinking = event.payload.thinking else {
+                throw APIError.message("模型思考事件缺少内容")
+            }
+            return .thinking(sequence: event.seq, value: thinking)
+        case "job.terminal":
+            guard let status = event.payload.status,
+                  ["completed", "failed", "cancelled"].contains(status) else {
+                throw APIError.message("模型终态事件无效")
+            }
+            return .terminal(
+                sequence: event.seq,
+                status: status,
+                errorClass: event.payload.errorClass,
+                errorCode: event.payload.errorCode
+            )
+        default:
+            return .ignored(sequence: event.seq)
+        }
+    }
+
+    private func logFirstJobEventIfNeeded(
+        jobID: UUID,
+        turnStartedAt: Date,
+        firstEventLogged: inout Bool
+    ) {
+        guard !firstEventLogged else { return }
+        firstEventLogged = true
+        let elapsed = Int(Date().timeIntervalSince(turnStartedAt) * 1_000)
+        print(
+            "[MyChatStream] firstEvent job=\(jobID.uuidString.lowercased()) "
+                + "elapsedMs=\(elapsed)"
+        )
+    }
+
+    private func streamBytes(
+        for request: URLRequest,
+        allowTokenRefresh: Bool = true
+    ) async throws -> (URLSession.AsyncBytes, HTTPURLResponse) {
+        let (bytes, response) = try await network.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.message("网络响应无效")
+        }
+        if http.statusCode == 401,
+           allowTokenRefresh,
+           request.value(forHTTPHeaderField: "Authorization") != nil {
+            let refreshed = try await refreshSession()
+            var retry = request
+            retry.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
+            return try await streamBytes(for: retry, allowTokenRefresh: false)
+        }
+        guard 200..<300 ~= http.statusCode else {
+            let data = try await readBoundedBody(bytes)
+            throw responseError(data, response: http)
+        }
+        return (bytes, http)
+    }
+
+    private func readBoundedBody(
+        _ bytes: URLSession.AsyncBytes,
+        limit: Int = 64 * 1_024
+    ) async throws -> Data {
+        var data = Data()
+        data.reserveCapacity(min(limit, 4_096))
+        for try await byte in bytes {
+            guard data.count < limit else { break }
+            data.append(byte)
+        }
+        return data
+    }
+
+    private func isRetryableStreamError(_ error: Error) -> Bool {
+        if let apiError = error as? APIError { return apiError.isRetryable }
+        if let urlError = error as? URLError {
+            return [
+                .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+                .dnsLookupFailed, .notConnectedToInternet, .internationalRoamingOff,
+                .callIsActive, .dataNotAllowed, .secureConnectionFailed,
+            ].contains(urlError.code)
+        }
+        return false
+    }
+
+    private func readCommittedAssistantMessage(
+        id: UUID,
+        conversationID: UUID,
+        generationID: UUID
+    ) async throws -> ChatMessage {
+        var lastRetryableError: Error?
+        for attempt in 0..<10 {
+            do {
+                if let message = try await readAssistantMessage(
+                    id: id,
+                    conversationID: conversationID,
+                    generationID: generationID
+                ), !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return message
+                }
+                lastRetryableError = nil
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard isRetryableStreamError(error) else { throw error }
+                lastRetryableError = error
+            }
+            if attempt < 9 {
+                try await Task.sleep(for: .milliseconds(100 + attempt * 40))
+            }
+        }
+        if let lastRetryableError { throw lastRetryableError }
+        throw APIError.message("模型任务已完成，但持久化回复为空")
+    }
+
+    private struct CommittedAssistantRow: Decodable {
+        let id: UUID
+        let role: String
+        let content: String
+        let thinking: String?
+        let createdAt: Date?
+        let generationId: UUID?
+        let status: String
+
+        enum CodingKeys: String, CodingKey {
+            case id, role, content, thinking, status
+            case createdAt = "created_at"
+            case generationId = "generation_id"
+        }
+
+        var message: ChatMessage {
+            ChatMessage(
+                id: id,
+                role: role,
+                content: content,
+                thinking: thinking,
+                createdAt: createdAt
+            )
+        }
     }
 
     private func readAssistantMessage(
         id: UUID,
-        conversationID: UUID
+        conversationID: UUID,
+        generationID: UUID
     ) async throws -> ChatMessage? {
         let config = try await loadBootstrap()
         let url = try restURL(config, path: "messages", query: [
-            "select": "id,role,content,thinking,created_at",
+            "select": "id,role,content,thinking,created_at,generation_id,status",
             "id": "eq.\(id.uuidString.lowercased())",
             "conversation_id": "eq.\(conversationID.uuidString.lowercased())",
             "role": "eq.assistant",
+            "generation_id": "eq.\(generationID.uuidString.lowercased())",
+            "status": "eq.terminal",
             "limit": "1",
         ])
-        let rows: [ChatMessage] = try await send(
+        let rows: [CommittedAssistantRow] = try await send(
             try await authorizedRequest(url, config: config)
         )
-        guard let message = rows.first else { return nil }
-        guard message.id == id, message.role == "assistant" else {
+        guard let row = rows.first else { return nil }
+        guard row.id == id,
+              row.role == "assistant",
+              row.generationId == generationID,
+              row.status == "terminal" else {
             throw APIError.message("持久化回复身份不匹配")
         }
-        return message
-    }
-
-    private func readJobSnapshot(_ jobID: UUID) async throws -> JobSnapshot? {
-        var request = URLRequest(
-            url: baseURL.appending(path: "api/v1/jobs/\(jobID.uuidString.lowercased())")
-        )
-        request.timeoutInterval = 20
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.setValue("Bearer \(try await accessToken())", forHTTPHeaderField: "Authorization")
-
-        let (data, response) = try await self.data(for: request)
-        if response.statusCode == 404 { return nil }
-        guard 200..<300 ~= response.statusCode else {
-            throw responseError(data, response: response)
-        }
-
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let job = root["job"] as? [String: Any],
-              let rawID = job["id"] as? String,
-              let id = UUID(uuidString: rawID),
-              id == jobID,
-              let status = job["status"] as? String else {
-            throw APIError.message("模型任务状态格式无法识别")
-        }
-
-        let errorMessage = (job["error"] as? [String: Any])?["message"] as? String
-            ?? job["errorCode"] as? String
-            ?? job["error_code"] as? String
-        return JobSnapshot(id: id, status: status, errorMessage: errorMessage)
+        return row.message
     }
 
     private func runNativeReplyProbeIfRequested() async {
@@ -584,10 +1060,13 @@ actor APIClient {
         let userMessageID = UUID()
         let assistantMessageID = UUID()
         let generationID = UUID()
+        let startedAt = Date()
+        let prompt = ProcessInfo.processInfo.environment["NATIVE_REPLY_PROBE_PROMPT"]
+            ?? "仅回复：原生链路正常"
         do {
             print("[MyChatProbe] starting single-path native reply probe")
             let accepted = try await enqueue(
-                text: "仅回复：原生链路正常",
+                text: prompt,
                 conversationID: conversationID,
                 history: [],
                 model: ModelChoice.platform[2],
@@ -600,10 +1079,14 @@ actor APIClient {
                 generationID: generationID
             )
             print("[MyChatProbe] enqueue accepted job=\(accepted.jobId.uuidString.lowercased())")
-            let reply = try await waitForAssistantReply(
+            let reply = try await streamAssistantReply(
                 accepted,
                 conversationID: conversationID,
-                assistantMessageID: assistantMessageID
+                assistantMessageID: assistantMessageID,
+                turnStartedAt: startedAt,
+                onUpdate: { content, _ in
+                    print("[MyChatProbe] streamedChars=\(content.count)")
+                }
             )
             print(
                 "[MyChatProbe] completed assistant=\(reply.id.uuidString.lowercased()) "

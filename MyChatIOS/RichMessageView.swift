@@ -2,15 +2,24 @@ import SwiftUI
 import WebKit
 
 struct RichRendererPreview: View {
-    private let sample = """
+    private let fullSample = """
     ## 原生富文本测试
 
-    这是 **加粗正文**、`inline code` 和一个公式：
+    这是 **加粗正文**、`inline code` 和行内公式：\\(a^2+b^2=c^2\\)
 
-    $$E = mc^2$$
+    $$
+    \\int_{-\\infty}^{\\infty} e^{-x^2}\\,dx=\\sqrt{\\pi}
+    $$
 
-    - 列表项目一
-    - 列表项目二
+    | 能力 | 状态 |
+    | --- | --- |
+    | Markdown | 正常 |
+    | LaTeX | 正常 |
+    | 流式图形 | 正常 |
+
+    ```swift
+    let greeting = "Hello, MyChat"
+    ```
 
     <inline-artifact>
     <svg viewBox="0 0 320 120" xmlns="http://www.w3.org/2000/svg">
@@ -20,46 +29,187 @@ struct RichRendererPreview: View {
     </svg>
     </inline-artifact>
 
+    <mermaid>
+    graph LR
+      A[发送] --> B[任务入库]
+      B --> C[Worker]
+      C --> D[流式回复]
+    </mermaid>
+
+    <vega>
+    {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"values": [
+        {"能力": "文本", "完成度": 100},
+        {"能力": "数学", "完成度": 100},
+        {"能力": "图表", "完成度": 100}
+      ]},
+      "mark": {"type": "bar", "cornerRadiusEnd": 4},
+      "encoding": {
+        "x": {"field": "能力", "type": "nominal", "axis": {"title": null}},
+        "y": {"field": "完成度", "type": "quantitative", "axis": {"title": null}},
+        "color": {"value": "#52677f"}
+      },
+      "height": 180
+    }
+    </vega>
+
+    <function-plot>
+    {
+      "xAxis": {"domain": [-6.3, 6.3]},
+      "yAxis": {"domain": [-1.5, 1.5]},
+      "data": [{"fn": "sin(x)", "color": "#52677f"}]
+    }
+    </function-plot>
+
     <artifact>
       <h2>Artifact 预览</h2>
-      <p>安全、可展开的原生容器。</p>
+      <p>安全、可展开、可持续更新的原生容器。</p>
+      <button style="padding:10px 14px;border-radius:10px;border:1px solid #aaa">交互按钮</button>
     </artifact>
     """
+
+    private let chartsSample = """
+    ## 图表与 Artifact 测试
+
+    <vega>
+    {
+      "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+      "data": {"values": [
+        {"能力": "文本", "完成度": 100},
+        {"能力": "数学", "完成度": 100},
+        {"能力": "图表", "完成度": 100}
+      ]},
+      "mark": {"type": "bar", "cornerRadiusEnd": 4},
+      "encoding": {
+        "x": {"field": "能力", "type": "nominal", "axis": {"title": null}},
+        "y": {"field": "完成度", "type": "quantitative", "axis": {"title": null}},
+        "color": {"value": "#52677f"}
+      },
+      "height": 180
+    }
+    </vega>
+
+    <function-plot>
+    {
+      "xAxis": {"domain": [-6.3, 6.3]},
+      "yAxis": {"domain": [-1.5, 1.5]},
+      "data": [{"fn": "sin(x)", "color": "#52677f"}]
+    }
+    </function-plot>
+
+    <artifact>
+      <h2>Artifact 预览</h2>
+      <p>安全、可展开、可持续更新的原生容器。</p>
+      <button style="padding:10px 14px;border-radius:10px;border:1px solid #aaa">交互按钮</button>
+    </artifact>
+    """
+
+    private var sample: String {
+        ProcessInfo.processInfo.arguments.contains("-RichRendererChartsPreview")
+            || ProcessInfo.processInfo.arguments.contains("-RichRendererArtifactPreview")
+            ? chartsSample
+            : fullSample
+    }
 
     var body: some View {
         ZStack {
             AppPalette.background.ignoresSafeArea()
-            VStack(alignment: .leading, spacing: 18) {
-                Text("均衡")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                RichAssistantContent(text: sample)
-                Spacer()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("均衡")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                    RichAssistantContent(text: sample)
+                }
+                .padding(18)
             }
-            .padding(18)
         }
+    }
+}
+
+@MainActor
+private enum RichRendererRuntime {
+    static let dataStore = WKWebsiteDataStore.nonPersistent()
+
+    static func configure(_ configuration: WKWebViewConfiguration) {
+        configuration.websiteDataStore = dataStore
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+    }
+
+    static func assetLocations() -> (renderer: URL, directory: URL)? {
+        guard let directory = Bundle.main.resourceURL?
+            .appending(path: "WebAssets", directoryHint: .isDirectory) else {
+            return nil
+        }
+        return (
+            directory.appending(path: "renderer.html", directoryHint: .notDirectory),
+            directory
+        )
+    }
+}
+
+@MainActor
+final class RichRendererPrewarmer: NSObject, WKNavigationDelegate {
+    static let shared = RichRendererPrewarmer()
+    private var webView: WKWebView?
+
+    func prepare() {
+        guard webView == nil else { return }
+        let configuration = WKWebViewConfiguration()
+        RichRendererRuntime.configure(configuration)
+        let renderer = WKWebView(frame: CGRect(x: 0, y: 0, width: 1, height: 1), configuration: configuration)
+        renderer.navigationDelegate = self
+        renderer.isOpaque = false
+        renderer.isHidden = true
+        webView = renderer
+
+        if let assets = RichRendererRuntime.assetLocations() {
+            renderer.loadFileURL(assets.renderer, allowingReadAccessTo: assets.directory)
+        }
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        webView.evaluateJavaScript(
+            "void renderMessage('MyChat \\\\(x^2\\\\)').catch(function(){});"
+        )
     }
 }
 
 struct RichAssistantContent: View {
     let text: String
+    let isStreaming: Bool
+    @State private var retainedStreamingRenderer = false
+
+    init(text: String, isStreaming: Bool = false) {
+        self.text = text
+        self.isStreaming = isStreaming
+    }
 
     var body: some View {
-        if needsRichRenderer {
-            RichMessageWebView(content: text)
-        } else {
-            Text(text)
-                .font(.system(size: 17))
-                .lineSpacing(5)
-                .textSelection(.enabled)
-                .foregroundStyle(AppPalette.text)
-                .fixedSize(horizontal: false, vertical: true)
+        Group {
+            if isStreaming || retainedStreamingRenderer || needsRichRenderer {
+                RichMessageWebView(content: text)
+            } else {
+                Text(text)
+                    .font(.system(size: 17))
+                    .lineSpacing(5)
+                    .textSelection(.enabled)
+                    .foregroundStyle(AppPalette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear {
+            if isStreaming { retainedStreamingRenderer = true }
+        }
+        .onChange(of: isStreaming) { _, value in
+            if value { retainedStreamingRenderer = true }
         }
     }
 
     private var needsRichRenderer: Bool {
         let markers = [
-            "**", "__", "~~", "`", "$", "# ", "## ", "- ", "* ", "> ",
+            "**", "__", "~~", "`", "$", "\\(", "\\[", "# ", "## ", "- ", "* ", "> ",
             "<vega>", "<mermaid>", "<function-plot>", "<inline-artifact>", "<artifact>",
         ]
         return markers.contains(where: text.contains)
@@ -131,7 +281,6 @@ private struct RichMessageWebView: View {
         GeometryReader { geometry in
             RichMessageRepresentable(content: content, contentHeight: $contentHeight)
                 .frame(width: geometry.size.width, height: contentHeight)
-                .accessibilityLabel(content)
         }
         .frame(height: contentHeight)
     }
@@ -147,23 +296,30 @@ private struct RichMessageRepresentable: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        RichRendererRuntime.configure(configuration)
         configuration.userContentController.add(context.coordinator, name: "height")
+        configuration.userContentController.add(context.coordinator, name: "copy")
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.allowsLinkPreview = false
         webView.scrollView.isScrollEnabled = false
         webView.scrollView.bounces = false
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.backgroundColor = .clear
         webView.isOpaque = false
+        webView.isAccessibilityElement = false
         webView.backgroundColor = .clear
         webView.setContentHuggingPriority(.required, for: .vertical)
         context.coordinator.webView = webView
         context.coordinator.pendingContent = content
+        context.coordinator.pendingFontSize = UIFont.preferredFont(
+            forTextStyle: .body,
+            compatibleWith: webView.traitCollection
+        ).pointSize
 
-        if let assetsURL = Bundle.main.resourceURL?.appending(path: "WebAssets", directoryHint: .isDirectory) {
-            let rendererURL = assetsURL.appending(path: "renderer.html", directoryHint: .notDirectory)
-            webView.loadFileURL(rendererURL, allowingReadAccessTo: assetsURL)
+        if let assets = RichRendererRuntime.assetLocations() {
+            webView.loadFileURL(assets.renderer, allowingReadAccessTo: assets.directory)
         } else {
             webView.loadHTMLString("<p>富文本资源不可用</p>", baseURL: nil)
         }
@@ -171,12 +327,19 @@ private struct RichMessageRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
+        context.coordinator.scheduleFontSize(
+            UIFont.preferredFont(
+                forTextStyle: .body,
+                compatibleWith: webView.traitCollection
+            ).pointSize
+        )
         context.coordinator.scheduleRender(content)
     }
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.renderWorkItem?.cancel()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "height")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "copy")
         webView.stopLoading()
     }
 
@@ -186,6 +349,8 @@ private struct RichMessageRepresentable: UIViewRepresentable {
         var ready = false
         var pendingContent = ""
         var renderedContent = ""
+        var pendingFontSize: CGFloat = 17
+        var renderedFontSize: CGFloat = 0
         var renderWorkItem: DispatchWorkItem?
 
         init(height: Binding<CGFloat>) {
@@ -198,12 +363,27 @@ private struct RichMessageRepresentable: UIViewRepresentable {
             renderWorkItem?.cancel()
             let item = DispatchWorkItem { [weak self] in self?.renderPendingContent() }
             renderWorkItem = item
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: item)
+        }
+
+        func scheduleFontSize(_ value: CGFloat) {
+            pendingFontSize = value
+            guard ready, abs(value - renderedFontSize) > 0.1, let webView else { return }
+            renderedFontSize = value
+            webView.evaluateJavaScript("setBodyFontSize(\(Double(value)))")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
+            scheduleFontSize(pendingFontSize)
             renderPendingContent()
+            if ProcessInfo.processInfo.arguments.contains("-RichRendererArtifactPreview") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    webView.evaluateJavaScript(
+                        "document.querySelector('.artifact-button')?.click();"
+                    )
+                }
+            }
         }
 
         func webView(
@@ -213,7 +393,7 @@ private struct RichMessageRepresentable: UIViewRepresentable {
         ) {
             guard navigationAction.navigationType == .linkActivated,
                   let url = navigationAction.request.url,
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                  ["http", "https", "mailto"].contains(url.scheme?.lowercased() ?? "") else {
                 decisionHandler(.allow)
                 return
             }
@@ -225,12 +405,20 @@ private struct RichMessageRepresentable: UIViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == "height",
-                  let value = message.body as? Double,
-                  value.isFinite else { return }
-            let next = min(max(CGFloat(value), 24), 30_000)
-            if abs(height.wrappedValue - next) > 0.5 {
-                height.wrappedValue = next
+            switch message.name {
+            case "copy":
+                guard let value = message.body as? String, value.utf8.count <= 1_000_000 else {
+                    return
+                }
+                UIPasteboard.general.string = value
+            case "height":
+                guard let value = message.body as? Double, value.isFinite else { return }
+                let next = min(max(CGFloat(value), 24), 30_000)
+                if abs(height.wrappedValue - next) > 0.5 {
+                    height.wrappedValue = next
+                }
+            default:
+                break
             }
         }
 
@@ -246,144 +434,19 @@ private struct RichMessageRepresentable: UIViewRepresentable {
             }
             let command =
                 "void renderMessage(\(encoded)).catch(error => {" +
-                "const match=/Cannot access '([^']+)'/.exec(error.message);" +
-                "document.getElementById('root').textContent = '内容显示失败：' + (match ? match[1] : error.message);" +
+                "const target=document.getElementById('display')||document.getElementById('root');" +
+                "target.textContent='内容显示失败：'+(error&&error.message?error.message:'格式无效');" +
                 "reportHeight();" +
                 "});"
-            webView.evaluateJavaScript(command) { _, error in
+            webView.evaluateJavaScript(command) { [weak self, weak webView] _, error in
                 guard error != nil else { return }
-                webView.evaluateJavaScript(
-                    "document.body.textContent='富文本引擎加载失败';" +
+                self?.renderedContent = ""
+                webView?.evaluateJavaScript(
+                    "const target=document.getElementById('display')||document.body;" +
+                    "target.textContent='富文本引擎加载失败';" +
                     "webkit.messageHandlers.height.postMessage(44);"
                 )
             }
         }
     }
-
-    private static let document = #"""
-    <!doctype html>
-    <html>
-    <head>
-      <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' file:; img-src data: blob: https: file:; connect-src 'none'; media-src data: blob:; object-src 'none'; form-action 'none'">
-      <link rel="stylesheet" href="katex/katex.min.css">
-      <script src="marked.umd.js"></script>
-      <script src="katex/katex.min.js"></script>
-      <script src="katex/auto-render.min.js"></script>
-      <script src="mermaid.min.js"></script>
-      <script src="vega.min.js"></script>
-      <script src="vega-lite.min.js"></script>
-      <script src="vega-embed.min.js"></script>
-      <script src="function-plot.js"></script>
-      <style>
-        :root{
-          color-scheme:light dark;
-          --text:#151412;--secondary:#686763;--muted:#777;
-          --fill:#f1f1ef;--soft-fill:#f7f7f5;--border:rgba(0,0,0,.1);
-          --quote:#c8c7c3;--error:#8a3a32;--error-fill:#fff5f3;--error-border:#efd5d0;
-        }
-        *{box-sizing:border-box}
-        html,body{margin:0;padding:0;background:transparent;color:var(--text)}
-        body{-webkit-text-size-adjust:100%;font:500 17px/1.58 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif;overflow:hidden;overflow-wrap:anywhere}
-        #root{width:100%;padding:0 0 1px}
-        p{margin:0 0 11px} p:last-child{margin-bottom:0}
-        h1,h2,h3,h4{line-height:1.25;margin:20px 0 9px;font-weight:700;letter-spacing:-.01em}
-        h1{font-size:26px} h2{font-size:23px} h3{font-size:20px} h4{font-size:18px}
-        ul,ol{margin:7px 0 12px;padding-left:23px} li{margin:4px 0}
-        strong{font-weight:750} em{font-style:italic} del{color:var(--muted)}
-        a{color:inherit;text-decoration:underline;text-underline-offset:3px}
-        code{font:500 .86em ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--fill);border-radius:5px;padding:2px 5px}
-        pre{margin:12px 0;overflow:auto;background:var(--fill);border:1px solid var(--border);border-radius:10px;padding:13px}
-        pre code{padding:0;background:transparent;white-space:pre;font-size:13px}
-        blockquote{margin:12px 0;padding:4px 0 4px 13px;border-left:3px solid var(--quote);color:var(--secondary)}
-        hr{border:0;border-top:1px solid var(--border);margin:20px 0}
-        table{display:block;max-width:100%;overflow:auto;border-collapse:collapse;margin:12px 0;font-size:14px}
-        th,td{border:1px solid var(--border);padding:7px 9px;text-align:left} th{background:var(--fill)}
-        img,svg,canvas{display:block;max-width:100%;height:auto;margin:10px auto}
-        .katex-display{overflow-x:auto;overflow-y:hidden;padding:6px 0}
-        .complex{margin:13px 0;max-width:100%;overflow:hidden}
-        .pending{color:var(--muted);font-size:14px}
-        .error{color:var(--error);background:var(--error-fill);border:1px solid var(--error-border);border-radius:9px;padding:9px 11px}
-        .artifact-button{width:100%;min-height:48px;border:1px solid var(--border);border-radius:12px;background:var(--soft-fill);color:var(--text);text-align:left;padding:12px 14px;font:600 15px -apple-system,BlinkMacSystemFont,sans-serif}
-        .artifact-preview{display:none;margin-top:8px;max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--soft-fill)}
-        @media (prefers-color-scheme:dark){
-          :root{
-            --text:#f2f2f2;--secondary:#aaa9a5;--muted:#949391;
-            --fill:#242426;--soft-fill:#1c1c1e;--border:rgba(255,255,255,.13);
-            --quote:#555558;--error:#ffb4aa;--error-fill:#2d1d1b;--error-border:#5b3330;
-          }
-        }
-      </style>
-    </head>
-    <body><main id="root"></main>
-    <script>
-      marked.setOptions({gfm:true,breaks:true});
-      mermaid.initialize({startOnLoad:false,securityLevel:"strict",theme:"neutral",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif"});
-      const tags=[
-        ["vega","<vega>","</vega>"],["mermaid","<mermaid>","</mermaid>"],
-        ["function","<function-plot>","</function-plot>"],
-        ["svg","<inline-artifact>","</inline-artifact>"],["artifact","<artifact>","</artifact>"]
-      ];
-      let renderID=0;
-      function sanitize(container){
-        container.querySelectorAll("script,iframe,object,embed,form,link,meta,base").forEach(n=>n.remove());
-        container.querySelectorAll("*").forEach(node=>{
-          [...node.attributes].forEach(attr=>{
-            const n=attr.name.toLowerCase(),v=attr.value.trim();
-            if(n.startsWith("on")||n==="srcdoc"||n==="nonce"||/javascript:/i.test(v))node.removeAttribute(attr.name);
-            if(["href","src","xlink:href"].includes(n)&&!(/^https:\/\//i.test(v)||/^#/.test(v)||/^data:image\//i.test(v)))node.removeAttribute(attr.name);
-          });
-        });
-      }
-      function parts(raw){
-        const out=[];let cursor=0;
-        while(cursor<raw.length){
-          let found=null;
-          for(const t of tags){const i=raw.indexOf(t[1],cursor);if(i>=0&&(!found||i<found.i))found={t,i};}
-          if(!found){out.push({kind:"text",raw:raw.slice(cursor)});break;}
-          if(found.i>cursor)out.push({kind:"text",raw:raw.slice(cursor,found.i)});
-          const start=found.i+found.t[1].length,end=raw.indexOf(found.t[2],start);
-          out.push({kind:found.t[0],raw:raw.slice(start,end<0?raw.length:end),done:end>=0});
-          cursor=end<0?raw.length:end+found.t[2].length;
-        }
-        return out;
-      }
-      function markdown(raw){
-        const host=document.createElement("section");
-        host.innerHTML=marked.parse(raw);
-        sanitize(host);
-        renderMathInElement(host,{throwOnError:false,strict:false,delimiters:[
-          {left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},
-          {left:"\\(",right:"\\)",display:false},{left:"$",right:"$",display:false}
-        ]});
-        return host;
-      }
-      async function complex(part,root){
-        const host=document.createElement("section");host.className="complex";root.appendChild(host);
-        if(!part.done&&part.kind!=="svg"){host.className+=" pending";host.textContent="生成中…";return;}
-        try{
-          if(part.kind==="svg"){host.innerHTML=part.raw+(part.raw.includes("</svg>")?"":"</svg>");sanitize(host);}
-          else if(part.kind==="mermaid"){const r=await mermaid.render("m"+(++renderID),part.raw.trim());host.innerHTML=r.svg;sanitize(host);}
-          else if(part.kind==="vega"){const spec=JSON.parse(part.raw);spec.width="container";spec.background="transparent";await vegaEmbed(host,spec,{actions:false,renderer:"svg"});}
-          else if(part.kind==="function"){
-            const spec=JSON.parse(part.raw);functionPlot({...spec,target:host,width:Math.max(270,root.clientWidth),height:240,grid:true});
-          }else{
-            const button=document.createElement("button");button.className="artifact-button";button.textContent="打开作品";
-            const preview=document.createElement("div");preview.className="artifact-preview";preview.innerHTML=part.raw;sanitize(preview);
-            button.onclick=()=>{preview.style.display=preview.style.display==="block"?"none":"block";reportHeight();};
-            host.append(button,preview);
-          }
-        }catch(error){host.className+=" error";host.textContent="内容显示失败："+(error&&error.message?error.message:"格式无效");}
-      }
-      async function renderMessage(raw){
-        const root=document.getElementById("root");root.replaceChildren();
-        for(const part of parts(raw)){if(part.kind==="text"){if(part.raw.trim())root.appendChild(markdown(part.raw));}else await complex(part,root);}
-        reportHeight();
-      }
-      let heightTimer=0;
-      function reportHeight(){clearTimeout(heightTimer);heightTimer=setTimeout(()=>webkit.messageHandlers.height.postMessage(Math.ceil(document.documentElement.scrollHeight)),20);}
-      new ResizeObserver(reportHeight).observe(document.body);
-      window.addEventListener("load",reportHeight);
-    </script></body></html>
-    """#
 }

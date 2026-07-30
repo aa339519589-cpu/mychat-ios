@@ -86,6 +86,7 @@ struct RootView: View {
             }
         }
         .task {
+            RichRendererPrewarmer.shared.prepare()
             guard session.phase == .restoring else { return }
             await session.restore()
         }
@@ -293,6 +294,7 @@ final class ChatStore: ObservableObject {
         let userID = UUID()
         let assistantID = UUID()
         let generationID = UUID()
+        let turnStartedAt = Date()
         let createConversation = !conversations.contains { $0.id == conversation.id }
         failedMessageID = nil
         retryContext = nil
@@ -316,15 +318,23 @@ final class ChatStore: ObservableObject {
                     assistantMessageID: assistantID,
                     generationID: generationID
                 )
-                let reply = try await api.waitForAssistantReply(
+                let reply = try await api.streamAssistantReply(
                     accepted,
                     conversationID: conversation.id,
-                    assistantMessageID: assistantID
+                    assistantMessageID: assistantID,
+                    turnStartedAt: turnStartedAt,
+                    onUpdate: { [weak self] content, thinking in
+                        guard let self,
+                              let index = self.messages.firstIndex(where: { $0.id == assistantID })
+                        else { return }
+                        self.messages[index].content = content
+                        self.messages[index].thinking = thinking
+                    }
                 )
                 if let index = messages.firstIndex(where: { $0.id == assistantID }) {
                     messages[index] = reply
                 }
-                try await refresh(conversationID: conversation.id)
+                try await refreshConversationList(conversationID: conversation.id)
             } catch is CancellationError {
                 return
             } catch {
@@ -355,10 +365,9 @@ final class ChatStore: ObservableObject {
         )
     }
 
-    private func refresh(conversationID: UUID) async throws {
+    private func refreshConversationList(conversationID: UUID) async throws {
         failedMessageID = nil
         retryContext = nil
-        messages = try await api.messages(conversationID: conversationID)
         conversations = try await api.conversations()
         selectedConversation = conversations.first(where: { $0.id == conversationID })
             ?? selectedConversation
@@ -740,11 +749,15 @@ struct MessageList: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: messages) { _, value in
-                guard let id = value.last?.id else { return }
+            .onChange(of: messages.count) { _, _ in
+                guard let id = messages.last?.id else { return }
                 withAnimation(.easeOut(duration: 0.16)) {
                     proxy.scrollTo(id, anchor: .bottom)
                 }
+            }
+            .onChange(of: messages.last?.content.count) { _, _ in
+                guard isSending, let id = messages.last?.id else { return }
+                proxy.scrollTo(id, anchor: .bottom)
             }
             .onChange(of: isSending) { _, _ in
                 guard let id = messages.last?.id else { return }
@@ -791,12 +804,18 @@ struct NativeMessageRow: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(AppPalette.text)
                             }
-                        } else if message.content.isEmpty && isActive {
-                            NativeThinkingIndicator()
-                                .transition(.opacity.combined(with: .move(edge: .top)))
                         } else {
-                            RichAssistantContent(text: displayText)
-                                .transition(.opacity)
+                            ZStack(alignment: .topLeading) {
+                                RichAssistantContent(text: displayText, isStreaming: isActive)
+                                    .frame(height: message.content.isEmpty ? 0 : nil)
+                                    .opacity(message.content.isEmpty ? 0 : 1)
+                                    .allowsHitTesting(!message.content.isEmpty)
+                                    .accessibilityHidden(message.content.isEmpty)
+                                if message.content.isEmpty && isActive {
+                                    NativeThinkingIndicator()
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
+                            }
                         }
                     }
                     .frame(maxWidth: .infinity, minHeight: 27, alignment: .leading)
