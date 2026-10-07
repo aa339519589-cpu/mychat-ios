@@ -1,0 +1,20 @@
+{
+  "upstream": "https://github.com/lxgw/LxgwWenKai/releases/tag/v1.522",
+  "upstream_sha256": "d4bdeb38a39151d74d084cba5090f8cb7d20bf83eedb78c35939ae70b9f4e3f6",
+  "license": "SIL OFL 1.1; original notice bundled; derived family renamed MyChat Text",
+  "advances_and_character_coverage": "preserved",
+  "outlines": "emboldened offline; no per-frame text stroke or extra drawing layers",
+  "faces": {
+    "MyChatText-Semibold.ttf": {
+      "weight": 600,
+      "strength_per_1000_em": 16,
+      "sha256": "b3bd1c4d2ab9a1c290fff01cdf2bdb0781db17b15058774a328bf8af199277aa"
+    },
+    "MyChatText-Bold.ttf": {
+      "weight": 700,
+      "strength_per_1000_em": 24,
+      "sha256": "d05ead45e74b6b051768d1d72823396d3790441536740ff83b2e0a6b09113777"
+    }
+  },
+  "punctuation_spacing": "UIFont cascade enables the font halt positioning; CJK punctuation uses half-em advances, Han retains full-em; contextual chws disabled to prevent double reduction."
+}

@@ -1,0 +1,16 @@
+{
+  "sourcePage": "https://www.anthropic.com/",
+  "copyright": "Copyright 2025-2026 Anthropic PBC",
+  "originalFontNamesPreserved": true,
+  "bodyAxes": {
+    "wght": 400,
+    "opsz": 16
+  },
+  "referenceGlyphComparison": "work/font25-official/glyph-fit.json",
+  "files": {
+    "AnthropicSerif.woff2": "e96fe97bb7ba2190a9a227d27380e0c79894408bfc6acea5a511774d93a16f69",
+    "AnthropicSerifItalic.woff2": "7f61e32b5941ad6e5699aeb3e03390a43e5f04f3bff6a5853bed08c802596f83",
+    "AnthropicSerif.ttf": "6acf0fe384f89a115b786fec8b0952ed755a63fc658629eb362d5c0362bc740f",
+    "AnthropicSerifItalic.ttf": "7d82b05377176a1b6a079b609fecb6144b5be9409ccb1ebf375970a0af27c97a"
+  }
+}

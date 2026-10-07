@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>MyChat</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.mychat.ios.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>mychat</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>MyChat 需要访问你的日历以创建和管理日程事件。</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>MyChat 需要访问你的日历以创建和管理日程事件。</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>MyChat 需要写入权限以将日程事件添加到你的日历。</string>
+	<key>NSCameraUsageDescription</key>
+	<string>MyChat 使用相机拍摄并添加到当前对话。</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>MyChat 使用你的位置信息以提供基于地理位置的智能回答与建议。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>MyChat 使用你的位置信息以提供基于地理位置的智能回答与建议。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MyChat 使用麦克风进行语音转写和语音对话。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>MyChat 读取你选择的照片并添加到当前对话。</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>MyChat 需要完整访问权限以创建和更新提醒事项。</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>MyChat 需要访问提醒事项以创建和管理待办事项与日程。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>MyChat 使用语音识别将你的讲话转换为文字。</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>ResponseFonts/AnthropicSerif.ttf</string>
+		<string>ResponseFonts/AnthropicSerifItalic.ttf</string>
+	</array>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+	</dict>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

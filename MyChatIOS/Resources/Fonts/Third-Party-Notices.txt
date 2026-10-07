@@ -1,0 +1,22 @@
+MyChat bundled font notices
+
+Newsreader
+Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
+Source: https://github.com/productiontype/Newsreader
+License: SIL Open Font License, Version 1.1. The complete original license is bundled as Newsreader-OFL.txt.
+
+Instrument Sans
+Copyright 2022 The Instrument Sans Project Authors (https://github.com/Instrument/instrument-sans)
+Source: https://github.com/Instrument/instrument-sans
+License: SIL Open Font License, Version 1.1. The complete original license is bundled as InstrumentSans-OFL.txt.
+
+LXGW WenKai Medium
+Copyright 2021-2026 LXGW; Copyright 2020 The Klee Project Authors.
+Source: https://github.com/lxgw/LxgwWenKai/releases/tag/v1.522
+License: SIL Open Font License, Version 1.1. The complete original license is bundled as LXGW-WenKai-OFL.txt.
+
+MyChat Text Semibold and Bold
+Derived from LXGW WenKai Medium v1.522, under the same SIL OFL 1.1.
+The family has been renamed. Original copyright and license are retained.
+Glyph outlines are emboldened offline by 16 and 24 units per 1000 em, respectively; character coverage and advance widths are preserved.
+Rebuild instructions and upstream SHA256: scripts/build_chinese_text_font.py.
