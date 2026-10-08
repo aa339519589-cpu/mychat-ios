@@ -477,7 +477,9 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(selectedProjects.waitForExistence(timeout: 5))
         XCTAssertTrue(selectedProjects.isSelected)
 
-        selectedProjects.tap()
+        let code = app.buttons["编程"].firstMatch
+        XCTAssertTrue(waitForHittable(code, timeout: 5))
+        code.tap()
         sidebar.tap()
         let selectedCode = app.buttons["编程"].firstMatch
         XCTAssertTrue(selectedCode.waitForExistence(timeout: 5))
@@ -957,15 +959,45 @@ final class MyChatUITests: XCTestCase {
             (model, "选择模型"),
             (add, "添加到聊天")
         ]
+        func interactionState(_ phase: String, title: String) -> String {
+            let keyboard = app.keyboards.firstMatch
+            let keyboardFrame = keyboard.exists ? String(describing: keyboard.frame) : "absent"
+            let addExists = add.exists, modelExists = model.exists
+            let addFrame = addExists ? String(describing: add.frame) : "absent"
+            let modelFrame = modelExists ? String(describing: model.frame) : "absent"
+            return "COMPOSER_REOPEN_AX phase=\(phase) route=\(title) sheetTitleExists=\(app.staticTexts[title].firstMatch.exists) addExists=\(addExists) addEnabled=\(addExists && add.isEnabled) addHittable=\(addExists && add.isHittable) addFrame=\(addFrame) modelExists=\(modelExists) modelEnabled=\(modelExists && model.isEnabled) modelHittable=\(modelExists && model.isHittable) modelFrame=\(modelFrame) keyboardFrame=\(keyboardFrame)"
+        }
         for (button, title) in routes {
-            XCTAssertTrue(waitForHittable(button, timeout: 5))
+            guard waitForHittable(button, timeout: 5) else {
+                saveScreenshot(app, "composer-unavailable-before-" + title)
+                let state = interactionState("before", title: title)
+                let details = XCTAttachment(string: state)
+                details.lifetime = .keepAlways
+                self.add(details)
+                print(state)
+                XCTFail("Composer control unavailable before \(title); \(state)")
+                return
+            }
             button.tap()
-            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
+            let sheetTitle = app.staticTexts[title].firstMatch
+            XCTAssertTrue(sheetTitle.waitForExistence(timeout: 10))
             let close = app.buttons["关闭"].firstMatch
             XCTAssertTrue(close.waitForExistence(timeout: 5))
             close.tap()
-            XCTAssertTrue(waitForHittable(button, timeout: 10),
-                "The same composer button must remain available after each dismissal")
+            let dismissedAndInteractive = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                !sheetTitle.exists && add.isHittable && model.isHittable
+            }, object: nil)
+            let settled = XCTWaiter.wait(for: [dismissedAndInteractive], timeout: 10)
+            if settled != .completed {
+                saveScreenshot(app, "composer-unavailable-after-" + title)
+                let state = interactionState("after", title: title)
+                let details = XCTAttachment(string: state)
+                details.lifetime = .keepAlways
+                self.add(details)
+                print(state)
+            }
+            XCTAssertEqual(settled, .completed,
+                "Dismissal must finish and both composer controls must return; \(interactionState("after", title: title))")
         }
     }
 
@@ -1274,9 +1306,22 @@ final class MyChatUITests: XCTestCase {
             for cycle in 0..<3 {
                 row.tap()
                 XCTAssertTrue(app.staticTexts["思考摘要"].firstMatch.waitForExistence(timeout: 5))
-                XCTAssertTrue(app.staticTexts[opening].firstMatch.waitForExistence(timeout: 5))
-                XCTAssertTrue(app.staticTexts[preview].firstMatch.exists,
-                    "Opening the summary must preserve every paragraph")
+                let sheet = app.descendants(matching: .any).matching(identifier: "document.thinking.sheet").firstMatch
+                XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+                let body = sheet.descendants(matching: .any).matching(identifier: "document.thinking.content").firstMatch
+                XCTAssertTrue(body.waitForExistence(timeout: 5))
+                // MarkdownBody is one attributed Text. Scope this to the sheet
+                // body so the obscured collapsed preview cannot satisfy it.
+                let bodyLabels = ([body.label] + body.staticTexts.allElementsBoundByIndex.map(\.label)).joined(separator: "\n")
+                let openingPresent = bodyLabels.contains(opening)
+                let latestPresent = bodyLabels.contains(preview)
+                let safeDiagnostic = "SUMMARY_EXPANDED_AX \(appearance)-\(cycle) sheet=document.thinking.sheet body=document.thinking.content elementType=\(body.elementType.rawValue) frame=\(body.frame) characters=\(bodyLabels.count) knownOpeningPresent=\(openingPresent) knownLatestPresent=\(latestPresent)"
+                print(safeDiagnostic)
+                XCTAssertTrue(openingPresent, "Opening paragraph missing from the expanded summary body")
+                XCTAssertTrue(latestPresent, "Latest paragraph missing from the expanded summary body")
+                let contents = XCTAttachment(string: safeDiagnostic)
+                contents.lifetime = .keepAlways
+                add(contents)
                 saveScreenshot(app, "reasoning-summary-expanded-\(appearance)-\(cycle)")
                 let close = app.buttons["关闭"].firstMatch
                 XCTAssertTrue(waitForHittable(close, timeout: 5))

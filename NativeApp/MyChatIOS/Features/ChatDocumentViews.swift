@@ -276,6 +276,8 @@ struct DocumentThoughtRow: View {
                         .accessibilityIdentifier("document.thinking.content")
                 }
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("document.thinking.sheet")
             .background(MyChatTheme.canvas)
             .presentationDetents([.medium, .large]).presentationCornerRadius(34)
         }
