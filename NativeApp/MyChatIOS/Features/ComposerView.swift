@@ -188,6 +188,7 @@ struct ComposerView: View {
             .buttonStyle(ComposerControlStyle())
             .disabled(appModel.editingMessageID != nil)
             .accessibilityLabel("添加内容和工具")
+            .accessibilityIdentifier("composer.add")
 
             Button {
                 HapticFeedback.play(.selection)
@@ -212,6 +213,7 @@ struct ComposerView: View {
             .buttonStyle(ComposerActionStyle())
             .accessibilityLabel("选择模型")
             .accessibilityValue(modelPickerLabel)
+            .accessibilityIdentifier("composer.model-picker")
 
             Spacer(minLength: 0)
 

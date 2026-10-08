@@ -57,8 +57,15 @@ final class MyChatUITests: XCTestCase {
         let app = launch()
         let input = app.textViews["composer.input"].firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        for label in ["添加内容和工具", "选择模型", "语音转文字"] {
-            let button = app.buttons[label].firstMatch
+        let composerControls: [(String, String)] = [
+            ("composer.add", "添加内容和工具"),
+            ("composer.model-picker", "选择模型"),
+            ("语音转文字", "语音转文字")
+        ]
+        for (identifier, expectedLabel) in composerControls {
+            let button = app.buttons[identifier].firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 5), "Missing composer control: \(identifier)")
+            XCTAssertTrue(button.label.contains(expectedLabel), "Unexpected accessibility label: \(button.label)")
             XCTAssertGreaterThanOrEqual(button.frame.width, 44)
             XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         }
@@ -755,7 +762,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testConnectedModelsRemainSelectableWithoutMislabelingDefaults() {
         let app = launch(extra: ["--ui-test-claude-models", "--ui-test-connected-model"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         app.buttons["model.more"].tap()
         XCTAssertTrue(app.staticTexts["已连接模型"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["自定义模型"].exists)
@@ -795,7 +802,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testClaudeModelNamesAndNativeEffortNavigation() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--ui-test-claude-models"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         for name in ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"] {
             XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
         }
@@ -817,7 +824,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testModelsEffortAndCompactAddMenu() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         XCTAssertTrue(app.buttons["model.more"].waitForExistence(timeout: 5))
         app.buttons["model.effort"].tap()
         XCTAssertTrue(app.buttons["effort.low"].waitForExistence(timeout: 5)); app.buttons["effort.low"].tap()
@@ -827,7 +834,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["更多模型"].waitForExistence(timeout: 5))
         saveScreenshot(app, "more-models-dark")
         app.buttons["返回"].firstMatch.tap(); app.buttons["关闭"].firstMatch.tap()
-        app.buttons["添加内容和工具"].firstMatch.tap()
+        app.buttons["composer.add"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["添加到聊天"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["照片"].exists)
         let camera = app.buttons["拍照"].firstMatch
@@ -844,28 +851,34 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testComposerButtonsAcceptSmallHorizontalTouchDrift() {
         let app = launch(extra: ["--ui-test-open-conversation"])
-        let add = app.buttons["添加内容和工具"].firstMatch
-        let model = app.buttons["选择模型"].firstMatch
-        XCTAssertTrue(add.waitForExistence(timeout: 10))
-        XCTAssertTrue(model.waitForExistence(timeout: 10))
+        let add = app.buttons["composer.add"].firstMatch
+        let model = app.buttons["composer.model-picker"].firstMatch
+        guard add.waitForExistence(timeout: 10), model.waitForExistence(timeout: 10) else {
+            XCTFail("Expected stable composer controls in an existing conversation")
+            return
+        }
         waitForKeyboardDismissal(in: app)
-        XCTAssertTrue(waitForHittable(add, timeout: 10),
-            "The add button must be hittable in the settled existing conversation")
-        XCTAssertTrue(waitForHittable(model, timeout: 5))
 
         for (button, title) in [(add, "添加到聊天"), (model, "选择模型")] {
-            XCTAssertTrue(waitForHittable(button, timeout: 5),
-                "Button hit-test must be stable before the short-drift gesture; frame=\\(button.frame), keyboard=\\(app.keyboards.firstMatch.frame)")
+            let keyboard = app.keyboards.firstMatch
+            guard waitForHittable(button, timeout: 10) else {
+                XCTFail("Pre-gesture button is not hittable; frame=\(button.frame); keyboard=\(keyboard.exists ? String(describing: keyboard.frame) : "not present")")
+                return
+            }
             let origin = app.coordinate(withNormalizedOffset: .zero)
             let frame = button.frame
             origin.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).press(forDuration: 0.08,
                 thenDragTo: origin.withOffset(CGVector(dx: frame.midX + 15, dy: frame.midY)),
                 withVelocity: .slow, thenHoldForDuration: 0.01)
-            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 8),
-                "A short 15 pt horizontal finger drift must not cancel the \\(title) button tap")
+            let sheetTitle = app.staticTexts[title].firstMatch
+            guard sheetTitle.waitForExistence(timeout: 8) else {
+                XCTFail("15 pt horizontal drift failed to open \(title); button frame=\(frame); keyboard=\(keyboard.exists ? String(describing: keyboard.frame) : "not present")")
+                return
+            }
             app.buttons["关闭"].firstMatch.tap()
             waitForKeyboardDismissal(in: app)
-            XCTAssertTrue(waitForHittable(button, timeout: 8))
+            XCTAssertTrue(waitForHittable(button, timeout: 8),
+                "Composer control must be hittable after dismissal: \(title)")
         }
     }
 
@@ -876,8 +889,8 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(conversation.waitForExistence(timeout: 5))
         conversation.tap()
 
-        let add = app.buttons["添加内容和工具"].firstMatch
-        let model = app.buttons["选择模型"].firstMatch
+        let add = app.buttons["composer.add"].firstMatch
+        let model = app.buttons["composer.model-picker"].firstMatch
         XCTAssertTrue(waitForHittable(add, timeout: 10),
             "The composer must become interactive after a history row closes the drawer")
         XCTAssertTrue(waitForHittable(model, timeout: 5))
@@ -904,8 +917,8 @@ final class MyChatUITests: XCTestCase {
     @MainActor func testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard() {
         for extra in [[], ["--ui-test-open-conversation"]] {
             let app = launch(extra: extra)
-            let add = app.buttons["添加内容和工具"].firstMatch
-            let model = app.buttons["选择模型"].firstMatch
+            let add = app.buttons["composer.add"].firstMatch
+            let model = app.buttons["composer.model-picker"].firstMatch
             let input = app.descendants(matching: .any).matching(identifier: "composer.input").firstMatch
             XCTAssertTrue(add.waitForExistence(timeout: 10))
             XCTAssertTrue(model.waitForExistence(timeout: 10))
@@ -976,7 +989,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testHomeMascotAndPrivateHeaderPositions() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
-        app.buttons["选择模型"].tap()
+        app.buttons["composer.model-picker"].tap()
         app.buttons["关闭"].firstMatch.tap()
         let logo = app.images["home.logo"]
         XCTAssertTrue(logo.waitForExistence(timeout: 5))
@@ -1036,7 +1049,7 @@ final class MyChatUITests: XCTestCase {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--layout-audit"])
         // Close the initial keyboard through a real modal, then start from the
         // same resting state as the user's recording.
-        app.buttons["选择模型"].tap()
+        app.buttons["composer.model-picker"].tap()
         app.buttons["关闭"].firstMatch.tap()
         let input = app.textViews["composer.input"]
         let surface = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
@@ -1072,7 +1085,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertEqual(logo.frame.minY, openLogo.minY, accuracy: 0.5)
             XCTAssertEqual(surface.frame.minY, openSurface.minY, accuracy: 0.5)
             saveScreenshot(app, "input-short-stable-\(cycle)")
-            app.buttons["选择模型"].tap()
+            app.buttons["composer.model-picker"].tap()
             app.buttons["关闭"].firstMatch.tap()
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             XCTAssertEqual(logo.frame.minY, restingLogo.minY, accuracy: 0.5)
@@ -1162,7 +1175,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["Swift 代码"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-code-\(appearance)")
             app.buttons["关闭"].firstMatch.tap()
-            app.buttons["选择模型"].firstMatch.tap()
+            app.buttons["composer.model-picker"].firstMatch.tap()
             XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(app.staticTexts["测试模型"].firstMatch.exists,
                 "The selected fixture model must remain available in the native model picker")
@@ -1222,12 +1235,12 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["关闭文件预览"].firstMatch.waitForExistence(timeout: 5))
         saveScreenshot(app, "uploaded-pdf-preview")
         app.buttons["关闭文件预览"].firstMatch.tap()
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.switches["扩展思考"].exists)
         XCTAssertFalse(app.staticTexts["思考深度"].exists)
         app.buttons["关闭"].firstMatch.tap()
-        app.buttons["添加内容和工具"].firstMatch.tap()
+        app.buttons["composer.add"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["照片"].firstMatch.exists)
         XCTAssertTrue(app.buttons["拍照"].firstMatch.exists)
@@ -1237,7 +1250,7 @@ final class MyChatUITests: XCTestCase {
         let photo = app.buttons["添加最近照片"].firstMatch
         if photo.exists {
             photo.tap()
-            XCTAssertTrue(app.buttons["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["composer.model-picker"].firstMatch.waitForExistence(timeout: 10))
             let image = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "attachment.remove-")).firstMatch
             XCTAssertTrue(image.waitForExistence(timeout: 5))
             saveScreenshot(app, "recent-photo-attached")
