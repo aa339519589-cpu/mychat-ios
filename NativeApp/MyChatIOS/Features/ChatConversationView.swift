@@ -2640,22 +2640,20 @@ private struct MessageBlockSlot: Identifiable {
 }
 
 private struct MessageRenderInput: Hashable { let source: String; let isStreaming: Bool }
-@MainActor private final class MessageRenderModel: ObservableObject {
+@MainActor final class MessageRenderModel: ObservableObject {
     @Published private(set) var document: RenderedMessage
-    private let publicationID = UUID()
     private var requestedRevision = 0
     private var submittedRevision = 0
     private var publishedRevision = 0
     private var latestRequest: RenderRequest?
     private var renderTask: Task<Void, Never>?
     private var isSuspended = false
-    private var scrollController: ChatScrollController?
 
     init(key: String, source: String, isStreaming: Bool) {
         document = ChatPresentationCache.document(key: key, source: source, streaming: isStreaming)
     }
 
-    func update(key: String, source: String, isStreaming: Bool, scrollController: ChatScrollController?) async {
+    func update(key: String, source: String, isStreaming: Bool, scrollController _: ChatScrollController?) async {
         requestedRevision += 1
         if !isSuspended, document.blocks.isEmpty, !source.isEmpty, source.utf8.count <= 1_024 {
             document = ChatPresentationCache.document(key: key, source: source, streaming: isStreaming)
@@ -2664,7 +2662,6 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
             return
         }
         latestRequest = RenderRequest(key: key, source: source, isStreaming: isStreaming)
-        self.scrollController = scrollController
         scheduleRender()
     }
 
@@ -2686,9 +2683,8 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
 
     private func renderLatestRequests() async {
         while !Task.isCancelled, !isSuspended, requestedRevision > submittedRevision {
-            // AppModel already coalesces incoming deltas at 25 Hz. Avoid adding
-            // another timer before parsing; revision tracking below still renders
-            // the latest complete Markdown snapshot without delaying its arrival.
+            // Parse as soon as work is available. There is no token, character,
+            // or time threshold; a busy parser catches up to the latest source.
             guard !Task.isCancelled, !isSuspended, let request = latestRequest else { return }
             let targetRevision = requestedRevision
             let result = await Task.detached(priority: .userInitiated) {
@@ -2713,8 +2709,9 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
                 self.publishedRevision = targetRevision
                 if self.document != result { self.document = result }
             }
-            if let scrollController { scrollController.publishWhenIdle(id: publicationID, publish) }
-            else { publish() }
+            // Reading-position anchoring belongs to ChatScrollController.
+            // Received body text must not wait for a drag/deceleration to end.
+            publish()
         }
     }
 
@@ -4038,8 +4035,10 @@ extension EnvironmentValues {
 }
 
 enum ResponseRevealTiming {
-    static func step(added: Int) -> TimeInterval {
-        added > 1 ? min(0.012, 0.08 / Double(added - 1)) : 0
+    static func step(added _: Int) -> TimeInterval {
+        // All characters in a received delta begin drawing together. Opacity
+        // easing is visual only; it must not introduce a typewriter queue.
+        0
     }
 
     static func opacity(now: TimeInterval, born: TimeInterval) -> Double {

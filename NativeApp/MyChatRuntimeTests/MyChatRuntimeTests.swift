@@ -856,11 +856,11 @@ import Combine
         XCTAssertEqual(DotOutputPosition.advance(displayed: 100, target: 100.1, elapsed: 1 / 60), 100.1)
     }
 
-    func testResponseRevealTimingKeepsGraphemesAndFinishesAfterCompletion() {
+    func testResponseRevealStartsEveryReceivedGraphemeImmediately() {
         for source in ["中文渐进显示", "English streaming", "标题 **粗体** 👨‍👩‍👧‍👦 e\u{301}"] {
             let count = source.count
             let step = ResponseRevealTiming.step(added: count)
-            XCTAssertLessThanOrEqual(Double(max(0, count - 1)) * step, 0.080001)
+            XCTAssertEqual(step, 0, "A received delta must not be paced character by character")
             for index in 0..<count {
                 let born = 100 + Double(index) * step
                 XCTAssertEqual(ResponseRevealTiming.opacity(now: born - 0.01, born: born), 0)
@@ -870,8 +870,34 @@ import Combine
             }
         }
         XCTAssertEqual(ResponseRevealTiming.step(added: 1), 0)
-        XCTAssertLessThanOrEqual(9_999 * ResponseRevealTiming.step(added: 10_000), 0.080001)
+        XCTAssertEqual(ResponseRevealTiming.step(added: 10_000), 0)
+        var births = ResponseGlyphBirths<Int>()
+        XCTAssertEqual(births.update(indices: [0, 1, 2], now: 100), [0: 100, 1: 100, 2: 100])
+        XCTAssertEqual(births.update(indices: [0, 1, 2, 3, 4], now: 101),
+            [0: 100, 1: 100, 2: 100, 3: 101, 4: 101])
         XCTAssertEqual(Array("👨‍👩‍👧‍👦e\u{301}").count, 2)
+    }
+
+    func testMarkdownPublicationDoesNotWaitForScrollInteractionToEnd() async throws {
+        let controller = ChatScrollController()
+        controller.setInteractionActive(true)
+        defer { controller.setInteractionActive(false) }
+        let key = "offline-stream-publication:" + UUID().uuidString
+        let renderer = MessageRenderModel(key: key, source: "first", isStreaming: true)
+        let published = expectation(description: "The next received body is published during scrolling")
+        var received = false
+        let observation = renderer.$document.dropFirst().sink { document in
+            guard !received, document.blocks == [.paragraph("first second")] else { return }
+            received = true
+            published.fulfill()
+        }
+        defer { observation.cancel() }
+        // Unlike first-ink initialization, this is the normal asynchronous
+        // Markdown path. It previously queued its publication until scroll idle.
+        await renderer.update(key: key, source: "first second", isStreaming: true,
+            scrollController: controller)
+        await fulfillment(of: [published], timeout: 2)
+        XCTAssertEqual(renderer.document.blocks, [.paragraph("first second")])
     }
 
     func testGenerationDiagnosticsSeparateNetworkTextFromMarkdownPresentation() {
