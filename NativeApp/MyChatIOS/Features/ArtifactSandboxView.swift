@@ -46,6 +46,29 @@ enum StreamingArtifactSource {
     }
 }
 
+/// Preparation is keyed only by source and streaming state. Presentation flags
+/// remain part of the coordinator's applied signature, so appearance changes
+/// still reach WebKit without rescanning an unchanged SVG.
+struct ArtifactSourcePreparationCache {
+    private struct Input: Equatable {
+        let rawHTML: String
+        let isStreaming: Bool
+    }
+
+    private var input: Input?
+    private var renderedHTML = ""
+    private(set) var preparationCount = 0
+
+    mutating func prepare(rawHTML: String, isStreaming: Bool) -> String {
+        let next = Input(rawHTML: rawHTML, isStreaming: isStreaming)
+        guard input != next else { return renderedHTML }
+        renderedHTML = StreamingArtifactSource.renderableHTML(rawHTML, streaming: isStreaming)
+        input = next
+        preparationCount &+= 1
+        return renderedHTML
+    }
+}
+
 struct ArtifactSandboxView: UIViewRepresentable {
     let rawHTML: String
     let colorScheme: ColorScheme
@@ -119,11 +142,22 @@ struct ArtifactSandboxView: UIViewRepresentable {
     """#
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        private struct RenderSignature: Equatable {
+            let colorScheme: ColorScheme
+            let isStreaming: Bool
+            let inline: Bool
+            let reduceMotion: Bool
+            let source: String
+        }
+
         private var pending: ArtifactSandboxView?
-        private var signature: String?
+        private var signature: RenderSignature?
+        private var sourceCache = ArtifactSourcePreparationCache()
         private var ready = false
         private var applying = false
         private var snapshotScheduled = false
+
+        var sourcePreparationCount: Int { sourceCache.preparationCount }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.name == "artifactContentHeight", let number = message.body as? NSNumber else { return }
@@ -144,8 +178,10 @@ struct ArtifactSandboxView: UIViewRepresentable {
 
         private func applyLatest(in view: WKWebView) {
             guard ready, !applying, let parent = pending else { return }
-            let source = StreamingArtifactSource.renderableHTML(parent.rawHTML, streaming: parent.isStreaming)
-            let nextSignature = "\(parent.colorScheme)-\(parent.isStreaming)-\(parent.inline)-\(parent.reduceMotion)-\(source)"
+            let source = sourceCache.prepare(rawHTML: parent.rawHTML, isStreaming: parent.isStreaming)
+            let nextSignature = RenderSignature(colorScheme: parent.colorScheme,
+                isStreaming: parent.isStreaming, inline: parent.inline,
+                reduceMotion: parent.reduceMotion, source: source)
             guard signature != nextSignature else { return }
             applying = true
             let encoded = Data(source.utf8).base64EncodedString()

@@ -64,6 +64,69 @@ import CoreText
         }
     }
 
+    func testArtifactSourcePreparationCachePreservesPartialSVGAndCompletion() {
+        let source = #"<svg><style>circle { fill: red; }</style><!-- retained --><circle data-label="太阳" r="20"/></svg>"#
+        var cache = ArtifactSourcePreparationCache()
+        for end in source.indices {
+            let prefix = String(source[..<end])
+            let expected = StreamingArtifactSource.renderableHTML(prefix, streaming: true)
+            XCTAssertEqual(cache.prepare(rawHTML: prefix, isStreaming: true), expected)
+            let preparations = cache.preparationCount
+            XCTAssertEqual(cache.prepare(rawHTML: prefix, isStreaming: true), expected)
+            XCTAssertEqual(cache.preparationCount, preparations,
+                "An unchanged source must not be prepared again")
+        }
+        XCTAssertEqual(cache.prepare(rawHTML: source, isStreaming: true), source)
+        let preparations = cache.preparationCount
+        XCTAssertEqual(cache.prepare(rawHTML: source, isStreaming: false), source)
+        XCTAssertEqual(cache.preparationCount, preparations + 1,
+            "Completion must invalidate the streaming preparation key")
+    }
+
+    func testStreamingArtifactCachesSourceAcrossUnchangedUpdatesAndAppearanceChanges() async throws {
+        let source = #"<svg id="cached-drawing" viewBox="0 0 300 200"><circle id="cached-sun" cx="100" cy="100" r="20"/></svg>"#
+        let coordinator = ArtifactSandboxView.Coordinator()
+        let initial = ArtifactSandboxView(rawHTML: source, colorScheme: .light,
+            isStreaming: true, inline: true, reduceMotion: true)
+        let web = initial.makeWebView(coordinator: coordinator)
+        web.frame = CGRect(x: 0, y: 0, width: 390, height: 260)
+        defer { web.stopLoading(); web.navigationDelegate = nil }
+
+        func waitFor(_ expression: String) async throws {
+            for _ in 0..<100 {
+                let ready = try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+                    web.evaluateJavaScript(expression, in: nil, in: .defaultClient) { result in
+                        switch result {
+                        case .success(let value): continuation.resume(returning: value as? Bool ?? false)
+                        case .failure(let error): continuation.resume(throwing: error)
+                        }
+                    }
+                }
+                if ready == true { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            throw NSError(domain: "ArtifactPreparationTest", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Artifact preparation fixture did not become ready: \(expression)"])
+        }
+
+        try await waitFor("document.getElementById('cached-sun') !== null")
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1)
+        for _ in 0..<240 { coordinator.update(initial, in: web) }
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1,
+            "Unchanged native view updates must reuse the prepared source")
+
+        coordinator.update(ArtifactSandboxView(rawHTML: source, colorScheme: .dark,
+            isStreaming: true, inline: true, reduceMotion: true), in: web)
+        try await waitFor("document.documentElement.style.colorScheme === 'dark'")
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1,
+            "Appearance changes must update WebKit without rescanning source")
+
+        coordinator.update(ArtifactSandboxView(rawHTML: source, colorScheme: .dark,
+            isStreaming: false, inline: true, reduceMotion: true), in: web)
+        try await waitUntil { coordinator.sourcePreparationCount == 2 }
+        XCTAssertEqual(coordinator.sourcePreparationCount, 2)
+    }
+
     func testHapticSemanticsRespectPreferenceAndReducedMotion() {
         let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
         for event in events {

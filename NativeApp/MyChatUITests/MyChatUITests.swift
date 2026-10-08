@@ -537,7 +537,15 @@ final class MyChatUITests: XCTestCase {
     }
 
     @MainActor func testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
-        let app = launch(extra: ["--ui-test-artifacts-large", "--artifact-motion-audit"])
+        verifyArtifactEdgeSwipe(fixture: "--ui-test-artifacts-large")
+    }
+
+    @MainActor func testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
+        verifyArtifactEdgeSwipe(fixture: "--ui-test-artifacts-svg-large")
+    }
+
+    @MainActor private func verifyArtifactEdgeSwipe(fixture: String) {
+        let app = launch(extra: [fixture, "--artifact-motion-audit"])
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["可视化"].firstMatch.tap()
 

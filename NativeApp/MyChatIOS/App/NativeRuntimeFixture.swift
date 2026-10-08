@@ -14,6 +14,12 @@ enum NativeRuntimeFixture {
         String(repeating: "/* Artifact swipe fixture payload */", count: 4096) +
         "</style></head><body><main><h1>Artifact preview</h1><p>Large return fixture.</p></main></body></html>"
 
+    // Exercise the production inline-SVG renderer as well as the HTML renderer.
+    static let largeArtifactSVG =
+        "<inline-artifact><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 300 200\"><title>SVG return fixture</title>" +
+        "<!--" + String(repeating: "SVG return fixture payload ", count: 4096) + "-->" +
+        "<circle id=\"fixture-sun\" cx=\"150\" cy=\"100\" r=\"32\" fill=\"orange\"><animate attributeName=\"r\" values=\"32;36;32\" dur=\"2s\" repeatCount=\"indefinite\"/></circle></svg></inline-artifact>"
+
     @MainActor static func makeModel(dataClient: (any SupabaseDataServing)? = nil,
         workspaceClient: (any WorkspaceDataServing)? = nil,
         chatClient: any ChatAPIServing = ChatAPIClient(), stream: any ChatEventStreaming = JobEventStream()) -> AppModel {
@@ -499,11 +505,14 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                     "project_id": NSNull(), "created_at": date, "updated_at": date]])
             }
             let largeArtifactFixture = ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts-large")
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") || largeArtifactFixture {
+            let svgArtifactFixture = ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts-svg-large")
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") || largeArtifactFixture || svgArtifactFixture {
                 return (200, [[
                     "id": "70000000-0000-4000-8000-000000000064",
                     "title": "动画咖啡杯",
-                    "raw": largeArtifactFixture
+                    "raw": svgArtifactFixture
+                        ? NativeRuntimeFixture.largeArtifactSVG
+                        : largeArtifactFixture
                         ? NativeRuntimeFixture.largeArtifactHTML
                         : "<html><body><h1>Artifact preview</h1><p>Fixture artifact.</p></body></html>",
                     "conversation_id": NativeRuntimeFixture.conversationID,
