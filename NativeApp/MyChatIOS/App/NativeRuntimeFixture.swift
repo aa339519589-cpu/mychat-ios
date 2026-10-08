@@ -273,6 +273,28 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         switch path {
         case "/api/mobile/config":
             return (200, ["supabaseUrl": "https://isolated.mychat.invalid", "supabaseAnonKey": "isolated-anon"])
+        case "/api/code/capabilities":
+            return (200, [
+                "schemaVersion": 1, "cloudOnly": true, "durableQueue": true,
+                "execution": ["backend": "isolated", "location": "local_test", "configured": false,
+                              "verified": false, "reason": "Isolated test fixture; no Cloud verification"]
+            ])
+        case "/api/code/branches":
+            return (200, ["branches": [["name": "main"], ["name": "feature/fixture"]], "defaultBranch": "main"])
+        case "/api/github/status":
+            let connected = ProcessInfo.processInfo.arguments.contains("--ui-test-connected-github")
+            let login: Any = connected ? "fixture-user" : NSNull()
+            return (200, ["connected": connected, "login": login])
+        case "/api/github/repos":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-connected-github") else {
+                return (401, ["error": "GitHub fixture is not connected"])
+            }
+            return (200, ["repos": [[
+                "name": "mychat-ios",
+                "full_name": "aa339519589-cpu/mychat-ios",
+                "private": true,
+                "description": "Isolated repository fixture"
+            ]]])
         case "/api/models":
             let arguments = ProcessInfo.processInfo.arguments
             if arguments.contains("--ui-test-claude-models") || arguments.contains("--ui-test-long-model-names") {
@@ -508,3 +530,4 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 #endif
+
