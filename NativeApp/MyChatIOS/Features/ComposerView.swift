@@ -208,7 +208,12 @@ struct ComposerView: View {
                 .minimumScaleFactor(0.84)
                 .padding(.horizontal, 14)
                 .frame(height: 36)
-                .background(MyChatTheme.controlSurface, in: Capsule())
+                .background(MyChatTheme.composerControlSurface, in: Capsule())
+                .overlay {
+                    if colorScheme == .dark {
+                        Capsule().strokeBorder(MyChatTheme.composerControlBorder, lineWidth: 0.8)
+                    }
+                }
             }
             .buttonStyle(ComposerActionStyle())
             .accessibilityLabel("选择模型")
@@ -243,7 +248,12 @@ struct ComposerView: View {
                     .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
                     .foregroundStyle(MyChatTheme.text)
                     .frame(width: 36, height: 36)
-                    .background(MyChatTheme.controlSurface, in: Circle())
+                    .background(MyChatTheme.composerControlSurface, in: Circle())
+                    .overlay {
+                        if colorScheme == .dark {
+                            Circle().strokeBorder(MyChatTheme.composerControlBorder, lineWidth: 0.8)
+                        }
+                    }
             }
             .buttonStyle(ComposerActionStyle())
             .accessibilityLabel("暂停语音输入，检查草稿")
@@ -257,6 +267,11 @@ struct ComposerView: View {
                     .foregroundStyle(MyChatTheme.sendActionForeground)
                     .frame(width: 36, height: 36)
                     .background(MyChatTheme.sendActionSurface, in: Circle())
+                    .overlay {
+                        if colorScheme == .dark {
+                            Circle().strokeBorder(MyChatTheme.composerControlBorder, lineWidth: 0.8)
+                        }
+                    }
             }
             .buttonStyle(ComposerActionStyle())
             .disabled(!appModel.canSendCurrentDraft)
@@ -284,7 +299,12 @@ struct ComposerView: View {
                 }
                 .foregroundStyle(MyChatTheme.text)
                 .frame(width: 36, height: 36)
-                .background(MyChatTheme.controlSurface, in: Circle())
+                .background(MyChatTheme.composerControlSurface, in: Circle())
+                .overlay {
+                    if colorScheme == .dark {
+                        Circle().strokeBorder(MyChatTheme.composerControlBorder, lineWidth: 0.8)
+                    }
+                }
             }
             .buttonStyle(ComposerActionStyle())
             .disabled(appModel.isCurrentConversationCancelling)
@@ -1207,10 +1227,17 @@ final class ComposerTextView: UITextView {
 }
 
 private struct ComposerControlStyle: ButtonStyle {
+    @Environment(\.colorScheme) private var colorScheme
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .frame(width: 36, height: 36)
-            .background(MyChatTheme.controlSurface, in: Circle())
+            .background(MyChatTheme.composerControlSurface, in: Circle())
+            .overlay {
+                if colorScheme == .dark {
+                    Circle().strokeBorder(MyChatTheme.composerControlBorder, lineWidth: 0.8)
+                }
+            }
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
             .modifier(MyChatBubblePressFeedback(isPressed: configuration.isPressed, glassOwnsFeedback: false))
