@@ -170,6 +170,14 @@ struct CodeLanding: View {
     }
 }
 
+private struct CodeSendButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+    }
+}
+
 private struct CodeSessionDetailView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
