@@ -2548,6 +2548,195 @@ import Combine
         try await waitUntil { !model.isCurrentConversationGenerating }
     }
 
+    func testHTTPAuthorityDoesNotCompareDatabaseAndLiveSequenceNumbers() throws {
+        let job = UUID()
+        var accumulator = ChatStreamAccumulator()
+        XCTAssertTrue(accumulator.apply(ChatJobEvent(jobID: job, sequence: 100, payload: .textDelta("A"))))
+        let terminal = ChatTerminalSnapshot(status: .completed, content: "AB", thinking: "", sequence: 2,
+            errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)
+        XCTAssertFalse(accumulator.applyAuthoritativeTerminal(terminal, jobID: UUID()))
+        XCTAssertTrue(accumulator.applyAuthoritativeTerminal(terminal, jobID: job),
+            "A database terminal at 2 remains authoritative after live frame 100")
+        XCTAssertEqual(accumulator.sequence, 100, "HTTP must not rewrite the SSE cursor")
+        XCTAssertEqual(accumulator.content, "AB")
+        XCTAssertFalse(accumulator.applyAuthoritativeTerminal(terminal, jobID: job))
+        XCTAssertFalse(accumulator.apply(ChatJobEvent(jobID: job, sequence: 101, payload: .textDelta("LATE"))))
+        XCTAssertEqual(accumulator.content, "AB")
+    }
+
+    func testRecoveryCheckpointPolicyUsesRequestRevisionNotDatabaseCursor() throws {
+        let job = UUID()
+        let admission = ChatAdmission(schemaVersion: 1, jobID: job, generationID: job,
+            userMessageID: UUID(), assistantMessageID: UUID(), status: "running", created: false,
+            streamURL: URL(string: "https://isolated.mychat.invalid/live")!, trialRemaining: nil, trialLimit: nil)
+        var current = ChatStreamAccumulator()
+        current.apply(ChatJobEvent(jobID: job, sequence: 99, payload: .reasoningSummaryDelta("Checking")))
+        current.apply(ChatJobEvent(jobID: job, sequence: 100, payload: .textDelta("A")))
+        let publicSummary = try XCTUnwrap(ChatReasoningSummaryStorage.encode("Checking inputs."))
+        for databaseSequence in [2, 999] {
+            let recovery = ChatGenerationRecovery(admission: admission, sequence: databaseSequence,
+                content: "AB", thinking: publicSummary, media: [], terminal: nil)
+            XCTAssertTrue(ChatRecoveryCheckpointPolicy.mayReplaceRunningStream(recovery, current: current,
+                requestedStreamRevision: 100))
+            XCTAssertFalse(ChatRecoveryCheckpointPolicy.mayReplaceRunningStream(recovery, current: current,
+                requestedStreamRevision: 99), "A changed local revision rejects the late response regardless of DB seq")
+        }
+        for (body, thinking) in [("", publicSummary), ("OTHER", publicSummary), ("AB", "PRIVATE_REASONING")] {
+            let recovery = ChatGenerationRecovery(admission: admission, sequence: 999,
+                content: body, thinking: thinking, media: [], terminal: nil)
+            XCTAssertFalse(ChatRecoveryCheckpointPolicy.mayReplaceRunningStream(recovery, current: current,
+                requestedStreamRevision: 100), "A checkpoint cannot roll back visible body or public summary")
+        }
+    }
+
+    func testHTTPAuthoritativeTerminalWithSmallerDatabaseSequenceFinishesLiveStream() async throws {
+        let transport = ControlledChatTransport()
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic independent terminal cursors"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        transport.emit(.textDelta("A"), for: command, sequence: 100)
+        try await waitUntil { model.messages.last?.content == "A" }
+        let finalSummary = "Checked the complete response."
+        transport.terminalSnapshots[command.generationID] = ChatTerminalSnapshot(status: .completed,
+            content: "AB", thinking: try XCTUnwrap(ChatReasoningSummaryStorage.encode(finalSummary)), sequence: 2,
+            errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.messages.last?.content, "AB")
+        XCTAssertEqual(ChatReasoningSummaryStorage.decode(model.messages.last?.thinking), finalSummary)
+        XCTAssertEqual(transport.commands.count, 1)
+    }
+
+    func testForegroundRecoveryAcceptsSmallerDatabaseCursorWithoutResubmitting() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic independent recovery cursors"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+            title: "Cursor domains", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        transport.emit(.textDelta("A"), for: command, sequence: 100)
+        try await waitUntil { model.messages.last?.content == "A" }
+        transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+            jobID: command.generationID, generationID: command.generationID,
+            userMessageID: command.userMessageID, assistantMessageID: command.assistantMessageID,
+            status: "running", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/live")!,
+            trialRemaining: nil, trialLimit: nil), sequence: 2, content: "AB", thinking: "", media: [], terminal: nil)
+        await model.resumeAuthentication()
+        try await waitUntil { transport.streamStarts.count == 2 && model.messages.last?.content == "AB" }
+        XCTAssertEqual(transport.streamStarts.map { $0.fromSequence }, [0, 2])
+        XCTAssertEqual(transport.commands.count, 1)
+        transport.emit(.textDelta("C"), for: command, sequence: 3)
+        try await waitUntil {
+            model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+                if case let .text(value) = $0.content { return value }; return nil
+            }.joined() == "ABC"
+        }
+        transport.complete(command, text: "ABC", sequence: 4)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.messages.last?.content, "ABC")
+    }
+
+    func testHTTPCheckpointCannotReplaceLiveUpdatesAfterLookupStarts() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic lookup revision fence"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer {
+            transport.heldRecovery?.resume()
+            transport.heldRecovery = nil
+            transport.continuations[command.generationID]?.finish()
+        }
+        await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+            title: "Request revision", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        transport.emit(.textDelta("A"), for: command, sequence: 100)
+        try await waitUntil { model.messages.last?.content == "A" }
+        transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+            jobID: command.generationID, generationID: command.generationID,
+            userMessageID: command.userMessageID, assistantMessageID: command.assistantMessageID,
+            status: "running", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/live")!,
+            trialRemaining: nil, trialLimit: nil), sequence: 999, content: "AB", thinking: "", media: [], terminal: nil)
+        transport.holdRecovery = true
+        await model.resumeAuthentication()
+        try await waitUntil { transport.heldRecovery != nil }
+        transport.emit(.textDelta("B"), for: command, sequence: 101)
+        func body() -> String {
+            model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+                if case let .text(value) = $0.content { return value }; return nil
+            }.joined()
+        }
+        try await waitUntil { body() == "AB" }
+        transport.holdRecovery = false
+        transport.recovery = nil
+        transport.heldRecovery?.resume()
+        transport.heldRecovery = nil
+        let deadline = Date().addingTimeInterval(1)
+        while transport.recoveryReadCount < 2, Date() < deadline {
+            await model.resumeAuthentication()
+            await Task.yield()
+        }
+        XCTAssertGreaterThanOrEqual(transport.recoveryReadCount, 2)
+        XCTAssertEqual(transport.streamStarts.count, 1,
+            "Even matching text and a larger DB seq cannot replace a consumer that advanced during the lookup")
+        XCTAssertEqual(body(), "AB")
+        transport.complete(command, text: "ABC", sequence: 102)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+    }
+
+    func testHTTPRecoveryDecodesDedicatedPublicSummaryWithoutRelabelingRawThinking() async throws {
+        let conversation = UUID(), job = UUID(), user = UUID(), assistant = UUID()
+        for summary in ["Checked the inputs.", nil] as [String?] {
+            var output: [String: Any] = ["content": "AB", "thinking": "PRIVATE_REASONING"]
+            if let summary { output["reasoningSummary"] = summary }
+            let data = try JSONSerialization.data(withJSONObject: ["job": [
+                "id": job.uuidString, "type": "chat.generation", "queue": "chat", "status": "completed",
+                "subject": ["conversationId": conversation.uuidString, "userMessageId": user.uuidString,
+                    "assistantMessageId": assistant.uuidString], "eventSequence": 2, "result": output
+            ], "streamUrl": "/api/v1/jobs/\(job.uuidString)/live"])
+            let recorder = ChatAdmissionRetryRecorder(responses: [
+                (200, data, ["Content-Type": "application/json"]),
+                (200, data, ["Content-Type": "application/json"])
+            ])
+            ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+            defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let client = ChatAPIClient(session: session, baseURL: URL(string: "https://mychat.invalid")!)
+            let recovered = try await client.conversationGeneration(conversationID: conversation, accessToken: "fixture-only")
+            let observed = try await client.terminalSnapshot(conversationID: conversation, jobID: job, accessToken: "fixture-only")
+            let recovery = try XCTUnwrap(recovered)
+            let terminal = try XCTUnwrap(observed)
+            XCTAssertEqual(recovery.sequence, 2)
+            XCTAssertEqual(ChatReasoningSummaryStorage.decode(recovery.thinking), summary)
+            XCTAssertEqual(ChatReasoningSummaryStorage.decode(terminal.thinking), summary)
+            if summary == nil {
+                XCTAssertEqual(recovery.thinking, "PRIVATE_REASONING", "Raw reasoning stays untagged")
+            }
+            XCTAssertEqual(recorder.requestCount, 2)
+        }
+    }
+
     func testTerminalSummaryUsesOnlyTaggedValuesAndIsIdempotent() throws {
         let job = UUID()
         var entries: [ChatProcessEntry] = []
@@ -2840,7 +3029,7 @@ import Combine
         XCTAssertEqual(model.messages.last?.content, "XY")
     }
 
-    func testOlderForegroundSnapshotDoesNotReplaceNewerLiveCursor() async throws {
+    func testForegroundCheckpointCannotRollBackPublishedBody() async throws {
         for checkpoint in [1, 2] {
             let transport = ControlledChatTransport()
             let data = ControlledConversationStore()
@@ -2890,7 +3079,7 @@ import Combine
                 await Task.yield()
             }
             XCTAssertGreaterThanOrEqual(transport.recoveryReadCount, 2)
-            XCTAssertEqual(transport.streamStarts.count, 1, "Older/equal nonterminal checkpoints must keep the current consumer")
+            XCTAssertEqual(transport.streamStarts.count, 1, "A database cursor never authorizes rolling back the published body")
             XCTAssertEqual(projectedText(), "AB")
             transport.emit(.textDelta("C"), for: command, sequence: 3)
             try await waitUntil { projectedText() == "ABC" }

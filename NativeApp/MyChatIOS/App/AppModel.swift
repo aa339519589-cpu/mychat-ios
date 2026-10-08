@@ -2385,6 +2385,7 @@ final class AppModel: ObservableObject {
                 guard self.authSession?.user.id == expectedUserID,
                       session.user.id == expectedUserID,
                       self.activeConversationID == conversationID else { return }
+                let requestedStreamRevision = self.streamAccumulators[conversationID]?.sequence
                 let recovery = try await self.chatClient.conversationGeneration(
                     conversationID: conversationID,
                     accessToken: session.accessToken
@@ -2412,17 +2413,18 @@ final class AppModel: ObservableObject {
                 }
                 if let activeGenerationTask {
                     guard let activeGenerationID,
+                          recovery.admission.jobID == activeGenerationID,
                           recovery.admission.generationID == activeGenerationID,
                           self.generationIDs[conversationID] == activeGenerationID,
                           self.generatingConversationIDs.contains(conversationID) else { return }
-                    // This HTTP lookup can finish after newer SSE events. An
-                    // older checkpoint must not roll back the visible response
-                    // or move the durable replay cursor backwards.
-                    if let sequence = self.streamAccumulators[conversationID]?.sequence {
-                        if recovery.sequence < sequence { return }
-                        // With an equal nonterminal cursor the live consumer
-                        // already owns this checkpoint; let its replay continue.
-                        if recovery.sequence == sequence, recovery.terminal == nil { return }
+                    // /live seq and HTTP eventSequence are different domains.
+                    // A nonterminal lookup may replace this consumer only if no
+                    // new local output arrived during the request and none of
+                    // the already-published body/summary/media would be lost.
+                    if recovery.terminal == nil {
+                        let current = self.streamAccumulators[conversationID] ?? ChatStreamAccumulator()
+                        guard ChatRecoveryCheckpointPolicy.mayReplaceRunningStream(recovery, current: current,
+                            requestedStreamRevision: requestedStreamRevision) else { return }
                     }
                     // Replace the old stream only after the server confirms the
                     // exact generation and supplies its recovery checkpoint.
@@ -4041,7 +4043,7 @@ final class AppModel: ObservableObject {
                     sequence: resolved.sequence,
                     payload: .terminal(resolved)
                 )
-                guard accumulator.apply(terminalEvent) else { continue }
+                guard accumulator.applyAuthoritativeTerminal(resolved, jobID: jobID) else { continue }
                 recordProcessEvent(terminalEvent, command: command)
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(

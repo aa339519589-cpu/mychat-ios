@@ -523,6 +523,8 @@ struct ChatStreamAccumulator: Equatable, Sendable {
     private(set) var media: [ChatGeneratedMedia] = []
     private(set) var searches: [ChatToolSearch] = []
     private(set) var terminal: ChatTerminalSnapshot?
+    // This cursor belongs only to the current SSE consumer. The /live relay
+    // renumbers frames; it cannot be compared with HTTP database eventSequence.
     private(set) var sequence: Int?
     private var jobID: UUID?
 
@@ -561,12 +563,42 @@ struct ChatStreamAccumulator: Equatable, Sendable {
             if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) { reasoningSummary = summary }
             media = snapshot.media
         case let .terminal(snapshot):
-            content = snapshot.content
-            thinking = snapshot.thinking
-            if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) { reasoningSummary = summary }
-            media = snapshot.media
-            terminal = snapshot
+            replaceTerminal(snapshot)
         }
+        return true
+    }
+
+    /// HTTP status is an independent, authenticated authority for this job.
+    /// Its database sequence never advances or gates the live-stream cursor.
+    @discardableResult mutating func applyAuthoritativeTerminal(_ snapshot: ChatTerminalSnapshot, jobID: UUID) -> Bool {
+        guard snapshot.sequence >= 0, terminal == nil,
+              self.jobID == nil || self.jobID == jobID else { return false }
+        self.jobID = jobID
+        replaceTerminal(snapshot)
+        return true
+    }
+
+    private mutating func replaceTerminal(_ snapshot: ChatTerminalSnapshot) {
+        content = snapshot.content
+        thinking = snapshot.thinking
+        if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) { reasoningSummary = summary }
+        media = snapshot.media
+        terminal = snapshot
+    }
+}
+
+/// A late HTTP checkpoint has no cursor comparable to /live frames. Bind it to
+/// the local revision at request start and never discard already-published data.
+/// Authoritative HTTP terminals use their separate acceptance path instead.
+enum ChatRecoveryCheckpointPolicy {
+    static func mayReplaceRunningStream(
+        _ recovery: ChatGenerationRecovery, current: ChatStreamAccumulator, requestedStreamRevision: Int?
+    ) -> Bool {
+        guard recovery.terminal == nil, current.sequence == requestedStreamRevision,
+              recovery.content.hasPrefix(current.content) else { return false }
+        let summary = ChatReasoningSummaryStorage.decode(recovery.thinking) ?? ""
+        guard summary.hasPrefix(current.reasoningSummary),
+              current.media.allSatisfy({ recovery.media.contains($0) }) else { return false }
         return true
     }
 }

@@ -396,7 +396,7 @@ struct ChatAPIClient: ChatAPIServing {
         return ChatTerminalSnapshot(
             status: status,
             content: job.result?.content ?? "",
-            thinking: job.result?.thinking ?? "",
+            thinking: job.result?.storedThinking ?? "",
             sequence: job.eventSequence,
             errorCode: job.errorCode,
             media: job.result?.media ?? [],
@@ -472,7 +472,7 @@ struct ChatAPIClient: ChatAPIServing {
             ChatTerminalSnapshot(
                 status: $0,
                 content: job.result?.content ?? job.progress?.content ?? "",
-                thinking: job.result?.thinking ?? job.progress?.thinking ?? "",
+                thinking: job.result?.storedThinking ?? job.progress?.storedThinking ?? "",
                 sequence: job.eventSequence,
                 errorCode: job.errorCode,
                 media: job.result?.media ?? job.progress?.media ?? [],
@@ -484,7 +484,7 @@ struct ChatAPIClient: ChatAPIServing {
             admission: admission,
             sequence: job.eventSequence,
             content: terminal?.content ?? job.progress?.content ?? job.result?.content ?? "",
-            thinking: terminal?.thinking ?? job.progress?.thinking ?? job.result?.thinking ?? "",
+            thinking: terminal?.thinking ?? job.progress?.storedThinking ?? job.result?.storedThinking ?? "",
             media: terminal?.media ?? job.progress?.media ?? job.result?.media ?? [],
             terminal: terminal
         )
@@ -838,6 +838,13 @@ private struct GenerationJobWire: Decodable {
 private struct GenerationResultWire: Decodable {
     let content: String?
     let thinking: String?
+    let reasoningSummary: String?
+
+    var storedThinking: String? {
+        // The explicit public summary field may be tagged. Generic thinking
+        // passes through unchanged and must never be relabeled as public.
+        ChatReasoningSummaryStorage.encode(reasoningSummary ?? "") ?? thinking
+    }
     let media: [ChatGeneratedMedia]?
     let tokenUsage: ChatTokenUsage?
     let codeReceipt: CodeOperationReceipt?
@@ -845,6 +852,7 @@ private struct GenerationResultWire: Decodable {
     private enum CodingKeys: String, CodingKey {
         case content
         case thinking
+        case reasoningSummary
         case media
         case tokenUsage
     }
@@ -853,6 +861,7 @@ private struct GenerationResultWire: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         content = try? container.decode(String.self, forKey: .content)
         thinking = try? container.decode(String.self, forKey: .thinking)
+        reasoningSummary = try? container.decode(String.self, forKey: .reasoningSummary)
         media = try? container.decode([ChatGeneratedMedia].self, forKey: .media)
         tokenUsage = try? container.decode(ChatTokenUsage.self, forKey: .tokenUsage)
         codeReceipt = try? CodeOperationReceipt(from: decoder)
