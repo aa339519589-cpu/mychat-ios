@@ -674,6 +674,47 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "add-menu-dark")
     }
 
+    @MainActor func testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard() {
+        for extra in [[], ["--ui-test-open-conversation"]] {
+            let app = launch(extra: extra)
+            let add = app.buttons["添加内容和工具"].firstMatch
+            let model = app.buttons["选择模型"].firstMatch
+            let input = app.descendants(matching: .any).matching(identifier: "composer.input").firstMatch
+            XCTAssertTrue(add.waitForExistence(timeout: 10))
+            XCTAssertTrue(model.waitForExistence(timeout: 10))
+            XCTAssertTrue(add.isHittable)
+            XCTAssertTrue(model.isHittable)
+
+            model.tap()
+            XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            let close = app.buttons["关闭"].firstMatch
+            XCTAssertTrue(close.isHittable)
+            close.tap()
+
+            XCTAssertTrue(add.waitForExistence(timeout: 5))
+            add.tap()
+            XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 10))
+            close.tap()
+
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(add.isHittable)
+            add.tap()
+            XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 10))
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            close.tap()
+
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(model.isHittable)
+            model.tap()
+            XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            close.tap()
+            app.terminate()
+        }
+    }
+
     @MainActor func testProfilePhotoMenuInstructionsSaveAndSupportedCapabilities() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
         app.buttons["打开侧边栏"].firstMatch.tap()

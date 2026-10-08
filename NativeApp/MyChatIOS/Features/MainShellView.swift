@@ -46,8 +46,7 @@ struct MainShellView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sidebarVisible = ProcessInfo.processInfo.arguments.contains("--sidebar")
-    @State private var modelPickerVisible = false
-    @State private var toolsVisible = false
+    @State private var activeComposerSheet: SheetTarget?
     @State private var settingsVisible = false
     @State private var historyVisible = false
     @State private var historyConversationVisible = false
@@ -64,7 +63,7 @@ struct MainShellView: View {
             NativeDrawerHost(
                 width: drawerWidth,
                 isOpen: $sidebarVisible,
-                blocked: settingsVisible || modelPickerVisible || toolsVisible,
+                blocked: settingsVisible || activeComposerSheet != nil,
                 reduceMotion: reduceMotion,
                 canvasLayout: canvasLayout,
                 navigationKey: CanvasNavigationKey(appModel: appModel, historyVisible: historyVisible,
@@ -100,30 +99,24 @@ struct MainShellView: View {
             ChatDocumentPreview(document: document).presentationDetents([.large])
                 .presentationCornerRadius(42).presentationBackground(MyChatTheme.canvas)
         }
-        .onChange(of: modelPickerVisible) { _, presented in
-            if presented { dismissKeyboard(); setChatRenderSuspended(true) }
-        }
-        .onChange(of: toolsVisible) { _, presented in
-            if presented { dismissKeyboard(); setChatRenderSuspended(true) }
-        }
-        .sheet(isPresented: $modelPickerVisible, onDismiss: {
+        .sheet(item: $activeComposerSheet, onDismiss: {
             setChatRenderSuspended(false)
-        }) {
-            ModelPickerSheet(close: { modelPickerVisible = false })
-                .environmentObject(appModel)
-                .presentationDetents([.fraction(0.62), .large])
-                .presentationContentInteraction(.resizes)
-                .presentationDragIndicator(.hidden)
-                .modifier(StableSheetPageSizing())
-                .modifier(MyChatSheetSurface())
-        }
-        .sheet(isPresented: $toolsVisible, onDismiss: {
-            setChatRenderSuspended(false)
-        }) {
-            ToolsSheet(close: { toolsVisible = false })
-                .environmentObject(appModel)
-                .presentationDragIndicator(.hidden)
-                .modifier(MyChatSheetSurface())
+        }) { target in
+            switch target {
+            case .models:
+                ModelPickerSheet(close: { activeComposerSheet = nil })
+                    .environmentObject(appModel)
+                    .presentationDetents([.fraction(0.62), .large])
+                    .presentationContentInteraction(.resizes)
+                    .presentationDragIndicator(.hidden)
+                    .modifier(StableSheetPageSizing())
+                    .modifier(MyChatSheetSurface())
+            case .tools:
+                ToolsSheet(close: { activeComposerSheet = nil })
+                    .environmentObject(appModel)
+                    .presentationDragIndicator(.hidden)
+                    .modifier(MyChatSheetSurface())
+            }
         }
         .fullScreenCover(item: $appModel.artifactPreview, onDismiss: {
             setChatRenderSuspended(false)
@@ -135,7 +128,7 @@ struct MainShellView: View {
     }
 
     private func presentPendingDocument() {
-        guard !settingsVisible, !sidebarVisible, !historyVisible, !toolsVisible, !modelPickerVisible,
+        guard !settingsVisible, !sidebarVisible, !historyVisible, activeComposerSheet == nil,
               automaticDocument == nil, appModel.selectedDestination == .chats,
               let document = appModel.pendingDocumentPreview else { return }
         NativeDocumentModalActivity.set(documentModalID, active: true)
@@ -205,17 +198,19 @@ struct MainShellView: View {
         settingsVisible = true
     }
 
-    private enum SheetTarget: Equatable { case models, tools }
+    private enum SheetTarget: String, Identifiable {
+        case models, tools
+        var id: String { rawValue }
+    }
 
     private func requestSheet(_ target: SheetTarget) {
-        guard !settingsVisible, !modelPickerVisible, !toolsVisible,
+        guard !settingsVisible, activeComposerSheet == nil,
               automaticDocument == nil, appModel.artifactPreview == nil else { return }
         dismissKeyboard()
-        // Suspend before presentation so a streaming layout cannot compete
-        // with the native sheet, dimming and interactive transition.
+        // One item-backed presenter serializes model/tools routes. Suspend before
+        // presentation so streaming layout cannot compete with the transition.
         setChatRenderSuspended(true)
-        if target == .models { modelPickerVisible = true }
-        else { toolsVisible = true }
+        activeComposerSheet = target
     }
 
     private func presentArtifact(_ artifact: ArtifactRecord) {
