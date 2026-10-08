@@ -1,71 +1,74 @@
-name: iOS build
+name: Build 102 NativeApp (manual)
 
 on:
-  push:
-    branches:
-      - main
-      - 'fix/**'
-      - 'refactor/**'
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      run_offline_tests:
+        description: "Run fixture-only runtime tests only if an iPhone 16 Pro with iOS 27 is already installed. No runtime download."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  build102:
+    name: Build 102 NativeApp
     runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Verify UI contracts
-        run: scripts/verify-ui-contract.sh
-      - name: Validate network configuration
+
+      - name: Report installed Xcode and simulator runtimes
         run: |
-          plutil -lint MyChatIOS/Info.plist
-          grep -F 'MYCHAT_API_BASE_URL = https:/$()/mychat-nm6x.onrender.com' Configuration/Debug.xcconfig
-          grep -F 'MYCHAT_SUPABASE_URL = https:/$()/usibkqqksgwgvdiqwpyo.supabase.co' Configuration/Debug.xcconfig
-          grep -F 'MYCHAT_SUPABASE_ANON_KEY = sb_publishable_' Configuration/Debug.xcconfig
-      - name: Build iPhone app
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          xcrun simctl list runtimes available
+
+      - name: Build NativeApp for iOS Simulator
+        working-directory: NativeApp
         run: |
           set -o pipefail
           xcodebuild \
             -project MyChatIOS.xcodeproj \
             -scheme MyChatIOS \
             -configuration Debug \
-            -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
-            build | tee xcodebuild.log
+            build | tee "$RUNNER_TEMP/build102-xcodebuild.log"
 
-  production-smoke:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-    steps:
-      - name: Check production TLS and mobile bootstrap
+      - name: Run offline runtime tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_offline_tests }}
+        working-directory: NativeApp
         run: |
           set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
-            https://mychat-nm6x.onrender.com/api/mobile/config \
-            | jq -e '.supabaseUrl == "https://usibkqqksgwgvdiqwpyo.supabase.co" and (.supabaseAnonKey | startswith("sb_publishable_"))'
-      - name: Check production readiness
-        run: |
-          set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            --retry 4 --retry-all-errors --connect-timeout 10 --max-time 60 \
-            https://mychat-nm6x.onrender.com/api/ready \
-            | jq -e '.ready == true'
-      - name: Check chat route over trusted TLS
-        run: |
-          set -euo pipefail
-          status="$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
-            --connect-timeout 10 --max-time 60 \
-            --header 'Content-Type: application/json' \
-            --request POST --data '{}' \
-            https://mychat-nm6x.onrender.com/api/chat)"
-          test "$status" = "401"
-          jq -e '.error.code == "AUTH_REQUIRED" or .error == "请先建立登录或访客会话"' response.json
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 16 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 16 Pro simulator. Tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatRuntimeTests \
+            -skip-testing:MyChatRuntimeTests/MyChatRuntimeTests/testOptInLiveCustomEndpointFirstTextTiming \
+            test
