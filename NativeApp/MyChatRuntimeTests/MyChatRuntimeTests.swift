@@ -839,6 +839,31 @@ import CoreText
         XCTAssertEqual(Array("👨‍👩‍👧‍👦e\u{301}").count, 2)
     }
 
+    func testGenerationDiagnosticsSeparateNetworkTextFromMarkdownPresentation() {
+        let command = ChatAppendCommand(
+            conversationID: UUID(),
+            userMessage: ChatMessage(id: UUID(), role: .user, content: "时序测试", thinking: nil, createdAt: Date()),
+            createConversation: true,
+            title: "时序测试"
+        )
+        ChatGenerationDiagnostics.begin(command)
+        let start = ChatGenerationDiagnostics.records[command.generationID]!.monotonicStart
+
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .firstText, receivedAt: start + 0.010)
+        ChatGenerationDiagnostics.markFirstMarkdownPublished(
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.020
+        )
+        ChatGenerationDiagnostics.markFirstGlyphDrawn(
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.030
+        )
+
+        let record = ChatGenerationDiagnostics.records[command.generationID]!
+        XCTAssertEqual(record.assistantMessageID, command.assistantMessageID)
+        XCTAssertEqual(record.milliseconds["firstText"] ?? -1, 10, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstMarkdownPublished"] ?? -1, 20, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstGlyphDrawn"] ?? -1, 30, accuracy: 0.02)
+    }
+
     func testConversationNavigationAnchorsWithoutInheritingThePreviousGenerationAnimation() async throws {
         let scroll = UIScrollView(frame: CGRect(x: 0, y: 60, width: 390, height: 840))
         scroll.contentInsetAdjustmentBehavior = .never

@@ -4884,11 +4884,12 @@ final class SystemPermissionsService: NSObject, ObservableObject, CLLocationMana
 
 /// Numeric lifecycle evidence only: no prompts, replies, tokens or keys.
 @MainActor enum ChatGenerationDiagnostics {
-    enum Stage: String { case sent, authenticationReady, requestStarted, admitted, firstEvent, firstText, firstReasoningSummary,
+    enum Stage: String { case sent, authenticationReady, requestStarted, admitted, firstEvent, firstText, firstMarkdownPublished, firstGlyphDrawn, firstReasoningSummary,
         cancelRequested, localStop, cancelAccepted, cancelComplete, cancelFailed, completed }
     struct Record: Codable, Sendable {
         let generationID: UUID
         let conversationID: UUID
+        let assistantMessageID: UUID
         let modelID: String
         let startedAt: Date
         let monotonicStart: Double
@@ -4902,8 +4903,9 @@ final class SystemPermissionsService: NSObject, ObservableObject, CLLocationMana
             records[oldest.generationID] = nil
         }
         records[command.generationID] = Record(generationID: command.generationID,
-            conversationID: command.conversationID, modelID: command.modelID,
-            startedAt: Date(), monotonicStart: ProcessInfo.processInfo.systemUptime, milliseconds: [Stage.sent.rawValue: 0])
+            conversationID: command.conversationID, assistantMessageID: command.assistantMessageID,
+            modelID: command.modelID, startedAt: Date(),
+            monotonicStart: ProcessInfo.processInfo.systemUptime, milliseconds: [Stage.sent.rawValue: 0])
     }
     static func mark(_ id: UUID, stage: Stage, receivedAt: Double? = nil) {
         guard var record = records[id] else { return }
@@ -4919,6 +4921,18 @@ final class SystemPermissionsService: NSObject, ObservableObject, CLLocationMana
             try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
     }
+    /// Marks when a parsed Markdown body is published to the transcript view.
+    static func markFirstMarkdownPublished(assistantMessageID: UUID, receivedAt: Double) {
+        guard let record = records.values.first(where: { $0.assistantMessageID == assistantMessageID }) else { return }
+        mark(record.generationID, stage: .firstMarkdownPublished, receivedAt: receivedAt)
+    }
+
+    /// Marks the first native text-renderer draw, correlated by assistant message ID.
+    static func markFirstGlyphDrawn(assistantMessageID: UUID, receivedAt: Double) {
+        guard let record = records.values.first(where: { $0.assistantMessageID == assistantMessageID }) else { return }
+        mark(record.generationID, stage: .firstGlyphDrawn, receivedAt: receivedAt)
+    }
+
     static func record(_ event: ChatJobEvent, command: ChatAppendCommand) {
         guard records[command.generationID]?.milliseconds["requestStarted"] != nil else { return }
         mark(command.generationID, stage: .firstEvent)

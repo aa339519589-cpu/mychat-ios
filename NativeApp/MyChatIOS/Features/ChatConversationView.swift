@@ -2527,6 +2527,20 @@ private struct AssistantMessageBody: View {
         .task(id: MessageRenderInput(source: source, isStreaming: isStreaming)) {
             await renderer.update(key: cacheKey, source: source, isStreaming: isStreaming, scrollController: scrollController)
         }
+        .onChange(of: hasPresentedMarkdown, initial: true) { _, published in
+            guard published, isStreaming, let responseMessageID else { return }
+            ChatGenerationDiagnostics.markFirstMarkdownPublished(
+                assistantMessageID: responseMessageID,
+                receivedAt: ProcessInfo.processInfo.systemUptime
+            )
+        }
+        .onChange(of: isStreaming, initial: true) { _, active in
+            guard active, hasPresentedMarkdown, let responseMessageID else { return }
+            ChatGenerationDiagnostics.markFirstMarkdownPublished(
+                assistantMessageID: responseMessageID,
+                receivedAt: ProcessInfo.processInfo.systemUptime
+            )
+        }
         .onReceive(NotificationCenter.default.publisher(for: .myChatDrawerInteractionChanged)) { note in
             setRenderSuspended("drawer", active: note.object as? Bool ?? false)
         }
@@ -2565,6 +2579,14 @@ private struct AssistantMessageBody: View {
 
     private var presentedBlocks: [MessageMarkdownBlock] {
         renderer.document.blocks
+    }
+
+    private var hasPresentedMarkdown: Bool {
+        guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return presentedBlocks.contains { block in
+            if case .artifact = block { return false }
+            return true
+        }
     }
 
     private func artifactSymbol(_ kind: ChatArtifactBlock.Kind) -> String {
@@ -2643,10 +2665,9 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
 
     private func renderLatestRequests() async {
         while !Task.isCancelled, !isSuspended, requestedRevision > submittedRevision {
-            if latestRequest?.isStreaming == true && publishedRevision > 0 && !document.blocks.isEmpty {
-                do { try await Task.sleep(for: .milliseconds(50)) }
-                catch { return }
-            }
+            // AppModel already coalesces incoming deltas at 25 Hz. Avoid adding
+            // another timer before parsing; revision tracking below still renders
+            // the latest complete Markdown snapshot without delaying its arrival.
             guard !Task.isCancelled, !isSuspended, let request = latestRequest else { return }
             let targetRevision = requestedRevision
             let result = await Task.detached(priority: .userInitiated) {
@@ -4094,8 +4115,13 @@ private enum ResponseInkDiagnostics {
     private static var records: [UUID: Record] = [:]
 
     static func record(messageID: UUID) {
-        let record = Record(messageID: messageID, drawnAt: Date(),
-            monotonicDraw: ProcessInfo.processInfo.systemUptime)
+        let monotonicDraw = ProcessInfo.processInfo.systemUptime
+        let record = Record(messageID: messageID, drawnAt: Date(), monotonicDraw: monotonicDraw)
+        Task { @MainActor in
+            ChatGenerationDiagnostics.markFirstGlyphDrawn(
+                assistantMessageID: messageID, receivedAt: monotonicDraw
+            )
+        }
         writer.async {
             guard records[messageID] == nil else { return }
             if records.count >= 64, let oldest = records.values.min(by: { $0.monotonicDraw < $1.monotonicDraw }) {
