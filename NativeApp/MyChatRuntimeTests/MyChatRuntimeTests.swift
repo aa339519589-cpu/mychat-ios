@@ -2112,6 +2112,8 @@ import Combine
         await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
             title: "恢复测试", updatedAt: "", projectID: nil, starred: false, pinned: false))
         await model.reloadConversations()
+        transport.emit(.textDelta("已生成"), for: command, sequence: 1)
+        try await waitUntil { model.messages.last?.content == "已生成" }
         let checkpoint = 7
         transport.recovery = ChatGenerationRecovery(
             admission: ChatAdmission(
@@ -2141,7 +2143,14 @@ import Combine
         XCTAssertTrue(model.isCurrentConversationGenerating)
         XCTAssertEqual(model.messages.last(where: { $0.role == .assistant })?.content, "已生成的检查点")
 
-        transport.complete(command, text: "已生成的检查点，继续完成。", sequence: checkpoint + 1)
+        transport.emit(.textDelta("，继续"), for: command, sequence: checkpoint + 1)
+        try await waitUntil {
+            model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+                if case let .text(value) = $0.content { return value }; return nil
+            }.joined() == "已生成的检查点，继续"
+        }
+        XCTAssertTrue(model.isCurrentConversationGenerating)
+        transport.complete(command, text: "已生成的检查点，继续完成。", sequence: checkpoint + 2)
         try await waitUntil { !model.isCurrentConversationGenerating }
         XCTAssertEqual(model.messages.last(where: { $0.role == .assistant })?.content, "已生成的检查点，继续完成。")
         XCTAssertEqual(transport.commands.count, 1)
@@ -2539,6 +2548,238 @@ import Combine
         try await waitUntil { !model.isCurrentConversationGenerating }
     }
 
+    func testNonemptySnapshotReconcilesProcessTextAndOnlyPublicSummaries() throws {
+        let job = UUID()
+        var entries: [ChatProcessEntry] = []
+        let tool = ChatToolActivity(toolCallID: "snapshot-tool", toolName: "search", isComplete: true)
+        func record(_ payload: ChatJobEventPayload, _ sequence: Int) {
+            ChatProcessEntry.record(ChatJobEvent(jobID: job, sequence: sequence, payload: payload), into: &entries)
+        }
+        func text() -> String {
+            entries.compactMap { if case let .text(value) = $0.content { return value }; return nil }.joined()
+        }
+        func summary() -> String {
+            entries.compactMap { if case let .reasoningSummary(value) = $0.content { return value }; return nil }.joined()
+        }
+        record(.textDelta("A"), 1)
+        record(.toolActivity(tool), 2)
+        record(.reasoningSummaryDelta("Checking "), 3)
+        record(.snapshot(ChatJobSnapshot(content: "AB", thinking:
+            try XCTUnwrap(ChatReasoningSummaryStorage.encode("Checking inputs.")), media: [])), 4)
+        XCTAssertEqual(text(), "AB")
+        XCTAssertEqual(summary(), "Checking inputs.")
+        XCTAssertEqual(entries[0].content, .text("A"))
+        XCTAssertEqual(entries[1].content, .tool(tool))
+        record(.textDelta("C"), 5)
+        XCTAssertEqual(text(), "ABC", "The checkpoint's B must not disappear before terminal")
+        record(.snapshot(ChatJobSnapshot(content: "AX", thinking: "PRIVATE_REASONING", media: [])), 6)
+        XCTAssertEqual(text(), "AX", "A checkpoint is an authoritative replacement, not an append")
+        XCTAssertEqual(summary(), "Checking inputs.")
+        XCTAssertFalse(entries.contains { if case .thinking = $0.content { return true }; return false })
+        XCTAssertTrue(entries.contains { $0.content == .tool(tool) })
+        XCTAssertEqual(Set(entries.map(\.id)).count, entries.count)
+        record(.snapshot(ChatJobSnapshot(content: "", thinking: "", media: [])), 7)
+        XCTAssertTrue(entries.isEmpty)
+
+        record(.snapshot(ChatJobSnapshot(content: "Recovered", thinking:
+            try XCTUnwrap(ChatReasoningSummaryStorage.encode("Reviewing evidence.")), media: [])), 8)
+        XCTAssertEqual(text(), "Recovered")
+        XCTAssertEqual(summary(), "Reviewing evidence.")
+        XCTAssertEqual(Set(entries.map(\.id)).count, 2, "Snapshot text and summary need distinct stable row IDs")
+    }
+
+    func testSnapshotCursorRejectsOlderReplayAndOtherJobsBeforeProjection() {
+        let job = UUID()
+        var accumulator = ChatStreamAccumulator()
+        var entries: [ChatProcessEntry] = []
+        func apply(_ event: ChatJobEvent) -> Bool {
+            guard accumulator.apply(event) else { return false }
+            ChatProcessEntry.record(event, into: &entries)
+            return true
+        }
+        XCTAssertTrue(apply(ChatJobEvent(jobID: job, sequence: 5, payload: .textDelta("A"))))
+        XCTAssertTrue(apply(ChatJobEvent(jobID: job, sequence: 6,
+            payload: .snapshot(ChatJobSnapshot(content: "AB", thinking: "", media: [])))))
+        XCTAssertFalse(apply(ChatJobEvent(jobID: job, sequence: 5,
+            payload: .snapshot(ChatJobSnapshot(content: "OLD", thinking: "", media: [])))))
+        XCTAssertFalse(apply(ChatJobEvent(jobID: job, sequence: 6,
+            payload: .snapshot(ChatJobSnapshot(content: "DUPLICATE", thinking: "", media: [])))))
+        XCTAssertFalse(apply(ChatJobEvent(jobID: UUID(), sequence: 7,
+            payload: .snapshot(ChatJobSnapshot(content: "OTHER_JOB", thinking: "", media: [])))))
+        XCTAssertTrue(apply(ChatJobEvent(jobID: job, sequence: 7, payload: .textDelta("C"))))
+        XCTAssertEqual(accumulator.content, "ABC")
+        XCTAssertEqual(accumulator.sequence, 7)
+        XCTAssertEqual(entries.compactMap {
+            if case let .text(value) = $0.content { return value }; return nil
+        }.joined(), "ABC")
+        let terminal = ChatTerminalSnapshot(status: .completed, content: "ABC", thinking: "", sequence: 7,
+            errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)
+        XCTAssertTrue(apply(ChatJobEvent(jobID: job, sequence: 7, payload: .terminal(terminal))),
+            "A recovered terminal may share the checkpoint cursor")
+        XCTAssertFalse(apply(ChatJobEvent(jobID: job, sequence: 8,
+            payload: .snapshot(ChatJobSnapshot(content: "LATE", thinking: "", media: [])))))
+        XCTAssertEqual(accumulator.content, "ABC")
+    }
+
+    func testNonemptySnapshotsReachAppModelAndTranscriptBeforeTerminalWhileInteracting() async throws {
+        let transport = ControlledChatTransport()
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic snapshot publication"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        let updates = ChatTranscriptUpdates(model)
+        updates.setInteracting(true)
+        updates.setModalVisible(true)
+        var bodies: [String] = []
+        var summaries: [String] = []
+        let observation = updates.$snapshot.sink { snapshot in
+            let entries = snapshot.processEntries[command.assistantMessageID, default: []]
+            let body = entries.compactMap { if case let .text(value) = $0.content { return value }; return nil }.joined()
+            let summary = entries.compactMap { if case let .reasoningSummary(value) = $0.content { return value }; return nil }.joined()
+            if !body.isEmpty, bodies.last != body { bodies.append(body) }
+            if !summary.isEmpty, summaries.last != summary { summaries.append(summary) }
+        }
+        defer { observation.cancel() }
+        // Deliver without sleeps or terminal. The production AppModel consumer
+        // and ChatTranscriptUpdates must publish each upstream value in order.
+        transport.emit(.textDelta("A"), for: command, sequence: 1)
+        transport.emit(.reasoningSummaryDelta("Checking "), for: command, sequence: 2)
+        transport.emit(.snapshot(ChatJobSnapshot(content: "AB", thinking:
+            try XCTUnwrap(ChatReasoningSummaryStorage.encode("Checking inputs.")), media: [])), for: command, sequence: 3)
+        transport.emit(.textDelta("C"), for: command, sequence: 4)
+        try await waitUntil { bodies.last == "ABC" }
+        XCTAssertEqual(bodies, ["A", "AB", "ABC"])
+        XCTAssertEqual(summaries, ["Checking ", "Checking inputs."])
+        XCTAssertTrue(model.isCurrentConversationGenerating)
+        XCTAssertEqual(model.messages.last?.content, "AB", "Nonempty checkpoints must flush canonical text too")
+        XCTAssertEqual(updates.snapshot.messages.last?.content, "AB")
+
+        transport.emit(.snapshot(ChatJobSnapshot(content: "OLD", thinking: "PRIVATE_OLD", media: [])),
+            for: command, sequence: 2)
+        transport.emit(.textDelta("D"), for: command, sequence: 5)
+        try await waitUntil { bodies.last == "ABCD" }
+        XCTAssertFalse(bodies.contains("OLD"))
+        transport.emit(.snapshot(ChatJobSnapshot(content: "XYZ", thinking:
+            try XCTUnwrap(ChatReasoningSummaryStorage.encode("Comparing alternatives.")), media: [])), for: command, sequence: 6)
+        try await waitUntil { updates.snapshot.messages.last?.content == "XYZ" }
+        XCTAssertEqual(bodies.last, "XYZ", "Non-prefix corrections cannot wait for scroll or modal dismissal")
+        transport.emit(.textDelta("!"), for: command, sequence: 7)
+        try await waitUntil { bodies.last == "XYZ!" }
+        transport.emit(.snapshot(ChatJobSnapshot(content: "XY", thinking: "PRIVATE_REASONING", media: [])),
+            for: command, sequence: 8)
+        try await waitUntil { updates.snapshot.messages.last?.content == "XY" }
+        XCTAssertEqual(summaries.last, "Comparing alternatives.")
+        XCTAssertFalse(summaries.contains { $0.contains("PRIVATE") })
+        XCTAssertTrue(model.isCurrentConversationGenerating)
+        transport.complete(command, text: "XY", sequence: 9)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.messages.last?.content, "XY")
+    }
+
+    func testOlderForegroundSnapshotDoesNotReplaceNewerLiveCursor() async throws {
+        for checkpoint in [1, 2] {
+            let transport = ControlledChatTransport()
+            let data = ControlledConversationStore()
+            let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+            await model.restoreAuthenticationIfNeeded()
+            await model.reloadModels()
+            model.beginNewChat()
+            model.draft = "Synthetic stale foreground checkpoint"
+            model.sendDraft()
+            try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+            let command = try XCTUnwrap(transport.commands.first)
+            defer {
+                transport.heldRecovery?.resume()
+                transport.heldRecovery = nil
+                transport.continuations[command.generationID]?.finish()
+            }
+            await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+                title: "Stale checkpoint", updatedAt: "", projectID: nil, starred: false, pinned: false))
+            await model.reloadConversations()
+            transport.emit(.textDelta("A"), for: command, sequence: 1)
+            try await waitUntil { model.messages.last?.content == "A" }
+            transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+                jobID: command.generationID, generationID: command.generationID,
+                userMessageID: command.userMessageID, assistantMessageID: command.assistantMessageID,
+                status: "running", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/events")!,
+                trialRemaining: nil, trialLimit: nil), sequence: checkpoint, content: "OLD", thinking: "", media: [], terminal: nil)
+            transport.holdRecovery = true
+            await model.resumeAuthentication()
+            try await waitUntil { transport.heldRecovery != nil }
+            transport.emit(.textDelta("B"), for: command, sequence: 2)
+            func projectedText() -> String {
+                model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+                    if case let .text(value) = $0.content { return value }; return nil
+                }.joined()
+            }
+            try await waitUntil { projectedText() == "AB" }
+            transport.holdRecovery = false
+            transport.recovery = nil
+            transport.heldRecovery?.resume()
+            transport.heldRecovery = nil
+            // A second lookup can begin only after the first recovery task's
+            // defer has finished. This settles the stale response without a
+            // guessed sleep duration or changing the production recovery API.
+            let deadline = Date().addingTimeInterval(1)
+            while transport.recoveryReadCount < 2, Date() < deadline {
+                await model.resumeAuthentication()
+                await Task.yield()
+            }
+            XCTAssertGreaterThanOrEqual(transport.recoveryReadCount, 2)
+            XCTAssertEqual(transport.streamStarts.count, 1, "Older/equal nonterminal checkpoints must keep the current consumer")
+            XCTAssertEqual(projectedText(), "AB")
+            transport.emit(.textDelta("C"), for: command, sequence: 3)
+            try await waitUntil { projectedText() == "ABC" }
+            transport.complete(command, text: "ABC", sequence: 4)
+            try await waitUntil { !model.isCurrentConversationGenerating }
+            XCTAssertEqual(model.messages.last?.content, "ABC")
+            XCTAssertEqual(transport.commands.count, 1)
+        }
+    }
+
+    func testSSEReplayCannotInjectAnOlderNonemptySnapshot() async throws {
+        let job = UUID()
+        func frame(_ sequence: Int, _ kind: String, _ payload: [String: Any]) throws -> Data {
+            let json = try JSONSerialization.data(withJSONObject: ["jobId": job.uuidString,
+                "seq": sequence, "kind": kind, "payload": payload])
+            return Data("id: \(sequence)\nevent: \(kind)\ndata: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+        }
+        let frames = try frame(1, "text.delta", ["text": "A"])
+            + frame(2, "job.snapshot", ["content": "AB", "reasoningSummary": "Checking inputs."])
+            + frame(1, "job.snapshot", ["content": "OLD", "reasoningSummary": "OLD SUMMARY"])
+            + frame(3, "text.delta", ["text": "C"])
+            + frame(4, "job.terminal", ["status": "completed", "result": ["content": "ABC"]])
+        let recorder = ChatAdmissionRetryRecorder(responses: [(200, frames, ["Content-Type": "text/event-stream"])])
+        ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+        defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let origin = URL(string: "https://mychat.invalid")!
+        let admission = ChatAdmission(schemaVersion: 1, jobID: job, generationID: job,
+            userMessageID: UUID(), assistantMessageID: UUID(), status: "running", created: false,
+            streamURL: origin.appendingPathComponent("events"), trialRemaining: nil, trialLimit: nil)
+        var sequences: [Int] = []
+        var accumulator = ChatStreamAccumulator()
+        var projected: [String] = []
+        for try await event in JobEventStream(session: session, allowedOrigin: origin, maximumDuration: 2)
+            .events(admission: admission, accessToken: "fixture-only") {
+            sequences.append(event.sequence)
+            accumulator.apply(event)
+            if projected.last != accumulator.content { projected.append(accumulator.content) }
+        }
+        XCTAssertEqual(sequences, [1, 2, 3, 4])
+        XCTAssertEqual(projected, ["A", "AB", "ABC"])
+        XCTAssertEqual(accumulator.reasoningSummary, "Checking inputs.")
+        XCTAssertEqual(recorder.requestCount, 1)
+    }
+
     func testProcessEntriesPreserveThinkingSearchAndToolOrder() {
         let job = UUID()
         var entries: [ChatProcessEntry] = []
@@ -2770,6 +3011,9 @@ private actor ControlledConversationStore: SupabaseDataServing {
     var privateReply: String?
     var commands: [ChatAppendCommand] = []
     var recovery: ChatGenerationRecovery?
+    var holdRecovery = false
+    var heldRecovery: CheckedContinuation<Void, Never>?
+    var recoveryReadCount = 0
     var admissionStatuses: [UUID: ChatAdmissionJobStatus] = [:]
     var admissionStatusCalls: [UUID] = []
     var streamStarts: [(jobID: UUID, fromSequence: Int)] = []
@@ -2795,7 +3039,12 @@ private actor ControlledConversationStore: SupabaseDataServing {
         continuations[command.generationID]?.finish()
     }
     func generateConversationTitle(conversationID: UUID, userText: String, assistantText: String, endpointID: UUID?, accessToken: String) async throws -> String { "隔离测试标题" }
-    func conversationGeneration(conversationID: UUID, accessToken: String) async throws -> ChatGenerationRecovery? { recovery }
+    func conversationGeneration(conversationID: UUID, accessToken: String) async throws -> ChatGenerationRecovery? {
+        recoveryReadCount += 1
+        let checkpoint = recovery
+        if holdRecovery { await withCheckedContinuation { heldRecovery = $0 } }
+        return checkpoint
+    }
     func admissionStatus(command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmissionJobStatus? {
         admissionStatusCalls.append(command.generationID)
         return admissionStatuses[command.generationID]

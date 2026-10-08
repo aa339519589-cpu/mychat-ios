@@ -246,7 +246,7 @@ struct TranscriptSnapshot {
     @Published private(set) var snapshot: TranscriptSnapshot
     private let model: AppModel
     private var subscription: AnyCancellable?
-    private var leadingTextSubscription: AnyCancellable?
+    private var assistantMessageSubscription: AnyCancellable?
     private var processEntriesSubscription: AnyCancellable?
     private var interacting = false
     private var modalVisible = false
@@ -256,8 +256,31 @@ struct TranscriptSnapshot {
     init(_ model: AppModel) {
         self.model = model
         snapshot = TranscriptSnapshot(model)
-        leadingTextSubscription = model.$messages.dropFirst().sink { [weak self] messages in
-            guard let self, !self.interacting, !self.modalVisible,
+        assistantMessageSubscription = model.$messages.dropFirst().sink { [weak self] messages in
+            guard let self else { return }
+            if let conversationID = self.snapshot.conversationID,
+               conversationID == model.activeConversationID,
+               model.generatingConversationIDs.contains(conversationID) {
+                // Canonical publications are first ink/media, checkpoints, or
+                // terminal state. Update only already-visible streaming rows;
+                // a correction must not wait for scrolling or a sheet to end.
+                var next = self.snapshot
+                var changed = false
+                let streamingIDs = Set(next.messages.lazy.filter {
+                    $0.role == .assistant && ($0.localGenerationState == .streaming
+                        || $0.localGenerationState == .completedPendingPersistence)
+                }.map(\.id))
+                for message in messages where message.role == .assistant
+                    && (streamingIDs.contains(message.id) || message.localGenerationState == .streaming
+                        || message.localGenerationState == .completedPendingPersistence) {
+                    guard let index = next.messages.firstIndex(where: { $0.id == message.id }),
+                          next.messages[index] != message else { continue }
+                    next.messages[index] = message
+                    changed = true
+                }
+                if changed { self.snapshot = next; return }
+            }
+            guard !self.interacting, !self.modalVisible,
                   let last = messages.last, last.role == .assistant, !last.content.isEmpty,
                   self.snapshot.messages.first(where: { $0.id == last.id })?.content.isEmpty != false else { return }
             // Use the publisher's new value in this same actor turn: @Published

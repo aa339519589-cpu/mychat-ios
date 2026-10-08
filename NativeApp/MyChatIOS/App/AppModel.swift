@@ -2415,6 +2415,15 @@ final class AppModel: ObservableObject {
                           recovery.admission.generationID == activeGenerationID,
                           self.generationIDs[conversationID] == activeGenerationID,
                           self.generatingConversationIDs.contains(conversationID) else { return }
+                    // This HTTP lookup can finish after newer SSE events. An
+                    // older checkpoint must not roll back the visible response
+                    // or move the durable replay cursor backwards.
+                    if let sequence = self.streamAccumulators[conversationID]?.sequence {
+                        if recovery.sequence < sequence { return }
+                        // With an equal nonterminal cursor the live consumer
+                        // already owns this checkpoint; let its replay continue.
+                        if recovery.sequence == sequence, recovery.terminal == nil { return }
+                    }
                     // Replace the old stream only after the server confirms the
                     // exact generation and supplies its recovery checkpoint.
                     self.generationReconnects.insert(conversationID)
@@ -3552,7 +3561,7 @@ final class AppModel: ObservableObject {
             jobIDsByConversation[conversationID] = admission.jobID
             var accumulator = ChatStreamAccumulator()
             if let recovery {
-                accumulator.apply(ChatJobEvent(
+                let checkpoint = ChatJobEvent(
                     jobID: admission.jobID,
                     sequence: recovery.sequence,
                     payload: .snapshot(ChatJobSnapshot(
@@ -3560,13 +3569,16 @@ final class AppModel: ObservableObject {
                         thinking: recovery.thinking,
                         media: recovery.media
                     ))
-                ))
+                )
+                accumulator.apply(checkpoint)
+                recordProcessEvent(checkpoint, command: command)
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(
                     id: command.assistantMessageID,
                     conversationID: conversationID,
                     accumulator: accumulator
                 )
+                flushAssistantUpdate(conversationID)
                 if let terminal = recovery.terminal {
                     accumulator.apply(ChatJobEvent(
                         jobID: admission.jobID,
@@ -3603,7 +3615,7 @@ final class AppModel: ObservableObject {
             for try await event in events {
                 try Task.checkCancellation()
                 guard generationIDs[conversationID] == command.generationID else { return }
-                accumulator.apply(event)
+                guard accumulator.apply(event) else { continue }
                 recordProcessEvent(event, command: command)
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(
@@ -3611,6 +3623,7 @@ final class AppModel: ObservableObject {
                     conversationID: conversationID,
                     accumulator: accumulator
                 )
+                if case .snapshot = event.payload { flushAssistantUpdate(conversationID) }
                 if case let .toolSearch(search) = event.payload,
                    activeConversationID == conversationID {
                     searchesByMessageID[command.assistantMessageID, default: []].append(search)
@@ -4018,11 +4031,11 @@ final class AppModel: ObservableObject {
                     tokenUsage: terminal.tokenUsage,
                     codeReceipt: terminal.codeReceipt
                 )
-                accumulator.apply(ChatJobEvent(
+                guard accumulator.apply(ChatJobEvent(
                     jobID: jobID,
                     sequence: resolved.sequence,
                     payload: .terminal(resolved)
-                ))
+                )) else { continue }
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(
                     id: command.assistantMessageID,
@@ -4123,7 +4136,7 @@ final class AppModel: ObservableObject {
             ) {
                 try Task.checkCancellation()
                 guard generationIDs[conversationID] == command.generationID else { return }
-                accumulator.apply(event)
+                guard accumulator.apply(event) else { continue }
                 recordProcessEvent(event, command: command)
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(
@@ -4131,6 +4144,7 @@ final class AppModel: ObservableObject {
                     conversationID: conversationID,
                     accumulator: accumulator
                 )
+                if case .snapshot = event.payload { flushAssistantUpdate(conversationID) }
                 if case let .toolSearch(search) = event.payload,
                    activeConversationID == conversationID {
                     searchesByMessageID[command.assistantMessageID, default: []].append(search)
@@ -4222,8 +4236,9 @@ final class AppModel: ObservableObject {
         let mediaChanged = current?.media != visibleMedia
 
         // Each SSE delta is already projected immediately through processEntries.
-        // Publish canonical message state on first visible text/media and at terminal,
-        // without pacing the stream or copying the full transcript array on every delta.
+        // Publish canonical message state on first visible text/media and at terminal.
+        // Checkpoint callers also flush immediately, including non-prefix corrections.
+        // No pacing or full transcript copy is needed for ordinary deltas.
         if accumulator.terminal != nil || firstText || mediaChanged {
             flushAssistantUpdate(conversationID)
         }

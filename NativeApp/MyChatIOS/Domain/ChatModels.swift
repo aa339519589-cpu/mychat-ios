@@ -418,8 +418,21 @@ struct ChatProcessEntry: Equatable, Sendable, Identifiable {
     static func record(_ event: ChatJobEvent, into entries: inout [ChatProcessEntry]) {
         let id = "\(event.jobID.uuidString):\(event.sequence)"
         switch event.payload {
-        case let .snapshot(snapshot) where snapshot.content.isEmpty && snapshot.thinking.isEmpty:
-            entries.removeAll()
+        case let .snapshot(snapshot):
+            if snapshot.content.isEmpty && snapshot.thinking.isEmpty {
+                entries.removeAll()
+                return
+            }
+            // A checkpoint replaces accumulated output; it is not another delta.
+            // Only tagged provider summaries may enter the visible summary lane.
+            if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) {
+                reconcile(summary, id: id + ":summary", into: &entries,
+                    value: { if case let .reasoningSummary(text) = $0 { return text }; return nil },
+                    content: Content.reasoningSummary)
+            }
+            reconcile(snapshot.content, id: id + ":text", into: &entries,
+                value: { if case let .text(text) = $0 { return text }; return nil },
+                content: Content.text)
         case let .textDelta(delta):
             guard !delta.isEmpty else { return }
             if let last = entries.last, case let .text(text) = last.content {
@@ -449,6 +462,42 @@ struct ChatProcessEntry: Equatable, Sendable, Identifiable {
         default: break
         }
     }
+
+    /// Keep unchanged prefix segments and interleaved tools in their original
+    /// positions. A correction replaces the first divergent segment and drops
+    /// superseded output segments, without erasing the tool/search history.
+    private static func reconcile(
+        _ replacement: String, id: String, into entries: inout [ChatProcessEntry],
+        value: (Content) -> String?, content: (String) -> Content
+    ) {
+        guard entries.compactMap({ value($0.content) }).joined() != replacement else { return }
+        var remaining = replacement[...]
+        var replaced = false
+        var revised: [ChatProcessEntry] = []
+        for var entry in entries {
+            guard let original = value(entry.content) else { revised.append(entry); continue }
+            guard !replaced else { continue }
+            if remaining.hasPrefix(original) {
+                revised.append(entry)
+                remaining = remaining.dropFirst(original.count)
+            } else {
+                if !remaining.isEmpty {
+                    entry.content = content(String(remaining))
+                    revised.append(entry)
+                }
+                remaining = ""
+                replaced = true
+            }
+        }
+        if !remaining.isEmpty {
+            if let last = revised.last, let original = value(last.content) {
+                revised[revised.count - 1].content = content(original + String(remaining))
+            } else {
+                revised.append(Self(id: id, content: content(String(remaining))))
+            }
+        }
+        entries = revised
+    }
 }
 
 struct ChatJobEvent: Equatable, Sendable {
@@ -466,13 +515,26 @@ struct ChatStreamAccumulator: Equatable, Sendable {
     private(set) var media: [ChatGeneratedMedia] = []
     private(set) var searches: [ChatToolSearch] = []
     private(set) var terminal: ChatTerminalSnapshot?
+    private(set) var sequence: Int?
+    private var jobID: UUID?
 
     var persistedThinking: String? {
         if let summary = ChatReasoningSummaryStorage.encode(reasoningSummary) { return summary }
         return thinking.isEmpty ? nil : thinking
     }
 
-    mutating func apply(_ event: ChatJobEvent) {
+    @discardableResult mutating func apply(_ event: ChatJobEvent) -> Bool {
+        guard event.sequence >= 0, terminal == nil, jobID == nil || jobID == event.jobID else { return false }
+        if let sequence {
+            guard event.sequence >= sequence else { return false }
+            if event.sequence == sequence {
+                // A recovered terminal can share its checkpoint's sequence.
+                // All other equal-sequence events are replay, not new output.
+                guard case .terminal = event.payload else { return false }
+            }
+        }
+        jobID = event.jobID
+        sequence = event.sequence
         switch event.payload {
         case let .textDelta(delta):
             content += delta
@@ -497,6 +559,7 @@ struct ChatStreamAccumulator: Equatable, Sendable {
             media = snapshot.media
             terminal = snapshot
         }
+        return true
     }
 }
 
