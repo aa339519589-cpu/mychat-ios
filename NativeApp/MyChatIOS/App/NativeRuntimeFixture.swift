@@ -227,6 +227,8 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     private static var systemPrompt = ""
     private static var deletedConversations: Set<String> = []
     private static var deletedProjects: Set<String> = []
+    private static var codeCancellationCount = 0
+    private static var codeCancellationStatusQueryCount = 0
     static var historicalTestContent: String?
     private static var addedMemories: [[String: Any]] = []
     private static var savedArtifacts: [[String: Any]] = []
@@ -241,6 +243,51 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         guard let url = request.url else { return }
         let path = url.path
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay"),
+           path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
+            let fromSequence = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "from_seq" })?.value
+            guard fromSequence == "0" else {
+                let errorResponse = HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"])!
+                client?.urlProtocol(self, didReceive: errorResponse, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(#"{"error":"fixture requires from_seq=0"}"#.utf8))
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            let jobID = "88000000-0000-4000-8000-000000000074"
+            let taskID = "88000000-0000-4000-8000-000000000075"
+            func frame(_ sequence: Int, _ kind: String, _ payload: [String: Any]) -> Data {
+                let envelope: [String: Any] = ["jobId": jobID, "seq": sequence, "kind": kind, "payload": payload]
+                let json = try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+                let text = String(data: json, encoding: .utf8)!
+                return Data("id: \(sequence)\nevent: \(kind)\ndata: \(text)\n\n".utf8)
+            }
+            let textEvent = frame(1, "text.delta", ["text": "终态任务回放正文"])
+            let planEvent = frame(2, "agent.plan", ["plan": [
+                "kind": "write_file", "path": "README.md", "newContent": "replayed"
+            ]])
+            let terminalEvent = frame(3, "job.terminal", ["status": "completed", "result": [
+                "mode": "publish_pr", "taskId": taskID, "repo": "mychat/test-app"
+            ]])
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: textEvent)
+            client?.urlProtocol(self, didLoad: textEvent) // replayed sequence is ignored by the client cursor
+            client?.urlProtocol(self, didLoad: planEvent)
+            Thread.sleep(forTimeInterval: 1.0)
+            guard !stopped else { return }
+            client?.urlProtocol(self, didLoad: terminalEvent)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse"),
+           path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
+            // Hold the durable event stream open. The cancellation test proves
+            // task recovery can settle the UI even without a terminal SSE.
+            return
+        }
         let body = Self.body(request)
         Self.lock.lock()
         let (status, payload) = Self.response(path, request.httpMethod ?? "GET", body, url)
@@ -365,9 +412,60 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "80000000-0000-4000-8000-000000000065", "repo": provisionalRepository, "title": "继续当前任务", "created_at": date, "updated_at": date],
                 ["id": "80000000-0000-4000-8000-000000000066", "repo": "mychat/test-app", "title": "修复登录边界", "created_at": date, "updated_at": date],
             ])
+        case "/rest/v1/code_messages":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") else { return (200, []) }
+            return (200, [[
+                "id": "88000000-0000-4000-8000-000000000076",
+                "session_id": "80000000-0000-4000-8000-000000000066",
+                "role": "assistant", "content": "旧内容", "meta": NSNull(), "created_at": date,
+            ]])
         case "/api/code/tasks":
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else {
                 return (503, ["error": "隔离测试未配置任务恢复"])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") {
+                let jobID = "88000000-0000-4000-8000-000000000074"
+                let taskID = "88000000-0000-4000-8000-000000000075"
+                let sessionID = "80000000-0000-4000-8000-000000000066"
+                let task: [String: Any] = [
+                    "id": taskID, "status": "completed", "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []
+                ]
+                let admission: [String: Any] = [
+                    "schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+                    "responseId": "88000000-0000-4000-8000-000000000076",
+                    "status": "completed", "created": false,
+                    "streamUrl": "/api/v1/jobs/\(jobID)/events",
+                    "trialRemaining": NSNull(), "trialLimit": NSNull()
+                ]
+                return (200, ["sessionId": sessionID, "task": task, "admission": admission,
+                              "operationAdmission": NSNull()])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse") {
+                let jobID = "88000000-0000-4000-8000-000000000064"
+                let taskID = "88000000-0000-4000-8000-000000000065"
+                let sessionID = "80000000-0000-4000-8000-000000000064"
+                if codeCancellationCount >= 2 { codeCancellationStatusQueryCount += 1 }
+                let cancelled = codeCancellationCount >= 2 && codeCancellationStatusQueryCount >= 2
+                let status = cancelled ? "cancelled" : (codeCancellationCount >= 2 ? "cancelling" : "running")
+                let task: [String: Any] = [
+                    "id": taskID, "status": status, "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []
+                ]
+                let admission: Any
+                if cancelled {
+                    admission = NSNull()
+                } else {
+                    admission = [
+                        "schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+                        "responseId": "88000000-0000-4000-8000-000000000066",
+                        "status": status, "created": false,
+                        "streamUrl": "/api/v1/jobs/\(jobID)/events",
+                        "trialRemaining": NSNull(), "trialLimit": NSNull()
+                    ] as [String: Any]
+                }
+                return (200, ["sessionId": sessionID, "task": task, "admission": admission,
+                              "operationAdmission": NSNull()])
             }
             return (200, ["task": NSNull(), "admission": NSNull()])
         case "/api/connectors": return (200, ["connectors": []])
@@ -520,6 +618,18 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             return (200, savedArtifacts)
         case "/rest/v1/profiles": return (200, [])
         default:
+            if path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/cancel"), method == "POST",
+               ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse") {
+                Thread.sleep(forTimeInterval: 0.4)
+                codeCancellationCount += 1
+                if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-first-fails"),
+                   codeCancellationCount == 1 {
+                    return (503, ["error": "隔离测试：模拟取消服务失败"])
+                }
+                let jobID = url.pathComponents.dropLast().last ?? ""
+                return (202, ["jobId": jobID, "accepted": true, "replayed": false,
+                              "status": "cancelling", "eventSeq": 1])
+            }
             if path.hasPrefix("/api/conversations/"), method == "DELETE" {
                 deletedConversations.insert(url.lastPathComponent); return (200, ["ok": true])
             }
