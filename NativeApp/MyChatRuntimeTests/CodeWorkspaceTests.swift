@@ -189,9 +189,21 @@ import SwiftUI
         do {
             _ = try await api.workspaceDiff(binding: diffBinding, path: "README.md", capability: diffCapability, accessToken: "test-token")
             XCTFail("Authenticated workspace reads must not follow redirects")
-        } catch { XCTAssertFalse(error is CancellationError) }
+        } catch { XCTAssertEqual(error as? CodeAPIError, .workspaceDiffRedirect) }
         XCTAssertEqual(DiffRequestURLProtocol.requests.count, 1)
         XCTAssertEqual(DiffRequestURLProtocol.requests.first?.url?.host, "diff.invalid")
+    }
+
+    func testWorkspaceDiffRedirectFixtureActuallyFollowsWithoutReadDelegate() async throws {
+        let session = diffSession()
+        defer { session.invalidateAndCancel(); DiffRequestURLProtocol.reset() }
+        let target = URL(string: "https://redirect.invalid/private")!
+        DiffRequestURLProtocol.redirect(to: target)
+        let (_, response) = try await session.data(for: URLRequest(url: URL(string: "https://diff.invalid/control")!))
+        XCTAssertEqual(response.url, target)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(DiffRequestURLProtocol.requests.count, 2,
+            "The synthetic redirect must really reach its target when the production rejection delegate is absent")
     }
 
     func testWorkspaceDiffBoundsActualBodyWithoutContentLength() async throws {
@@ -570,9 +582,15 @@ private final class DiffRequestURLProtocol: URLProtocol, @unchecked Sendable {
         Self.lock.unlock()
         var headers = ["Content-Type": "application/json", "Cache-Control": "private, no-store"]
         if let length { headers["Content-Length"] = length }
-        let response = HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: "HTTP/1.1", headerFields: headers)!
+        if let redirect, redirect != request.url { headers["Location"] = redirect.absoluteString }
+        let response = HTTPURLResponse(url: request.url!, statusCode: redirect == request.url ? 200 : code,
+            httpVersion: "HTTP/1.1", headerFields: headers)!
         if let redirect, redirect != request.url {
             client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: redirect), redirectResponse: response)
+            // A rejected redirect still has an original HTTP response/body.
+            // Omitting these callbacks made the old assertion pass only after a 30s timeout.
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
             return
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

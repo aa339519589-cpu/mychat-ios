@@ -38,6 +38,7 @@ enum CodeAPIError: LocalizedError, Equatable, Sendable {
     case unsafeURL
     case mismatchedResponse
     case workspaceDiffUnavailable
+    case workspaceDiffRedirect
     case server(status: Int, message: String, retryable: Bool)
 
     var errorDescription: String? {
@@ -54,6 +55,8 @@ enum CodeAPIError: LocalizedError, Equatable, Sendable {
             return "编程服务响应与本次任务不一致"
         case .workspaceDiffUnavailable:
             return "当前服务暂不支持查看文件差异"
+        case .workspaceDiffRedirect:
+            return "文件差异读取不允许跳转到其他地址"
         case let .server(_, message, _):
             return message
         }
@@ -164,6 +167,10 @@ struct CodeAPIClient: CodeAPIServing {
         guard let response = response as? HTTPURLResponse, response.url == url else {
             bytes.task.cancel()
             throw CodeAPIError.unsafeURL
+        }
+        guard !(300..<400).contains(response.statusCode) else {
+            bytes.task.cancel()
+            throw CodeAPIError.workspaceDiffRedirect
         }
         let limit = 4 * 1_024 * 1_024
         guard response.expectedContentLength <= Int64(limit) else {

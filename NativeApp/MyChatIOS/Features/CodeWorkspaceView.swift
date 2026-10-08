@@ -1189,6 +1189,7 @@ private struct CodeTaskEvidenceView: View {
                     .accessibilityIdentifier("code.diff.open")
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("code.evidence")
         .task(id: (appModel.authSession?.user.id ?? "") + ":" + detail.id) {
             diffCapability = nil
