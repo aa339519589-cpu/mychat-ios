@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_offline_tests:
-        description: "Run fixture-only runtime tests only if an iPhone 16 Pro with iOS 27 is already installed. No runtime download."
+        description: "Run fixture-only runtime tests only if an iPhone 18 Pro with iOS 27 is already installed. No runtime download."
         required: false
         type: boolean
         default: false
@@ -15,7 +15,7 @@ permissions:
 jobs:
   build102:
     name: Build 102 NativeApp
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -53,15 +53,18 @@ jobs:
           ))
           runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
           for device in payload.get("devices", {}).get(runtime, []):
-              if device.get("isAvailable") and device.get("name") == "iPhone 16 Pro":
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
                   print(device["udid"])
                   break
           PY
           )"
           if [[ -z "$device_id" ]]; then
-            echo "::notice::No already-installed iOS 27 iPhone 16 Pro simulator. Tests skipped; no runtime download was attempted."
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Tests skipped; no runtime download was attempted."
             exit 0
           fi
+          # Boot only the runner-provided simulator; never install a runtime.
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
           xcodebuild \
             -project MyChatIOS.xcodeproj \
             -scheme MyChatIOS \
