@@ -2362,6 +2362,159 @@ import Combine
         }
     }
 
+    func testAdmissionStopFenceRequiresMatchingOwnerGenerationAndTerminalEvidence() async throws {
+        let generation = UUID(), epoch = UUID()
+        let fence = ChatAdmissionStopFence(generationID: generation, ownerID: "fixture-owner", accountGeneration: epoch)
+        var started = false, released = false
+        let waiter = Task {
+            started = true
+            try await fence.wait()
+            released = true
+        }
+        defer { waiter.cancel(); fence.invalidate() }
+        try await waitUntil { started }
+        for status in ["queued", "running", "unknown", "not_found"] {
+            XCTAssertFalse(fence.confirm(.init(jobID: generation, status: status),
+                ownerID: "fixture-owner", accountGeneration: epoch))
+        }
+        XCTAssertFalse(fence.confirm(.init(jobID: UUID(), status: "cancelled"),
+            ownerID: "fixture-owner", accountGeneration: epoch))
+        XCTAssertFalse(fence.confirm(.init(jobID: generation, status: "cancelled"),
+            ownerID: "other-owner", accountGeneration: epoch))
+        XCTAssertFalse(fence.confirm(.init(jobID: generation, status: "cancelled"),
+            ownerID: "fixture-owner", accountGeneration: UUID()))
+        XCTAssertFalse(released)
+        XCTAssertTrue(fence.confirm(.init(jobID: generation, status: "cancelled"),
+            ownerID: "fixture-owner", accountGeneration: epoch))
+        try await waiter.value
+        XCTAssertTrue(released)
+        XCTAssertTrue(fence.isResolved)
+        XCTAssertFalse(fence.confirm(.init(jobID: generation, status: "queued"),
+            ownerID: "fixture-owner", accountGeneration: epoch))
+        XCTAssertTrue(fence.isResolved, "A stale receipt cannot undo terminal evidence")
+    }
+
+    func testCancellingAdmissionFenceWaiterDoesNotConfirmTheOldJob() async throws {
+        let fence = ChatAdmissionStopFence(generationID: UUID(), ownerID: "fixture-owner", accountGeneration: UUID())
+        for cancelBeforeStart in [true, false] {
+            let waiter = Task { try await fence.wait() }
+            if !cancelBeforeStart { await Task.yield() }
+            waiter.cancel()
+            do { try await waiter.value; XCTFail("Cancelled local wait must throw") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertFalse(fence.isResolved)
+        }
+        fence.invalidate()
+        do { try await fence.wait(); XCTFail("An invalidated account fence must remain closed") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    func testLostAdmissionReceiptUsesExactJobStatusWithoutRepostingOrWaitingForHTTP() async throws {
+        let transport = ControlledChatTransport()
+        transport.holdAdmission = true
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded(); await model.reloadModels(); model.beginNewChat()
+        model.draft = "Original admitted turn"; model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.heldAdmissions.count == 1 }
+        let original = transport.commands[0]
+        defer { transport.heldAdmissions.removeValue(forKey: original.generationID)?.resume() }
+        // Operational admission state must survive eviction from the bounded
+        // diagnostics cache; timing records are not cancellation authority.
+        for _ in 0..<65 {
+            ChatGenerationDiagnostics.begin(ChatAppendCommand(conversationID: UUID(),
+                userMessage: ChatMessage(id: UUID(), role: .user, content: "synthetic timing record", thinking: nil, createdAt: Date()),
+                createConversation: true, title: "synthetic"))
+        }
+        XCTAssertNil(ChatGenerationDiagnostics.records[original.generationID])
+        transport.admissionStatuses[original.generationID] = .init(jobID: original.generationID, status: "queued")
+        model.stopCurrentGeneration()
+        transport.holdAdmission = false
+        model.draft = "Next authorized user turn"; model.sendDraft()
+        try await waitUntil { transport.commands.count == 2 && transport.continuations[transport.commands[1].generationID] != nil }
+        XCTAssertNotNil(transport.heldAdmissions[original.generationID], "The original HTTP receipt remains withheld")
+        XCTAssertEqual(transport.cancelCalls, [original.generationID])
+        XCTAssertTrue(transport.admissionStatusCalls.allSatisfy { $0 == original.generationID })
+        XCTAssertEqual(transport.commands.filter { $0.generationID == original.generationID }.count, 1)
+        let next = transport.commands[1]
+        transport.heldAdmissions.removeValue(forKey: original.generationID)?.resume()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(transport.streamStarts.contains { $0.jobID == original.generationID })
+        XCTAssertEqual(model.messages.last?.id, next.assistantMessageID)
+        XCTAssertEqual(transport.commands.count, 2)
+        transport.complete(next, text: "Complete", sequence: 1)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+    }
+
+    func testUnknownAdmissionCannotReleaseNextTurnAndUnsentWaitCanBeCancelled() async throws {
+        let transport = ControlledChatTransport()
+        transport.holdAdmission = true
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded(); await model.reloadModels(); model.beginNewChat()
+        model.draft = "First"; model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.heldAdmissions.count == 1 }
+        let original = transport.commands[0]
+        defer { transport.heldAdmissions.removeValue(forKey: original.generationID)?.resume() }
+        model.stopCurrentGeneration()
+        model.draft = "Unsent second"; model.sendDraft()
+        try await waitUntil { !transport.admissionStatusCalls.isEmpty }
+        XCTAssertEqual(transport.commands.count, 1)
+        XCTAssertTrue(transport.cancelCalls.isEmpty, "Unknown lookup must not fabricate an admitted job")
+        let checks = transport.admissionStatusCalls.count
+        model.retryCurrentGeneration()
+        try await waitUntil { transport.admissionStatusCalls.count > checks }
+        XCTAssertEqual(transport.commands.count, 1, "Retry must check the old job rather than replay a model POST")
+        XCTAssertTrue(transport.admissionStatusCalls.allSatisfy { $0 == original.generationID })
+        model.stopCurrentGeneration()
+        XCTAssertFalse(model.isCurrentConversationGenerating)
+        model.draft = "Third user turn"; model.sendDraft()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(transport.commands.count, 1, "404/nil status cannot release either waiting turn")
+        transport.holdAdmission = false
+        transport.heldAdmissions.removeValue(forKey: original.generationID)?.resume()
+        try await waitUntil { transport.commands.count == 2 && transport.continuations[transport.commands[1].generationID] != nil }
+        XCTAssertEqual(transport.commands[1].userMessage.content, "Third user turn")
+        XCTAssertFalse(transport.commands.contains { $0.userMessage.content == "Unsent second" })
+        let third = transport.commands[1]
+        transport.complete(third, text: "Complete", sequence: 1)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+    }
+
+    func testAdmissionStatusGETRejectsMismatchedSubjectAndKeeps404Unknown() async throws {
+        let command = ChatAppendCommand(conversationID: UUID(),
+            userMessage: ChatMessage(id: UUID(), role: .user, content: "synthetic request", thinking: nil, createdAt: Date()),
+            createConversation: true, title: "synthetic")
+        func response(userMessageID: UUID) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["job": [
+                "id": command.generationID.uuidString, "type": "chat.generation", "queue": "chat",
+                "status": "cancelled", "eventSequence": 2,
+                "subject": ["conversationId": command.conversationID.uuidString,
+                    "userMessageId": userMessageID.uuidString, "assistantMessageId": command.assistantMessageID.uuidString]
+            ]])
+        }
+        let recorder = ChatGPTPlanRequestRecorder()
+        recorder.scriptedResponses = [(200, try response(userMessageID: command.userMessageID), "application/json"),
+            (404, Data("{}".utf8), "application/json"), (200, try response(userMessageID: UUID()), "application/json")]
+        ChatGPTPlanFixtureURLProtocol.recorder = recorder
+        defer { ChatGPTPlanFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatGPTPlanFixtureURLProtocol.self]
+        let network = URLSession(configuration: configuration)
+        defer { network.invalidateAndCancel() }
+        let client = ChatAPIClient(session: network, baseURL: URL(string: "https://admission-fixture.example.invalid")!)
+        let terminal = try await client.admissionStatus(command: command, accessToken: "isolated-fixture")
+        XCTAssertEqual(terminal?.jobID, command.generationID)
+        XCTAssertEqual(terminal?.isTerminal, true)
+        let missing = try await client.admissionStatus(command: command, accessToken: "isolated-fixture")
+        XCTAssertNil(missing)
+        do {
+            _ = try await client.admissionStatus(command: command, accessToken: "isolated-fixture")
+            XCTFail("A different user-message identity must be rejected")
+        } catch { XCTAssertEqual(error as? ChatTransportError, .mismatchedJob) }
+        XCTAssertEqual(recorder.requests.count, 3)
+        XCTAssertTrue(recorder.requests.allSatisfy { $0.httpMethod == "GET"
+            && $0.url?.path == "/api/v1/jobs/" + command.generationID.uuidString.lowercased() })
+    }
+
     func testStopDuringAdmissionCancelsTheServerReceiptBeforeStartingTheNextTurn() async throws {
         let transport = ControlledChatTransport(); transport.holdAdmission = true
         let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
@@ -2617,6 +2770,8 @@ private actor ControlledConversationStore: SupabaseDataServing {
     var privateReply: String?
     var commands: [ChatAppendCommand] = []
     var recovery: ChatGenerationRecovery?
+    var admissionStatuses: [UUID: ChatAdmissionJobStatus] = [:]
+    var admissionStatusCalls: [UUID] = []
     var streamStarts: [(jobID: UUID, fromSequence: Int)] = []
     var continuations: [UUID: AsyncThrowingStream<ChatJobEvent, Error>.Continuation] = [:]
     func enqueueAppendTurn(_ command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmission {
@@ -2641,6 +2796,10 @@ private actor ControlledConversationStore: SupabaseDataServing {
     }
     func generateConversationTitle(conversationID: UUID, userText: String, assistantText: String, endpointID: UUID?, accessToken: String) async throws -> String { "隔离测试标题" }
     func conversationGeneration(conversationID: UUID, accessToken: String) async throws -> ChatGenerationRecovery? { recovery }
+    func admissionStatus(command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmissionJobStatus? {
+        admissionStatusCalls.append(command.generationID)
+        return admissionStatuses[command.generationID]
+    }
     func terminalSnapshot(conversationID: UUID, jobID: UUID, accessToken: String) async throws -> ChatTerminalSnapshot? { nil }
     func cancel(jobID: UUID, accessToken: String, reason: String?) async throws -> ChatCancelResponse {
         cancelCalls.append(jobID)

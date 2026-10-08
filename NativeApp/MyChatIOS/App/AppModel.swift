@@ -21,6 +21,79 @@ private final class GenerationBackgroundLease {
     }
 }
 
+/// A cancellation fence is independent of an admission transport's lifetime.
+/// Only matching authoritative terminal evidence resolves it; unknown status
+/// and caller cancellation never manufacture a successful server cancellation.
+@MainActor final class ChatAdmissionStopFence {
+    let generationID: UUID
+    let ownerID: String
+    let accountGeneration: UUID
+    private(set) var isResolved = false
+    private var invalidated = false
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+
+    init(generationID: UUID, ownerID: String, accountGeneration: UUID) {
+        self.generationID = generationID
+        self.ownerID = ownerID
+        self.accountGeneration = accountGeneration
+    }
+
+    func wait() async throws {
+        try Task.checkCancellation()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if invalidated || Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                else if isResolved { continuation.resume() }
+                else { waiters[id] = continuation }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.waiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    @discardableResult func confirm(_ status: ChatAdmissionJobStatus, ownerID: String, accountGeneration: UUID) -> Bool {
+        guard !invalidated, status.jobID == generationID, self.ownerID == ownerID,
+              self.accountGeneration == accountGeneration, status.isTerminal else { return false }
+        guard !isResolved else { return true }
+        isResolved = true
+        let current = Array(waiters.values)
+        waiters.removeAll()
+        current.forEach { $0.resume() }
+        return true
+    }
+
+    func invalidate() {
+        invalidated = true
+        let current = Array(waiters.values)
+        waiters.removeAll()
+        current.forEach { $0.resume(throwing: CancellationError()) }
+    }
+}
+
+@MainActor private final class StoppedChatAdmission {
+    let command: ChatAppendCommand
+    let task: Task<Void, Never>
+    let fence: ChatAdmissionStopFence
+    var reconciliationTask: Task<Void, Never>?
+    var id: UUID { command.generationID }
+
+    init(command: ChatAppendCommand, task: Task<Void, Never>, ownerID: String, accountGeneration: UUID) {
+        self.command = command
+        self.task = task
+        fence = ChatAdmissionStopFence(generationID: command.generationID, ownerID: ownerID,
+            accountGeneration: accountGeneration)
+    }
+
+    func invalidate() {
+        fence.invalidate()
+        reconciliationTask?.cancel()
+        task.cancel()
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum CatalogPhase: Equatable {
@@ -153,7 +226,8 @@ final class AppModel: ObservableObject {
     private var conversationLoadToken: UUID?
     private var generationRecoveryTasks: [UUID: Task<Void, Never>] = [:]
     private var generationTasks: [UUID: Task<Void, Never>] = [:]
-    private var stoppedAdmissionTasks: [UUID: (id: UUID, task: Task<Void, Never>)] = [:]
+    private var stoppedAdmissionTasks: [UUID: StoppedChatAdmission] = [:]
+    private var admissionRequestsStarted: Set<UUID> = []
     private var stoppedBeforeAdmission: Set<UUID> = []
     private var generationReconnects: Set<UUID> = []
     private var generationIDs: [UUID: UUID] = [:]
@@ -616,6 +690,7 @@ final class AppModel: ObservableObject {
         }
         if authSession?.user.id != session.user.id {
             accountGeneration = UUID()
+            invalidateStoppedAdmissions()
             memoryReloadToken = nil
             memoryMutationRevision &+= 1
             generationRecoveryTasks.values.forEach { $0.cancel() }
@@ -693,6 +768,7 @@ final class AppModel: ObservableObject {
 
     func signOut() async {
         accountGeneration = UUID()
+        invalidateStoppedAdmissions()
         memoryReloadToken = nil
         memoryMutationRevision &+= 1
         let recoveryOwnerID = authSession?.user.id
@@ -3104,6 +3180,14 @@ final class AppModel: ObservableObject {
     }
 
     func retryCurrentGeneration() {
+        if let id = activeConversationID, let stopped = stoppedAdmissionTasks[id],
+           isCurrentStoppedAdmission(stopped) {
+            // Retry the exact job's cancellation lookup, never the stopped POST.
+            stopped.reconciliationTask?.cancel()
+            if conversationErrors[id] == Self.stoppedAdmissionNotice { conversationErrors[id] = nil }
+            reconcileStoppedAdmission(stopped)
+            return
+        }
         guard
             let conversationID = activeConversationID,
             !generatingConversationIDs.contains(conversationID),
@@ -3139,12 +3223,15 @@ final class AppModel: ObservableObject {
         let task = generationTasks.removeValue(forKey: conversationID)
         let localStream = privateConversationIDs.contains(conversationID)
             || command.modelID.hasPrefix(ChatGPTPlanProvider.modelIDPrefix)
-        if jobID == nil && !localStream, let task {
-            // The POST may already have committed on the server. Keep its
-            // admission receipt alive so that the admitted job is cancelled;
-            // the next turn waits for this fence rather than racing creation.
+        let requestStarted = admissionRequestsStarted.contains(command.generationID)
+        if jobID == nil && !localStream && requestStarted, let task {
+            // Receipt loss does not mean admission failed. Keep the original
+            // IDs and reconcile that exact job without submitting it again.
             stoppedBeforeAdmission.insert(command.generationID)
-            stoppedAdmissionTasks[conversationID] = (command.generationID, task)
+            let stopped = StoppedChatAdmission(command: command, task: task,
+                ownerID: authSession?.user.id ?? "", accountGeneration: accountGeneration)
+            stoppedAdmissionTasks[conversationID] = stopped
+            reconcileStoppedAdmission(stopped)
         } else { task?.cancel() }
         flushAssistantUpdate(conversationID)
         clearPlanRecovery(command)
@@ -3169,7 +3256,92 @@ final class AppModel: ObservableObject {
                     await self.cancelServerGeneration(command, jobID: jobID, session: session)
                 } catch { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelFailed) }
             }
-        } else if localStream { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete) }
+        } else if localStream || !requestStarted {
+            ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete)
+        }
+    }
+
+    private static let stoppedAdmissionNotice = "上一条回复的取消状态尚未确认，下一条仍在等待。"
+
+    private func invalidateStoppedAdmissions() {
+        let stopped = Array(stoppedAdmissionTasks.values)
+        stoppedAdmissionTasks.removeAll()
+        stoppedBeforeAdmission.removeAll()
+        admissionRequestsStarted.removeAll()
+        stopped.forEach { $0.invalidate() }
+    }
+
+    private func isCurrentStoppedAdmission(_ stopped: StoppedChatAdmission) -> Bool {
+        stoppedAdmissionTasks[stopped.command.conversationID] === stopped
+            && authSession?.user.id == stopped.fence.ownerID
+            && accountGeneration == stopped.fence.accountGeneration
+    }
+
+    private func confirmStoppedAdmission(command: ChatAppendCommand, status: ChatAdmissionJobStatus, ownerID: String) {
+        guard let stopped = stoppedAdmissionTasks[command.conversationID], stopped.id == command.generationID,
+              isCurrentStoppedAdmission(stopped), ownerID == authSession?.user.id,
+              stopped.fence.confirm(status, ownerID: ownerID, accountGeneration: accountGeneration) else { return }
+        stoppedAdmissionTasks[command.conversationID] = nil
+        stoppedBeforeAdmission.remove(command.generationID)
+        admissionRequestsStarted.remove(command.generationID)
+        stopped.reconciliationTask?.cancel()
+        stopped.task.cancel()
+        if conversationErrors[command.conversationID] == Self.stoppedAdmissionNotice {
+            conversationErrors[command.conversationID] = nil
+        }
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete)
+    }
+
+    private func reconcileStoppedAdmission(_ stopped: StoppedChatAdmission) {
+        stopped.reconciliationTask = Task { [weak self, weak stopped] in
+            var attempts = 0
+            while !Task.isCancelled {
+                guard let self, let stopped, self.isCurrentStoppedAdmission(stopped) else { return }
+                let command = stopped.command
+                if self.isConversationBeingDeleted(command.conversationID.uuidString) {
+                    self.stoppedAdmissionTasks[command.conversationID] = nil
+                    self.stoppedBeforeAdmission.remove(command.generationID)
+                    self.admissionRequestsStarted.remove(command.generationID)
+                    stopped.invalidate()
+                    return
+                }
+                do {
+                    let session = try await self.generationSession()
+                    try Task.checkCancellation()
+                    guard self.isCurrentStoppedAdmission(stopped), session.user.id == stopped.fence.ownerID else { return }
+                    if let status = try await self.chatClient.admissionStatus(command: command, accessToken: session.accessToken) {
+                        try Task.checkCancellation()
+                        guard self.isCurrentStoppedAdmission(stopped) else { return }
+                        guard status.jobID == command.generationID else { throw ChatTransportError.mismatchedJob }
+                        if status.isTerminal {
+                            self.confirmStoppedAdmission(command: command, status: status, ownerID: session.user.id)
+                            return
+                        }
+                        let cancelled = try await self.chatClient.cancel(jobID: command.generationID,
+                            accessToken: session.accessToken, reason: "user_requested")
+                        try Task.checkCancellation()
+                        guard self.isCurrentStoppedAdmission(stopped) else { return }
+                        guard cancelled.jobID == command.generationID else { throw ChatTransportError.mismatchedJob }
+                        if cancelled.accepted { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelAccepted) }
+                        let evidence = ChatAdmissionJobStatus(jobID: cancelled.jobID, status: cancelled.status)
+                        if evidence.isTerminal {
+                            self.confirmStoppedAdmission(command: command, status: evidence, ownerID: session.user.id)
+                            return
+                        }
+                    }
+                } catch is CancellationError { return }
+                catch { /* Unknown status is not cancellation proof. Keep the fence closed. */ }
+                guard self.isCurrentStoppedAdmission(stopped) else { return }
+                attempts += 1
+                if attempts >= 3, self.conversationErrors[command.conversationID] == nil {
+                    self.conversationErrors[command.conversationID] = Self.stoppedAdmissionNotice
+                }
+                // Poll the same read/cancel authority only. Never replay the
+                // stopped POST, and back off while the status remains unknown.
+                do { try await Task.sleep(for: .seconds(attempts < 5 ? 1 : 5)) }
+                catch { return }
+            }
+        }
     }
 
     private func cancelServerGeneration(_ command: ChatAppendCommand, jobID: UUID, session: AuthSession) async {
@@ -3178,14 +3350,18 @@ final class AppModel: ObservableObject {
                 guard authSession?.user.id == session.user.id else { return }
                 let result = try await chatClient.cancel(jobID: jobID, accessToken: session.accessToken, reason: "user_requested")
                 ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelAccepted)
+                guard authSession?.user.id == session.user.id, result.jobID == jobID else { return }
                 if ["cancelled", "completed", "failed"].contains(result.status) {
+                    confirmStoppedAdmission(command: command,
+                        status: ChatAdmissionJobStatus(jobID: result.jobID, status: result.status), ownerID: session.user.id)
                     ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete)
                     return
                 }
                 if attempt < 29 { try await Task.sleep(for: .seconds(1)) }
             }
             ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelFailed)
-        } catch { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelFailed) }
+        } catch is CancellationError { return }
+        catch { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelFailed) }
     }
 
     private func finishGenerationUI(_ command: ChatAppendCommand) {
@@ -3297,11 +3473,10 @@ final class AppModel: ObservableObject {
         var terminalObserver: Task<Void, Never>?
         defer {
             terminalObserver?.cancel()
-            if stoppedBeforeAdmission.remove(command.generationID) != nil,
-               ChatGenerationDiagnostics.records[command.generationID]?.milliseconds["requestStarted"] == nil {
-                ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete)
+            if stoppedAdmissionTasks[conversationID]?.id != command.generationID {
+                stoppedBeforeAdmission.remove(command.generationID)
+                admissionRequestsStarted.remove(command.generationID)
             }
-            if stoppedAdmissionTasks[conversationID]?.id == command.generationID { stoppedAdmissionTasks[conversationID] = nil }
             if generationIDs[conversationID] == command.generationID {
                 finishGenerationUI(command)
                 generationIDs[conversationID] = nil
@@ -3314,7 +3489,7 @@ final class AppModel: ObservableObject {
 
         do {
             if let stopping = stoppedAdmissionTasks[conversationID], stopping.id != command.generationID {
-                await stopping.task.value
+                try await stopping.fence.wait()
                 try Task.checkCancellation()
             }
             let session: AuthSession
@@ -3355,13 +3530,19 @@ final class AppModel: ObservableObject {
                 ChatGenerationDiagnostics.mark(command.generationID, stage: .healthContextReady,
                     receivedAt: healthContextReadyAt)
                 pendingCommands[conversationID] = requestCommand
+                admissionRequestsStarted.insert(command.generationID)
                 ChatGenerationDiagnostics.mark(command.generationID, stage: .requestStarted)
                 let connection = try await chatClient.openAppendTurn(requestCommand, accessToken: session.accessToken)
                 admission = connection.admission
                 admittedEvents = connection.events
             }
             ChatGenerationDiagnostics.mark(command.generationID, stage: .admitted)
-            if stoppedBeforeAdmission.remove(command.generationID) != nil {
+            if stoppedBeforeAdmission.contains(command.generationID) {
+                guard admission.jobID == command.generationID, admission.generationID == command.generationID,
+                      admission.userMessageID == command.userMessageID,
+                      admission.assistantMessageID == command.assistantMessageID else {
+                    throw ChatTransportError.mismatchedAdmission
+                }
                 await cancelServerGeneration(command, jobID: admission.jobID, session: session)
                 return
             }
@@ -3488,7 +3669,7 @@ final class AppModel: ObservableObject {
                 }
             }
         } catch is CancellationError {
-            if stoppedBeforeAdmission.remove(command.generationID) != nil {
+            if stoppedBeforeAdmission.contains(command.generationID) {
                 await cancelUncertainAdmission(command)
                 return
             }
@@ -3496,7 +3677,7 @@ final class AppModel: ObservableObject {
             restoreRejectedRegeneration(command)
             return
         } catch {
-            if stoppedBeforeAdmission.remove(command.generationID) != nil {
+            if stoppedBeforeAdmission.contains(command.generationID) {
                 await cancelUncertainAdmission(command)
                 return
             }
@@ -3507,9 +3688,7 @@ final class AppModel: ObservableObject {
     }
 
     private func cancelUncertainAdmission(_ command: ChatAppendCommand) async {
-        guard ChatGenerationDiagnostics.records[command.generationID]?.milliseconds["requestStarted"] != nil else {
-            ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelComplete); return
-        }
+        guard admissionRequestsStarted.contains(command.generationID) else { return }
         if let session = try? await refreshedSession() {
             await cancelServerGeneration(command, jobID: command.generationID, session: session)
         } else { ChatGenerationDiagnostics.mark(command.generationID, stage: .cancelFailed) }

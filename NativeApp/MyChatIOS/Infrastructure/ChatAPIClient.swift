@@ -27,6 +27,8 @@ protocol ChatAPIServing {
         reason: String?
     ) async throws -> ChatCancelResponse
 
+    func admissionStatus(command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmissionJobStatus?
+
     func terminalSnapshot(
         conversationID: UUID,
         jobID: UUID,
@@ -45,6 +47,8 @@ protocol ChatAPIServing {
 }
 
 extension ChatAPIServing {
+    func admissionStatus(command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmissionJobStatus? { nil }
+
     func openAppendTurn(_ command: ChatAppendCommand, accessToken: String) async throws -> ChatTurnConnection {
         ChatTurnConnection(admission: try await enqueueAppendTurn(command, accessToken: accessToken), events: nil)
     }
@@ -53,6 +57,12 @@ extension ChatAPIServing {
         conversationID: UUID,
         accessToken: String
     ) async throws -> ChatGenerationRecovery? { nil }
+}
+
+struct ChatAdmissionJobStatus: Equatable, Sendable {
+    let jobID: UUID
+    let status: String
+    var isTerminal: Bool { ChatTerminalStatus(rawValue: status) != nil }
 }
 
 struct ChatAPIClient: ChatAPIServing {
@@ -318,6 +328,34 @@ struct ChatAPIClient: ChatAPIServing {
             status: wire.status,
             eventSequence: wire.eventSeq
         )
+    }
+
+    func admissionStatus(command: ChatAppendCommand, accessToken: String) async throws -> ChatAdmissionJobStatus? {
+        try validateBaseURL()
+        let token = try validatedAccessToken(accessToken)
+        let endpoint = baseURL.appendingPathComponent("api/v1/jobs")
+            .appendingPathComponent(command.generationID.uuidString.lowercased())
+        var request = authorizedRequest(url: endpoint, accessToken: token)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 10
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ChatTransportError.invalidResponse }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw serverError(status: http.statusCode, data: data) }
+        let envelope = try JSONDecoder().decode(GenerationStatusEnvelopeWire.self, from: data)
+        guard envelope.degraded != true, let job = envelope.job,
+              UUID(uuidString: job.id) == command.generationID,
+              job.type == "chat.generation",
+              job.queue == (command.outputKind == .chat ? "chat" : "media"),
+              job.eventSequence >= 0,
+              job.subject["conversationId"]?.stringValue.flatMap(UUID.init(uuidString:)) == command.conversationID,
+              job.subject["userMessageId"]?.stringValue.flatMap(UUID.init(uuidString:)) == command.userMessageID,
+              job.subject["assistantMessageId"]?.stringValue.flatMap(UUID.init(uuidString:)) == command.assistantMessageID
+        else { throw ChatTransportError.mismatchedJob }
+        // The authenticated endpoint filters by principal as well as this exact
+        // ID. AppModel separately checks the mounted owner and account generation
+        // again after this await; a latest-conversation job is not a substitute.
+        return ChatAdmissionJobStatus(jobID: command.generationID, status: job.status)
     }
 
     func terminalSnapshot(
