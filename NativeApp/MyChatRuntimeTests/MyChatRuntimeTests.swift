@@ -856,12 +856,16 @@ import CoreText
         ChatGenerationDiagnostics.markFirstGlyphDrawn(
             assistantMessageID: command.assistantMessageID, receivedAt: start + 0.030
         )
+        // A callback delivered out of order must retain the actual earliest draw.
+        ChatGenerationDiagnostics.markFirstGlyphDrawn(
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.025
+        )
 
         let record = ChatGenerationDiagnostics.records[command.generationID]!
         XCTAssertEqual(record.assistantMessageID, command.assistantMessageID)
         XCTAssertEqual(record.milliseconds["firstText"] ?? -1, 10, accuracy: 0.02)
         XCTAssertEqual(record.milliseconds["firstMarkdownPublished"] ?? -1, 20, accuracy: 0.02)
-        XCTAssertEqual(record.milliseconds["firstGlyphDrawn"] ?? -1, 30, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstGlyphDrawn"] ?? -1, 25, accuracy: 0.02)
     }
 
     func testConversationNavigationAnchorsWithoutInheritingThePreviousGenerationAnimation() async throws {

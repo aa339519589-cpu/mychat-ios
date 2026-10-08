@@ -4117,17 +4117,19 @@ private enum ResponseInkDiagnostics {
     static func record(messageID: UUID) {
         let monotonicDraw = ProcessInfo.processInfo.systemUptime
         let record = Record(messageID: messageID, drawnAt: Date(), monotonicDraw: monotonicDraw)
-        Task { @MainActor in
-            ChatGenerationDiagnostics.markFirstGlyphDrawn(
-                assistantMessageID: messageID, receivedAt: monotonicDraw
-            )
-        }
         writer.async {
+            // Deduplicate here before scheduling the actor hop so segmented
+            // renderers cannot enqueue multiple callbacks for the same message.
             guard records[messageID] == nil else { return }
             if records.count >= 64, let oldest = records.values.min(by: { $0.monotonicDraw < $1.monotonicDraw }) {
                 records[oldest.messageID] = nil
             }
             records[messageID] = record
+            Task { @MainActor in
+                ChatGenerationDiagnostics.markFirstGlyphDrawn(
+                    assistantMessageID: messageID, receivedAt: monotonicDraw
+                )
+            }
             guard let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
                   let data = try? JSONEncoder().encode(Array(records.values)) else { return }
             try? data.write(to: folder.appendingPathComponent("response-ink-timing.json"),
