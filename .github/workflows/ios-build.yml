@@ -2,6 +2,12 @@ name: Build 102 NativeApp (manual)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_offline_code_ui_tests:
+        description: "Run fixture-backed CodeWorkspace UI tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -31,3 +37,38 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             build | tee "$RUNNER_TEMP/build102-xcodebuild.log"
+
+      - name: Run offline CodeWorkspace UI tests on installed iOS 27 simulator
+        if: ${{ inputs.run_offline_code_ui_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. CodeWorkspace UI tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/CodeWorkspaceUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            test
