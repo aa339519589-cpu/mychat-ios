@@ -1,6 +1,46 @@
 import XCTest
 
 final class CodeWorkspaceUITests: XCTestCase {
+    @MainActor func testCodeListsAndRecoveryHideInternalIdentifiersInBothAppearances() {
+        for appearance in ["Light", "Dark"] {
+            let app = XCUIApplication()
+            app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-claude-models", "-AppleInterfaceStyle", appearance]
+            app.launch()
+            let sidebar = app.buttons["打开侧边栏"].firstMatch
+            XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
+            sidebar.tap()
+            app.buttons["编程"].firstMatch.tap()
+            let row = app.buttons["code.session.80000000-0000-4000-8000-000000000064"]
+            XCTAssertTrue(row.waitForExistence(timeout: 10))
+            assertNoInternalCodeMetadata(in: app)
+            XCTAssertFalse(app.staticTexts["编程"].exists)
+            XCTAssertTrue(app.staticTexts["mychat/test-app"].exists)
+            XCTAssertTrue(app.staticTexts["修复登录边界"].exists)
+            screenshot(app, name: "code-simplified-list-\(appearance)")
+            row.tap()
+            let title = app.staticTexts["code.session.title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 10))
+            XCTAssertEqual(title.label, "新建会话")
+            assertNoInternalCodeMetadata(in: app)
+            screenshot(app, name: "code-simplified-detail-\(appearance)")
+            app.buttons["打开编程操作"].tap()
+            let resume = app.staticTexts["/resume"].firstMatch
+            XCTAssertTrue(resume.waitForExistence(timeout: 10))
+            resume.tap()
+            XCTAssertTrue(app.staticTexts["恢复会话"].firstMatch.waitForExistence(timeout: 10))
+            assertNoInternalCodeMetadata(in: app)
+            XCTAssertTrue(app.staticTexts["继续当前任务"].exists)
+            screenshot(app, name: "code-simplified-resume-\(appearance)")
+            app.terminate()
+        }
+    }
+
+    @MainActor private func assertNoInternalCodeMetadata(in app: XCUIApplication) {
+        let internalText = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "__mychat_")).firstMatch
+        XCTAssertFalse(internalText.exists)
+        XCTAssertFalse(app.staticTexts["80000000-0000-4000-8000-000000000064"].exists)
+    }
+
     // Uses the network-isolated DEBUG fixture. This checks native draft and
     // navigation behavior, and makes no claim of real Cloud execution.
     @MainActor func testUnsentPlanDraftSurvivesTerminationInBothAppearances() {

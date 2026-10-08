@@ -11,11 +11,6 @@ struct CodeLanding: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("编程")
-                .font(MyChatTypography.pageTitleEditorial)
-                .lineSpacing(MyChatTypography.editorialTitleLineSpacing)
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
             Button { toolsPresented = true } label: {
                 Label("工具与连接器", systemImage: "wrench.and.screwdriver")
                     .frame(minHeight: 44)
@@ -32,7 +27,7 @@ struct CodeLanding: View {
                             .frame(width: 62, height: 62)
                             .background(MyChatTheme.selected, in: Circle())
                     }
-                    Text(PresentationText.plain(appModel.codeError ?? "编程会话会显示在这里"))
+                    Text(PresentationText.plain(appModel.codeError ?? "暂无会话"))
                         .font(MyChatTypography.cardBody)
                         .lineSpacing(MyChatTypography.utilityLineSpacing)
                         .foregroundStyle(MyChatTheme.secondaryText)
@@ -55,15 +50,17 @@ struct CodeLanding: View {
                                             .frame(width: 44, height: 44)
                                             .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 12))
                                         VStack(alignment: .leading, spacing: 4) {
-                                            Text(session.title)
+                                            Text(session.displayTitle)
                                                 .font(MyChatTypography.cardTitle)
                                                 .lineSpacing(MyChatTypography.utilityLineSpacing)
                                                 .lineLimit(1)
-                                            Text(session.repository)
-                                                .font(MyChatTypography.caption)
-                                                .lineSpacing(MyChatTypography.captionLineSpacing)
-                                                .foregroundStyle(MyChatTheme.secondaryText)
-                                                .lineLimit(1)
+                                            if let repository = session.displayRepository {
+                                                Text(repository)
+                                                    .font(MyChatTypography.caption)
+                                                    .lineSpacing(MyChatTypography.captionLineSpacing)
+                                                    .foregroundStyle(MyChatTheme.secondaryText)
+                                                    .lineLimit(1)
+                                            }
                                         }
                                         Spacer(minLength: 8)
                                         Image(systemName: "chevron.right")
@@ -76,6 +73,7 @@ struct CodeLanding: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("code.session.\(session.id)")
 
                                 Menu {
                                     Button(role: .destructive) {
@@ -239,13 +237,16 @@ private struct CodeSessionDetailView: View {
             VStack(spacing: 0) {
                 ZStack {
                     VStack(spacing: 2) {
-                        Text(session.title)
+                        Text(session.displayTitle)
                             .font(MyChatSystemFont.appFont(size: 19, weight: .semibold))
                             .lineLimit(1)
-                        Text(session.repository)
-                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                            .foregroundStyle(MyChatTheme.secondaryText)
-                            .lineLimit(1)
+                            .accessibilityIdentifier("code.session.title")
+                        if let repository = session.displayRepository {
+                            Text(repository)
+                                .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                                .foregroundStyle(MyChatTheme.secondaryText)
+                                .lineLimit(1)
+                        }
                     }
                     HStack {
                         Button { dismiss() } label: {
@@ -937,15 +938,15 @@ private struct CodeCommandSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             SheetHeader(title: "编程指令", close: close)
-            VStack(alignment: .leading, spacing: 5) {
+            if let repository = CodeDisplay.repository(repository) {
                 Text(repository)
                     .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                     .foregroundStyle(MyChatTheme.secondaryText)
                     .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 10)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 10)
 
             ScrollView {
                 LazyVStack(spacing: 4) {
@@ -1052,13 +1053,15 @@ private struct CodeMemorySheet: View {
     var body: some View {
         VStack(spacing: 0) {
             SheetHeader(title: "仓库记忆", close: close)
-            Text(repository)
-                .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                .foregroundStyle(MyChatTheme.secondaryText)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 22)
-                .padding(.bottom, 10)
+            if let repository = CodeDisplay.repository(repository) {
+                Text(repository)
+                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                    .foregroundStyle(MyChatTheme.secondaryText)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 10)
+            }
 
             ScrollView {
                 LazyVStack(spacing: 8) {
@@ -1248,13 +1251,15 @@ private struct CodeResumeSheet: View {
                                     Image(systemName: "clock.arrow.circlepath")
                                         .frame(width: 28)
                                     VStack(alignment: .leading, spacing: 3) {
-                                        Text(session.title)
+                                        Text(session.displayTitle)
                                             .font(MyChatSystemFont.appFont(size: 16, weight: .medium))
                                             .lineLimit(1)
-                                        Text(session.repository)
-                                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                                            .foregroundStyle(MyChatTheme.secondaryText)
-                                            .lineLimit(1)
+                                        if let repository = session.displayRepository {
+                                            Text(repository)
+                                                .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                                                .foregroundStyle(MyChatTheme.secondaryText)
+                                                .lineLimit(1)
+                                        }
                                     }
                                     Spacer()
                                     Image(systemName: "chevron.right")
@@ -2005,7 +2010,7 @@ private struct CodeReceiptView: View {
             Label("已发布", systemImage: "checkmark.circle.fill")
                 .font(MyChatSystemFont.appFont(size: 17, weight: .semibold))
                 .foregroundStyle(Color.green)
-            if let repository = receipt.repository {
+            if let raw = receipt.repository, let repository = CodeDisplay.repository(raw) {
                 Text(repository)
                     .font(MyChatSystemFont.appFont(size: 15, design: .monospaced, weight: .regular))
             }

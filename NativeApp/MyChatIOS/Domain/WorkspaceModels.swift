@@ -337,12 +337,41 @@ struct CodeSessionRecord: Codable, Equatable, Identifiable, Sendable {
     let createdAt: String?
     var updatedAt: String?
 
+    var displayTitle: String {
+        CodeDisplay.title(title, sessionID: id) ?? "新建会话"
+    }
+
+    var displayRepository: String? { CodeDisplay.repository(repository) }
+
     enum CodingKeys: String, CodingKey {
         case id
         case repository = "repo"
         case title
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+}
+
+enum CodeDisplay {
+    static func repository(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.contains("__mychat_"), !containsControl(value) else { return nil }
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_.-"))
+        guard parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.unicodeScalars.allSatisfy(allowed.contains) }) else { return nil }
+        return value
+    }
+
+    static func title(_ raw: String, sessionID: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.contains("__mychat_"), !containsControl(value),
+              UUID(uuidString: value) == nil, value.lowercased() != sessionID.lowercased() else { return nil }
+        return value
+    }
+
+    private static func containsControl(_ value: String) -> Bool {
+        value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 }
 

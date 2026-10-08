@@ -2,6 +2,25 @@ import XCTest
 @testable import MyChat
 
 @MainActor final class CodeWorkspaceTests: XCTestCase {
+    func testCodeDisplayHidesInternalIdentifiersWithoutChangingStoredValues() {
+        let id = "11111111-1111-1111-1111-111111111111"
+        let internalRepository = "__mychat_new__/" + id
+        let internalSession = CodeSessionRecord(id: id, repository: internalRepository,
+            title: internalRepository, createdAt: nil, updatedAt: nil)
+        XCTAssertEqual(internalSession.displayTitle, "新建会话")
+        XCTAssertNil(internalSession.displayRepository)
+        XCTAssertEqual(internalSession.repository, internalRepository)
+        XCTAssertEqual(internalSession.title, internalRepository)
+        for title in ["", "   ", id, "__mychat_new__"] {
+            XCTAssertNil(CodeDisplay.title(title, sessionID: id))
+        }
+        for repo in ["", "owner/", "/repo", "../repo", "owner/repo/extra", "owner/repo\nprivate"] {
+            XCTAssertNil(CodeDisplay.repository(repo))
+        }
+        XCTAssertEqual(CodeDisplay.repository(" aa339519589-cpu/mychat-ios "), "aa339519589-cpu/mychat-ios")
+        XCTAssertEqual(CodeDisplay.title(" 修复登录边界 ", sessionID: id), "修复登录边界")
+    }
+
     func testDraftSurvivesReloadAndIsIsolatedByOwnerAndSession() {
         let owner = "code-test-" + UUID().uuidString
         defer { CodeLocalState.clear(owner: owner, scope: "new") }
