@@ -245,8 +245,8 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         let path = url.path
         if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay"),
            path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
-            let fromSequence = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "from_seq" })?.value
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let fromSequence = components?.queryItems?.first(where: { $0.name == "from_seq" })?.value
             guard fromSequence == "0" else {
                 let errorResponse = HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1",
                     headerFields: ["Content-Type": "application/json"])!
@@ -276,7 +276,7 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             client?.urlProtocol(self, didLoad: textEvent)
             client?.urlProtocol(self, didLoad: textEvent) // replayed sequence is ignored by the client cursor
             client?.urlProtocol(self, didLoad: planEvent)
-            Thread.sleep(forTimeInterval: 1.0)
+            Thread.sleep(forTimeInterval: 2.0)
             guard !stopped else { return }
             client?.urlProtocol(self, didLoad: terminalEvent)
             client?.urlProtocolDidFinishLoading(self)
