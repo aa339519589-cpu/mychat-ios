@@ -535,7 +535,7 @@ final class MyChatUITests: XCTestCase {
     }
 
     @MainActor func testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
-        let app = launch(extra: ["--ui-test-artifacts-large"])
+        let app = launch(extra: ["--ui-test-artifacts-large", "--artifact-motion-audit"])
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["可视化"].firstMatch.tap()
 
@@ -576,6 +576,12 @@ final class MyChatUITests: XCTestCase {
             if !close.isHittable { artifact.tap() }
             XCTAssertTrue(waitForHittable(close, timeout: 10))
             dragFromLeadingEdge(width * 0.33)
+            XCTContext.runActivity(named: "Artifact edge return geometry") { activity in
+                let remainingFrame = close.exists ? String(describing: close.frame) : "removed"
+                let attachment = XCTAttachment(string: "screenWidth=\(width); requestedTravel=\(width * 0.33); originalCloseMinX=\(originalCloseMinX); closeAfterDrag=\(remainingFrame)")
+                attachment.lifetime = .keepAlways
+                activity.add(attachment)
+            }
             expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: close)
             waitForExpectations(timeout: 8)
             XCTAssertTrue(waitForHittable(artifact, timeout: 8),

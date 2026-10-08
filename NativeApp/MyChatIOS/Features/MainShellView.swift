@@ -2745,15 +2745,20 @@ private struct ArtifactLibraryDetail: View {
             Color.clear
                 .frame(width: 22)
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 12)
+                .gesture(DragGesture(minimumDistance: 12, coordinateSpace: .global)
                     .onChanged { value in
                         guard !returning, value.translation.width > abs(value.translation.height) else { return }
+                        if returnOffset == 0 {
+                            auditReturn("begin", value: value, width: viewport.size.width, completes: false)
+                        }
                         returnOffset = max(0, value.translation.width)
                     }
                     .onEnded { value in
                         guard !returning else { return }
-                        if returnOffset > viewport.size.width * 0.28 ||
-                            (returnOffset > 45 && value.predictedEndTranslation.width > viewport.size.width * 0.55) {
+                        let completes = returnOffset > viewport.size.width * 0.28 ||
+                            (returnOffset > 45 && value.predictedEndTranslation.width > viewport.size.width * 0.55)
+                        auditReturn("end", value: value, width: viewport.size.width, completes: completes)
+                        if completes {
                             finishReturn(width: viewport.size.width)
                         } else {
                             withAnimation(.smooth(duration: 0.25)) { returnOffset = 0 }
@@ -2785,6 +2790,13 @@ private struct ArtifactLibraryDetail: View {
             }
         }
         }
+    }
+
+    private func auditReturn(_ phase: String, value: DragGesture.Value, width: CGFloat, completes: Bool) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.arguments.contains("--artifact-motion-audit") else { return }
+        MyChatDebugLog.event("artifact return \(phase) start=\(value.startLocation) translation=\(value.translation) offset=\(returnOffset) width=\(width) threshold=\(width * 0.28) predicted=\(value.predictedEndTranslation.width) completes=\(completes)")
+        #endif
     }
 
     private func finishReturn(width: CGFloat) {
