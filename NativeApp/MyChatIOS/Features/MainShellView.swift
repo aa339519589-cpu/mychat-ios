@@ -2855,7 +2855,7 @@ struct ModelPickerSheet: View {
                         ForEach(groupedModels, id: \.provider) { group in
                                 VStack(alignment: .leading, spacing: 10) {
                                     HStack(spacing: 9) {
-                                        if group.provider == "自定义模型" {
+                                        if group.provider == "已连接模型" {
                                             Image(systemName: "network")
                                                 .font(MyChatSystemFont.appFont(size: 14, weight: .regular))
                                         } else {
@@ -2872,13 +2872,6 @@ struct ModelPickerSheet: View {
                                     .padding(.horizontal, 4)
 
                                     VStack(spacing: 0) {
-                                        if group.models.isEmpty {
-                                            Text("可在设置中添加自定义 API 与 URL")
-                                                .font(MyChatSystemFont.appFont(for: .footnote, weight: .regular))
-                                                .foregroundStyle(MyChatTheme.secondaryText)
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.vertical, 16)
-                                        }
                                         ForEach(group.models) { model in
                                     Button {
                                         if model.id != appModel.selectedModelID { HapticFeedback.play(.selection) }
@@ -2909,6 +2902,7 @@ struct ModelPickerSheet: View {
                         .padding(.top, 10)
                         .padding(.bottom, 32)
                     }
+                    .accessibilityIdentifier("model.catalog")
     }
 
     private var groupedModels: [(provider: String, models: [ModelCatalogItem])] {
@@ -2934,7 +2928,7 @@ struct ModelPickerSheet: View {
         let customModels = availableModels.filter { $0.endpointID != nil }.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
-        return [(provider: "自定义模型", models: customModels)] + builtInGroups
+        return builtInGroups + (customModels.isEmpty ? [] : [(provider: "已连接模型", models: customModels)])
     }
 }
 
@@ -3019,7 +3013,7 @@ private struct ChatModelSelectionSheet: View {
                     else if page == .more {
                         let custom = others.filter { $0.endpointID != nil }
                         if !custom.isEmpty {
-                            Text("自定义模型").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 18)
+                            Text("已连接模型").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 18)
                             modelRows(custom, raised: false)
                         }
                         let builtIn = others.filter { $0.endpointID == nil }

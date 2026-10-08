@@ -308,7 +308,16 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/profile/system-prompt":
             if let prompt = body["prompt"] as? String { systemPrompt = prompt }
             return (200, ["prompt": systemPrompt])
-        case "/api/endpoints": return (200, ["endpoints": []])
+        case "/api/endpoints":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-connected-model") else {
+                return (200, ["endpoints": []])
+            }
+            return (200, ["endpoints": [[
+                "id": "90000000-0000-4000-8000-000000000064", "name": "My endpoint",
+                "baseUrl": "https://endpoint.example.invalid/v1", "model": "audit-connected-model",
+                "outputKind": "chat", "authType": "bearer", "needsReconnect": false,
+                "createdAt": date, "updatedAt": date
+            ]]])
         case "/rest/v1/code_sessions":
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else { return (200, []) }
             let id = "80000000-0000-4000-8000-000000000064"

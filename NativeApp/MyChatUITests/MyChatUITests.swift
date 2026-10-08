@@ -543,6 +543,65 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["导出"].exists)
     }
 
+    @MainActor func testDefaultCodeModelsHaveNoEmptyCustomSection() {
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-claude-models", "-AppleInterfaceStyle", appearance])
+            openCodeModelPicker(in: app)
+            XCTAssertTrue(app.staticTexts["Anthropic"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.staticTexts["自定义模型"].exists)
+            XCTAssertFalse(app.staticTexts["已连接模型"].exists)
+            XCTAssertFalse(app.staticTexts["可在设置中添加自定义 API 与 URL"].exists)
+            let sonnet = app.buttons["Sonnet 5.5，Anthropic"].firstMatch
+            XCTAssertTrue(sonnet.waitForExistence(timeout: 5))
+            saveScreenshot(app, "default-code-models-\(appearance)")
+            sonnet.tap()
+            let selected = app.buttons["code-model-selector"]
+            XCTAssertTrue(selected.waitForExistence(timeout: 5))
+            XCTAssertTrue(selected.label.contains("Sonnet 5.5"))
+            app.terminate()
+        }
+    }
+
+    @MainActor func testConnectedModelsRemainSelectableWithoutMislabelingDefaults() {
+        let app = launch(extra: ["--ui-test-claude-models", "--ui-test-connected-model"])
+        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["model.more"].tap()
+        XCTAssertTrue(app.staticTexts["已连接模型"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["自定义模型"].exists)
+        XCTAssertTrue(app.staticTexts["My endpoint"].exists)
+        app.buttons["返回"].firstMatch.tap()
+        app.buttons["关闭"].firstMatch.tap()
+        openCodeModelPicker(in: app)
+        XCTAssertTrue(app.staticTexts["Anthropic"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["自定义模型"].exists)
+        let endpoint = app.buttons["My endpoint，Custom"].firstMatch
+        let catalog = app.scrollViews["model.catalog"]
+        for _ in 0..<4 {
+            if endpoint.exists && endpoint.isHittable { break }
+            catalog.swipeUp()
+        }
+        XCTAssertTrue(app.staticTexts["已连接模型"].exists)
+        XCTAssertTrue(endpoint.isHittable)
+        saveScreenshot(app, "connected-code-models")
+        endpoint.tap()
+        let selected = app.buttons["code-model-selector"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 5))
+        XCTAssertTrue(selected.label.contains("My endpoint"),
+            "Removing misleading labels must not remove saved endpoint selection")
+    }
+
+    @MainActor private func openCodeModelPicker(in app: XCUIApplication) {
+        app.buttons["打开侧边栏"].firstMatch.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let newSession = app.buttons["新建会话"].firstMatch
+        XCTAssertTrue(newSession.waitForExistence(timeout: 5))
+        newSession.tap()
+        let picker = app.buttons["code-model-selector"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 5))
+        picker.tap()
+        XCTAssertTrue(app.staticTexts["选择模型"].waitForExistence(timeout: 5))
+    }
+
     @MainActor func testClaudeModelNamesAndNativeEffortNavigation() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--ui-test-claude-models"])
         app.buttons["选择模型"].firstMatch.tap()
