@@ -7,14 +7,9 @@ struct CodeLanding: View {
     @State private var newSessionPresented = false
     @State private var selectedSession: CodeSessionRecord?
     @State private var deletionError: String?
-    @State private var toolsPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { toolsPresented = true } label: {
-                Label("工具与连接器", systemImage: "wrench.and.screwdriver")
-                    .frame(minHeight: 44)
-            }.padding(.horizontal, 20).accessibilityIdentifier("code.tools")
             if appModel.codeSessions.isEmpty {
                 Spacer()
                 VStack(spacing: 20) {
@@ -127,13 +122,6 @@ struct CodeLanding: View {
         .fullScreenCover(isPresented: $newSessionPresented) {
             CodeNewSessionView()
                 .environmentObject(appModel)
-        }
-        .sheet(isPresented: $toolsPresented) {
-            NavigationStack {
-                MCPConnectorsSettingsView().environmentObject(appModel)
-                    .navigationTitle("Code 工具")
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { toolsPresented = false } } }
-            }
         }
         .fullScreenCover(item: $selectedSession) { session in
             CodeSessionDetailView(session: session)
