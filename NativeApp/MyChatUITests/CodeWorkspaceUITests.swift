@@ -1,6 +1,79 @@
 import XCTest
 
 final class CodeWorkspaceUITests: XCTestCase {
+    @MainActor func testWorkspaceDiffCapabilityKeepsLegacyServiceEntryHidden() {
+        let app = openDiffFixture("--ui-test-code-diff-legacy")
+        let summary = app.descendants(matching: .any).matching(identifier: "code.task.artifact.legacy-summary").firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["code.diff.open"].exists)
+        summary.tap()
+        XCTAssertTrue(app.staticTexts["已修改两个文件"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["code.diff.patch"].exists)
+        app.terminate()
+    }
+
+    @MainActor func testWorkspaceDiffReadsPinnedPatchAndShowsBinaryOmission() {
+        let app = openDiffFixture("--ui-test-code-diff")
+        let open = app.buttons["code.diff.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+        let file = app.buttons["code.diff.file.README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.staticTexts["code.diff.summary"].label, "新增 1 · 修改 1 · 删除 0")
+        file.tap()
+        let patch = app.staticTexts["code.diff.patch"]
+        XCTAssertTrue(patch.waitForExistence(timeout: 10))
+        XCTAssertTrue(patch.label.contains("-before\n+after"))
+        XCTAssertFalse(patch.label.contains("旧版更改摘要"))
+        file.tap()
+        XCTAssertTrue(patch.exists, "Selecting the same file again must retain its loaded patch")
+        app.buttons["code.diff.file.image.bin"].tap()
+        let omitted = app.staticTexts["code.diff.omitted"]
+        XCTAssertTrue(omitted.waitForExistence(timeout: 10))
+        XCTAssertEqual(omitted.label, "二进制文件，不显示文本差异")
+        XCTAssertFalse(patch.exists)
+        app.buttons["关闭"].firstMatch.tap()
+        XCTAssertTrue(open.waitForExistence(timeout: 5)); open.tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        XCTAssertFalse(patch.exists, "Reopening reloads the owned snapshot instead of retaining a previous file response")
+        app.buttons["关闭"].firstMatch.tap()
+        XCTAssertEqual(app.buttons["code.session.send"].label, "发送编程消息")
+        XCTAssertFalse(app.buttons["创建仓库"].exists)
+        XCTAssertFalse(app.buttons["发布拉取请求"].exists)
+        app.terminate()
+    }
+
+    @MainActor func testWorkspaceDiffStaleSnapshotRequiresExplicitRefreshAndNeverDisplaysSummaryAsPatch() {
+        let app = openDiffFixture("--ui-test-code-diff", extra: ["--ui-test-code-diff-stale"])
+        let open = app.buttons["code.diff.open"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10)); open.tap()
+        let file = app.buttons["code.diff.file.README.md"]
+        XCTAssertTrue(file.waitForExistence(timeout: 10)); file.tap()
+        let error = app.staticTexts["code.diff.error"]
+        XCTAssertTrue(error.waitForExistence(timeout: 10))
+        XCTAssertEqual(error.label, "工作区已更新，请刷新后再查看差异")
+        XCTAssertFalse(app.staticTexts["code.diff.patch"].exists)
+        app.buttons["code.diff.refresh"].tap()
+        XCTAssertTrue(file.waitForExistence(timeout: 10))
+        XCTAssertFalse(error.exists)
+        XCTAssertFalse(app.staticTexts["code.diff.patch"].exists)
+        app.buttons["关闭"].firstMatch.tap()
+        XCTAssertEqual(app.buttons["code.session.send"].label, "发送编程消息")
+        app.terminate()
+    }
+
+    @MainActor private func openDiffFixture(_ flag: String, extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", flag] + extra
+        app.launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10)); sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000066"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "code.task.status").firstMatch.waitForExistence(timeout: 10))
+        return app
+    }
+
     @MainActor func testChineseCaptionInputAndRecommendedLabelAtNormalAndLargeType() {
         for category in ["UICTContentSizeCategoryL", "UICTContentSizeCategoryAccessibilityXXXL"] {
             let app = XCUIApplication()

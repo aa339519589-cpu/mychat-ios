@@ -494,6 +494,158 @@ struct CodeCapabilities: Decodable, Sendable {
     let execution: Execution
     let cloudOnly: Bool?
     let durableQueue: Bool
+    let workspaceDiff: CodeWorkspaceDiffCapability?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, execution, cloudOnly, durableQueue, workspaceDiff
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        execution = try values.decode(Execution.self, forKey: .execution)
+        cloudOnly = try values.decodeIfPresent(Bool.self, forKey: .cloudOnly)
+        durableQueue = try values.decode(Bool.self, forKey: .durableQueue)
+        // An unknown extension must not disable existing Code functionality.
+        workspaceDiff = try? values.decode(CodeWorkspaceDiffCapability.self, forKey: .workspaceDiff)
+    }
+
+    var supportedWorkspaceDiff: CodeWorkspaceDiffCapability? {
+        guard schemaVersion == 1, let workspaceDiff, workspaceDiff.isSupported else { return nil }
+        return workspaceDiff
+    }
+}
+
+struct CodeWorkspaceDiffCapability: Decodable, Sendable, Equatable {
+    let schemaVersion: Int
+    let formats: [String]
+    let requiresSnapshotBinding: Bool
+    let maxFileBytes: Int
+    let maxPatchBytes: Int
+
+    var isSupported: Bool {
+        schemaVersion == 1 && formats.contains("unified") && requiresSnapshotBinding
+            && (1...262_144).contains(maxFileBytes) && (1...1_048_576).contains(maxPatchBytes)
+    }
+}
+
+enum CodeWorkspacePath {
+    static func isValid(_ path: String) -> Bool {
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        return !path.isEmpty && path.utf16.count <= 4096 && parts.count <= 16
+            && !path.hasPrefix("/") && !path.contains("\\")
+            && path.range(of: #"^[A-Za-z]:"#, options: .regularExpression) == nil
+            && !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
+            && parts.allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+
+    static func isDigest(_ value: String, length: Int) -> Bool {
+        value.utf8.count == length && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+}
+
+struct CodeWorkspaceDiffBinding: Decodable, Sendable, Equatable {
+    let userID: UUID
+    let taskID: UUID
+    let repository: String
+    let snapshotID: UUID
+    let manifestDigest: String
+    let head: String
+    let version: Int
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "userId", taskID = "taskId", snapshotID = "snapshotId"
+        case repository, manifestDigest, head, version
+    }
+
+    var isValid: Bool {
+        CodeDisplay.repository(repository) == repository
+            && CodeWorkspacePath.isDigest(manifestDigest, length: 64)
+            && CodeWorkspacePath.isDigest(head, length: 40)
+            && version > 0 && version <= 9_007_199_254_740_991
+    }
+}
+
+struct CodeWorkspaceState: Decodable, Sendable {
+    let status: String
+    let repository: String?
+    let branch: String?
+    let snapshotID: UUID?
+    let manifestDigest: String?
+    let head: String?
+    let version: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case status, repository = "repo", branch, snapshotID = "snapshotId"
+        case manifestDigest, head = "commit", version
+    }
+
+    func binding(taskID: UUID, userID: UUID) -> CodeWorkspaceDiffBinding? {
+        guard status == "durable", let repository, let snapshotID, let manifestDigest, let head, let version else { return nil }
+        let value = CodeWorkspaceDiffBinding(userID: userID, taskID: taskID, repository: repository,
+            snapshotID: snapshotID, manifestDigest: manifestDigest, head: head, version: version)
+        return value.isValid ? value : nil
+    }
+}
+
+struct CodeWorkspaceChanges: Decodable, Sendable {
+    struct File: Decodable, Identifiable, Sendable {
+        let path: String
+        let status: String
+        var id: String { path }
+    }
+    struct Summary: Decodable, Sendable { let added: Int; let modified: Int; let deleted: Int }
+    let diffFormat: String?
+    let changedFiles: [File]
+    let summary: Summary
+    let hasChanges: Bool
+    let snapshotID: UUID?
+    let manifestDigest: String?
+    let head: String?
+
+    enum CodingKeys: String, CodingKey {
+        case diffFormat, changedFiles, summary, hasChanges, snapshotID = "snapshotId", manifestDigest, head
+    }
+
+    var isWellFormed: Bool {
+        Set(changedFiles.map(\.path)).count == changedFiles.count
+            && changedFiles.allSatisfy { CodeWorkspacePath.isValid($0.path) && ["added", "modified", "deleted"].contains($0.status) }
+            && summary.added == changedFiles.filter { $0.status == "added" }.count
+            && summary.modified == changedFiles.filter { $0.status == "modified" }.count
+            && summary.deleted == changedFiles.filter { $0.status == "deleted" }.count
+            && hasChanges == !changedFiles.isEmpty
+    }
+
+    func matches(_ binding: CodeWorkspaceDiffBinding) -> Bool {
+        isWellFormed && snapshotID == binding.snapshotID && manifestDigest == binding.manifestDigest && head == binding.head
+    }
+}
+
+struct CodeWorkspaceReadSnapshot: Sendable {
+    let binding: CodeWorkspaceDiffBinding
+    let changes: CodeWorkspaceChanges
+}
+
+struct CodeWorkspaceDiffResponse: Decodable, Sendable {
+    let schemaVersion: Int
+    let status: String
+    let format: String
+    let scope: CodeWorkspaceDiffBinding
+    let path: String
+    let patch: String?
+    let reason: String?
+
+    func isValid(for binding: CodeWorkspaceDiffBinding, path expectedPath: String,
+                 capability: CodeWorkspaceDiffCapability) -> Bool {
+        guard capability.isSupported, schemaVersion == 1, scope == binding,
+              scope.isValid, path == expectedPath, CodeWorkspacePath.isValid(path) else { return false }
+        if status == "omitted" { return format == "none" && patch == nil && reason?.isEmpty == false }
+        guard status == "ready", format == "unified", let patch,
+              patch.utf8.count <= capability.maxPatchBytes else { return false }
+        if patch.isEmpty { return true }
+        return patch.hasPrefix("diff --git ")
+            && patch.components(separatedBy: "\n").filter { $0.hasPrefix("diff --git ") }.count == 1
+    }
 }
 
 struct CodeTaskRecovery: Decodable, Sendable {

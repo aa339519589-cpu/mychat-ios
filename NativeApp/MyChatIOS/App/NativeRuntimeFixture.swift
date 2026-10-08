@@ -321,11 +321,16 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/mobile/config":
             return (200, ["supabaseUrl": "https://isolated.mychat.invalid", "supabaseAnonKey": "isolated-anon"])
         case "/api/code/capabilities":
-            return (200, [
+            var capabilities: [String: Any] = [
                 "schemaVersion": 1, "cloudOnly": true, "durableQueue": true,
                 "execution": ["backend": "isolated", "location": "local_test", "configured": false,
                               "verified": false, "reason": "Isolated test fixture; no Cloud verification"]
-            ])
+            ]
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff") {
+                capabilities["workspaceDiff"] = ["schemaVersion": 1, "formats": ["cas-change-summary", "unified"],
+                    "requiresSnapshotBinding": true, "maxFileBytes": 262144, "maxPatchBytes": 1048576]
+            }
+            return (200, capabilities)
         case "/api/code/branches":
             return (200, ["branches": [["name": "main"], ["name": "feature/fixture"]], "defaultBranch": "main"])
         case "/api/github/status":
@@ -422,6 +427,13 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/code/tasks":
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else {
                 return (503, ["error": "隔离测试未配置任务恢复"])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff")
+                || ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff-legacy") {
+                return (200, ["task": ["id": "88000000-0000-4000-8000-000000000075", "status": "completed", "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [],
+                    "artifacts": [["id": "legacy-summary", "kind": "summary", "title": "更改摘要", "content": "已修改两个文件"]]],
+                    "admission": NSNull(), "operationAdmission": NSNull()])
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") {
                 let jobID = "88000000-0000-4000-8000-000000000074"
@@ -618,6 +630,49 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             return (200, savedArtifacts)
         case "/rest/v1/profiles": return (200, [])
         default:
+            if path == "/api/agent/tasks/88000000-0000-4000-8000-000000000075/workspace"
+                || path == "/api/agent/tasks/88000000-0000-4000-8000-000000000075/workspace/diff" {
+                guard method == "GET", ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff") else {
+                    return (404, ["error": "Fixture diff capability is unavailable"])
+                }
+                let snapshotID = "99000000-0000-4000-8000-000000000075"
+                let digest = String(repeating: "a", count: 64), head = String(repeating: "b", count: 40)
+                if !path.hasSuffix("/diff") {
+                    return (200, ["status": "durable", "repo": "mychat/test-app", "branch": "main",
+                        "snapshotId": snapshotID, "manifestDigest": digest, "commit": head, "version": 7])
+                }
+                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                if query.isEmpty {
+                    return (200, ["diff": "旧版更改摘要，不能当作 patch", "diffFormat": "cas-change-summary",
+                        "snapshotId": snapshotID, "manifestDigest": digest, "head": head, "hasChanges": true,
+                        "changedFiles": [["path": "README.md", "status": "modified"], ["path": "image.bin", "status": "added"]],
+                        "summary": ["added": 1, "modified": 1, "deleted": 0]])
+                }
+                let keys = ["format", "path", "snapshotId", "manifestDigest", "head", "version"]
+                guard query.count == keys.count, Set(query.map(\.name)) == Set(keys),
+                      query.first(where: { $0.name == "format" })?.value == "unified",
+                      query.first(where: { $0.name == "snapshotId" })?.value == snapshotID,
+                      query.first(where: { $0.name == "manifestDigest" })?.value == digest,
+                      query.first(where: { $0.name == "head" })?.value == head,
+                      query.first(where: { $0.name == "version" })?.value == "7",
+                      let selected = query.first(where: { $0.name == "path" })?.value,
+                      ["README.md", "image.bin"].contains(selected) else {
+                    return (400, ["error": "Fixture requires an exact immutable diff selection"])
+                }
+                if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff-stale") {
+                    return (409, ["error": "工作区已更新，请刷新后再查看差异"])
+                }
+                var payload: [String: Any] = ["schemaVersion": 1, "path": selected,
+                    "scope": ["userId": NativeRuntimeFixture.userID, "taskId": "88000000-0000-4000-8000-000000000075",
+                        "repository": "mychat/test-app", "snapshotId": snapshotID, "manifestDigest": digest, "head": head, "version": 7]]
+                if selected == "image.bin" {
+                    payload["status"] = "omitted"; payload["format"] = "none"; payload["reason"] = "binary"
+                } else {
+                    payload["status"] = "ready"; payload["format"] = "unified"
+                    payload["patch"] = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n"
+                }
+                return (200, payload)
+            }
             if path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/cancel"), method == "POST",
                ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse") {
                 Thread.sleep(forTimeInterval: 0.4)

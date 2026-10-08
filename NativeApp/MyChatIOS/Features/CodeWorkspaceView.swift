@@ -1125,7 +1125,11 @@ private struct CodeSessionDetailView: View {
 }
 
 private struct CodeTaskEvidenceView: View {
+    @EnvironmentObject private var appModel: AppModel
     let detail: CodeTaskDetail
+    @State private var diffCapability: CodeWorkspaceDiffCapability?
+    @State private var showsDiff = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("\(detail.status) · \(detail.branch)", systemImage: "cloud")
@@ -1179,7 +1183,153 @@ private struct CodeTaskEvidenceView: View {
                url.scheme == "https", url.host == "github.com", url.user == nil, url.password == nil {
                 Link("打开 GitHub PR", destination: url).frame(minHeight: 44)
             }
-        }.accessibilityIdentifier("code.evidence")
+            if diffCapability != nil, UUID(uuidString: detail.id) != nil {
+                Button("查看文件差异") { showsDiff = true }
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("code.diff.open")
+            }
+        }
+        .accessibilityIdentifier("code.evidence")
+        .task(id: (appModel.authSession?.user.id ?? "") + ":" + detail.id) {
+            diffCapability = nil
+            showsDiff = false
+            guard let capabilities = try? await appModel.codeCapabilities(), !Task.isCancelled else { return }
+            diffCapability = capabilities.supportedWorkspaceDiff
+        }
+        .sheet(isPresented: $showsDiff) {
+            if let capability = diffCapability, let taskID = UUID(uuidString: detail.id) {
+                CodeWorkspaceDiffSheet(taskID: taskID, capability: capability) { showsDiff = false }
+            }
+        }
+    }
+}
+
+private struct CodeWorkspaceDiffSheet: View {
+    @EnvironmentObject private var appModel: AppModel
+    let taskID: UUID
+    let capability: CodeWorkspaceDiffCapability
+    let close: () -> Void
+    @State private var snapshot: CodeWorkspaceReadSnapshot?
+    @State private var selectedPath: String?
+    @State private var response: CodeWorkspaceDiffResponse?
+    @State private var loadError: String?
+    @State private var fileError: String?
+    @State private var refreshRevision = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SheetHeader(title: "文件差异", close: close)
+            if let snapshot {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("新增 \(snapshot.changes.summary.added) · 修改 \(snapshot.changes.summary.modified) · 删除 \(snapshot.changes.summary.deleted)")
+                            .font(MyChatTypography.caption)
+                            .foregroundStyle(MyChatTheme.secondaryText)
+                            .accessibilityIdentifier("code.diff.summary")
+                        if snapshot.changes.changedFiles.isEmpty {
+                            Text("当前快照没有文件更改")
+                        }
+                        ForEach(snapshot.changes.changedFiles) { file in
+                            Button {
+                                guard selectedPath != file.path else { return }
+                                selectedPath = file.path; response = nil; fileError = nil
+                            } label: {
+                                HStack {
+                                    Text(file.path).lineLimit(2)
+                                    Spacer(minLength: 8)
+                                    Text(file.status == "added" ? "新增" : file.status == "deleted" ? "删除" : "修改")
+                                        .foregroundStyle(MyChatTheme.secondaryText)
+                                    if selectedPath == file.path { Image(systemName: "checkmark") }
+                                }
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("code.diff.file.\(file.path)")
+                        }
+                        if let selectedPath {
+                            Divider()
+                            Text(selectedPath).font(MyChatTypography.caption)
+                            if let response {
+                                if response.status == "ready", let patch = response.patch {
+                                    if patch.isEmpty { Text("文件内容没有文本差异") }
+                                    else {
+                                        ScrollView(.horizontal) {
+                                            Text(verbatim: patch)
+                                                .font(MyChatSystemFont.appFont(size: 12, design: .monospaced, weight: .regular))
+                                                .fixedSize(horizontal: true, vertical: false)
+                                                .textSelection(.enabled)
+                                                .accessibilityIdentifier("code.diff.patch")
+                                        }
+                                    }
+                                } else {
+                                    Text(omissionMessage(response.reason))
+                                        .foregroundStyle(MyChatTheme.secondaryText)
+                                        .accessibilityIdentifier("code.diff.omitted")
+                                }
+                            } else if let fileError {
+                                Text(fileError).foregroundStyle(.red).accessibilityIdentifier("code.diff.error")
+                                Button("刷新文件列表") { refreshRevision += 1 }
+                                    .frame(minHeight: 44).accessibilityIdentifier("code.diff.refresh")
+                            } else {
+                                ProgressView("正在读取差异").accessibilityIdentifier("code.diff.loading")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                }
+            } else if let loadError {
+                Text(loadError).foregroundStyle(.red).padding(20).accessibilityIdentifier("code.diff.error")
+                Button("重试") { refreshRevision += 1 }.frame(minHeight: 44)
+                    .accessibilityIdentifier("code.diff.refresh")
+                Spacer()
+            } else {
+                ProgressView("正在读取文件列表").padding(24)
+                Spacer()
+            }
+        }
+        .foregroundStyle(MyChatTheme.text)
+        .background(MyChatTheme.canvas)
+        .task(id: refreshRevision) { await loadSnapshot() }
+        .task(id: selectedPath) { await loadFile() }
+        .onChange(of: appModel.authSession?.user.id) { _, _ in close() }
+    }
+
+    @MainActor private func loadSnapshot() async {
+        snapshot = nil; selectedPath = nil; response = nil; loadError = nil; fileError = nil
+        do {
+            let value = try await appModel.codeWorkspaceSnapshot(taskID: taskID, capability: capability)
+            try Task.checkCancellation()
+            snapshot = value
+        } catch {
+            guard !Task.isCancelled else { return }
+            loadError = CodeTaskErrorPresentation.concise(error.localizedDescription) ?? "无法读取文件列表"
+        }
+    }
+
+    @MainActor private func loadFile() async {
+        guard let snapshot, let path = selectedPath else { return }
+        response = nil; fileError = nil
+        do {
+            let value = try await appModel.codeWorkspaceDiff(snapshot: snapshot, path: path, capability: capability)
+            try Task.checkCancellation()
+            guard selectedPath == path, self.snapshot?.binding == snapshot.binding else { return }
+            response = value
+        } catch {
+            guard !Task.isCancelled, selectedPath == path else { return }
+            fileError = CodeTaskErrorPresentation.concise(error.localizedDescription) ?? "无法读取文件差异"
+        }
+    }
+
+    private func omissionMessage(_ reason: String?) -> String {
+        switch reason {
+        case "binary": return "二进制文件，不显示文本差异"
+        case "file_too_large": return "文件超过文本差异读取上限"
+        case "patch_too_large": return "差异超过显示上限，未返回不完整内容"
+        case "symlink": return "符号链接不提供文本差异"
+        default: return "当前文件暂不提供文本差异"
+        }
     }
 }
 
