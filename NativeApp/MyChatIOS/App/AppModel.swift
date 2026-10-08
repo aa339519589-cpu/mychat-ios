@@ -2390,7 +2390,11 @@ final class AppModel: ObservableObject {
                 id: recovery.admission.assistantMessageID,
                 role: .assistant,
                 content: recovery.content,
-                thinking: ChatReasoningSummaryStorage.encode(recovery.thinking),
+                // Recovery's legacy thinking field can contain private provider
+                // reasoning. Preserve an existing public-summary tag; never add
+                // one to unmarked content or double-tag an already safe summary.
+                thinking: ChatReasoningSummaryStorage.decode(recovery.thinking)
+                    .flatMap(ChatReasoningSummaryStorage.encode),
                 media: recovery.media.isEmpty ? nil : recovery.media,
                 createdAt: Date()
             ))

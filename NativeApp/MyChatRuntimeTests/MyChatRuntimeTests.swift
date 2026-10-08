@@ -2111,6 +2111,65 @@ import Combine
         XCTAssertEqual(transport.commands.count, 1)
     }
 
+    func testRecoveryNeverRelabelsPrivateThinkingAsPublicSummary() async throws {
+        let publicSummary = "Checking the available evidence."
+        let tagged = try XCTUnwrap(ChatReasoningSummaryStorage.encode(publicSummary))
+        for (storedThinking, expectedSummary) in [("private-provider-reasoning", nil as String?), (tagged, publicSummary)] {
+            let conversationID = UUID(), userID = UUID(), assistantID = UUID(), generationID = UUID()
+            let conversation = ConversationRecord(id: conversationID.uuidString,
+                title: "Offline recovery privacy", updatedAt: "", projectID: nil, starred: false, pinned: false)
+            let data = ControlledConversationStore()
+            await data.addConversation(conversation)
+            // The missing assistant row exercises the initial recovery publish,
+            // before an accumulator or another event can reconcile its thinking.
+            await data.setMessages([
+                ConversationMessageRecord(id: userID.uuidString, role: .user, content: "Resume this reply",
+                    images: nil, thinking: nil, createdAt: nil, sequence: 1)
+            ], for: conversationID)
+            let transport = ControlledChatTransport()
+            transport.recovery = ChatGenerationRecovery(
+                admission: ChatAdmission(schemaVersion: 1, jobID: generationID, generationID: generationID,
+                    userMessageID: userID, assistantMessageID: assistantID, status: "running", created: false,
+                    streamURL: URL(string: "https://isolated.mychat.invalid/events")!,
+                    trialRemaining: nil, trialLimit: nil),
+                sequence: 1, content: "Recovered response", thinking: storedThinking, media: [], terminal: nil
+            )
+            let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+            model.acceptAuthentication(NativeRuntimeFixture.session)
+            await model.reloadConversations()
+            var sawAssistant = false
+            var visibleSummaries: [String] = []
+            let observation = model.$messages.sink { messages in
+                guard let assistant = messages.first(where: { $0.id == assistantID }) else { return }
+                sawAssistant = true
+                if let summary = ChatReasoningSummaryStorage.decode(assistant.thinking) {
+                    visibleSummaries.append(summary)
+                }
+            }
+            defer {
+                observation.cancel()
+                transport.continuations[generationID]?.finish()
+            }
+            model.openConversation(conversation)
+            try await waitUntil { transport.continuations[generationID] != nil }
+            XCTAssertTrue(sawAssistant)
+            if let expectedSummary {
+                XCTAssertFalse(visibleSummaries.isEmpty)
+                XCTAssertTrue(visibleSummaries.allSatisfy { $0 == expectedSummary },
+                    "Already-tagged summaries must not acquire a second visible storage tag")
+            } else {
+                XCTAssertTrue(visibleSummaries.isEmpty,
+                    "Even the first recovered-message publish must hide unmarked private thinking")
+            }
+            XCTAssertTrue(transport.commands.isEmpty, "Recovery must not submit a new model request")
+            transport.continuations[generationID]?.yield(ChatJobEvent(jobID: generationID, sequence: 2,
+                payload: .terminal(ChatTerminalSnapshot(status: .completed, content: "Recovered response",
+                    thinking: storedThinking, sequence: 2, errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil))))
+            transport.continuations[generationID]?.finish()
+            try await waitUntil { !model.isCurrentConversationGenerating }
+        }
+    }
+
     func testForegroundStatusMissKeepsLiveGenerationStreamAttached() async throws {
         let transport = ControlledChatTransport()
         let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
