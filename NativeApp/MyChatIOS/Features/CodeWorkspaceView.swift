@@ -204,6 +204,7 @@ private struct CodeSessionDetailView: View {
     @State private var steps: [CodeAgentStep] = []
     @State private var toolActivities: [ChatToolActivity] = []
     @State private var taskDetail: CodeTaskDetail?
+    @State private var isReplayingTerminalRecovery = false
     @State private var branch = ""
     @State private var isRecovering = false
     @State private var hasSavedSettings = false
@@ -289,10 +290,18 @@ private struct CodeSessionDetailView: View {
                                     activeAdmission != nil && message.id.lowercased() == streamedResponseID?.uuidString.lowercased())
                             }
 
-                            if isAdmitting || activeAdmission != nil {
+                            if isAdmitting || (activeAdmission != nil && !isTerminalCodeStatus(activeAdmission?.status)) {
                                 DotThinkingView(isGenerating: true)
                                     .frame(width: 48, height: 48)
                                     .accessibilityLabel("编程任务正在处理")
+                            }
+
+                            if isReplayingTerminalRecovery {
+                                Label("正在恢复任务记录", systemImage: "arrow.clockwise")
+                                    .font(MyChatTypography.caption)
+                                    .foregroundStyle(MyChatTheme.secondaryText)
+                                    .accessibilityLabel("正在恢复已完成任务的记录")
+                                    .accessibilityIdentifier("code.terminal-replay")
                             }
 
                             if !steps.isEmpty {
@@ -383,6 +392,7 @@ private struct CodeSessionDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("打开编程操作")
+                    .disabled(isReplayingTerminalRecovery)
 
                     TextField("向 MyChat 编程发送消息", text: $draft, axis: .vertical)
                         .font(MyChatTypography.composerText)
@@ -391,6 +401,7 @@ private struct CodeSessionDetailView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 10)
                         .accessibilityIdentifier("code.session.draft")
+                        .disabled(isReplayingTerminalRecovery)
                     Button {
                         if let activeAdmission {
                             Task { await stop(activeAdmission) }
@@ -418,14 +429,15 @@ private struct CodeSessionDetailView: View {
                     }
                     .buttonStyle(CodeSendButtonStyle())
                     .disabled(isCancelling || (cancellationPending && !cancellationRetryAllowed)
-                        || (activeAdmission == nil && (isAdmitting || isApplying || !canSend)))
+                        || (activeAdmission == nil && (isAdmitting || isApplying || isReplayingTerminalRecovery || !canSend)))
                     .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
                     .accessibilityLabel(activeAdmission != nil
                         ? (isCancelling ? "正在停止 Code 任务"
                             : (cancellationPending
                                 ? (cancellationRetryAllowed ? "重试停止 Code 任务" : "等待停止确认")
                                 : "停止 Code 任务"))
-                        : ((isAdmitting || isApplying) ? "正在处理 Code 任务" : "发送编程消息"))
+                        : ((isAdmitting || isApplying) ? "正在处理 Code 任务"
+                            : (isReplayingTerminalRecovery ? "正在恢复任务记录" : "发送编程消息")))
                     .accessibilityHint(activeAdmission != nil
                         ? (cancellationPending
                             ? (cancellationRetryAllowed ? "取消状态待确认；可重试同一任务" : "云端正在确认取消")
@@ -465,7 +477,9 @@ private struct CodeSessionDetailView: View {
             saveSessionDraft()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, activeAdmission == nil { Task { await load(); await recover() } }
+            if phase == .active, activeAdmission == nil, !isReplayingTerminalRecovery {
+                Task { await load(); await recover() }
+            }
         }
         .sheet(item: $commandDestination) { destination in
             actionSheet(destination)
@@ -514,7 +528,7 @@ private struct CodeSessionDetailView: View {
     }
 
     private func recover() async {
-        guard activeAdmission == nil, !isRecovering else { return }
+        guard activeAdmission == nil, !isRecovering, !isReplayingTerminalRecovery else { return }
         isRecovering = true
         defer { isRecovering = false }
         do {
@@ -532,15 +546,23 @@ private struct CodeSessionDetailView: View {
                 steps = []
                 plans = []
                 toolActivities = []
+                memoryChanges = []
+                receipt = nil
                 if isTerminalCodeStatus(recovery.task?.status) || isTerminalCodeStatus(admission.status) {
                     activeAdmission = nil
                     isCancelling = false
                     cancellationPending = false
                     cancellationRetryAllowed = false
+                    errorMessage = nil
+                    isReplayingTerminalRecovery = true
+                    startConsuming(admission, terminalReplay: true)
                 } else {
                     activeAdmission = admission
+                    isReplayingTerminalRecovery = false
                     startConsuming(admission)
                 }
+            } else {
+                isReplayingTerminalRecovery = false
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -554,7 +576,7 @@ private struct CodeSessionDetailView: View {
     private var canSend: Bool {
         CodeSendEligibility.canSubmit(
             draft: draft,
-            isBusy: activeAdmission != nil || isAdmitting || isApplying
+            isBusy: activeAdmission != nil || isAdmitting || isApplying || isReplayingTerminalRecovery
         )
     }
 
@@ -564,6 +586,7 @@ private struct CodeSessionDetailView: View {
 
     private var canRequestPublish: Bool {
         activeAdmission == nil
+            && !isReplayingTerminalRecovery
             && lastTaskID != nil
             && (!isProvisionalRepository || !plans.isEmpty)
             && receipt == nil
@@ -722,23 +745,28 @@ private struct CodeSessionDetailView: View {
         }
     }
 
-    @MainActor private func startConsuming(_ admission: CodeAdmission) {
+    @MainActor private func startConsuming(_ admission: CodeAdmission, terminalReplay: Bool = false) {
         guard eventSubscriptionJobID != admission.jobID || eventSubscription == nil else { return }
         eventSubscription?.cancel()
         let token = UUID()
         eventSubscriptionJobID = admission.jobID
         eventSubscriptionToken = token
         eventSubscription = Task { @MainActor in
-            await consume(admission, subscriptionToken: token)
+            await consume(admission, subscriptionToken: token, terminalReplay: terminalReplay)
             if eventSubscriptionToken == token {
                 eventSubscription = nil
                 eventSubscriptionJobID = nil
                 eventSubscriptionToken = nil
+                if terminalReplay { isReplayingTerminalRecovery = false }
             }
         }
     }
 
-    @MainActor private func consume(_ admission: CodeAdmission, subscriptionToken: UUID) async {
+    @MainActor private func consume(
+        _ admission: CodeAdmission,
+        subscriptionToken: UUID,
+        terminalReplay: Bool = false
+    ) async {
         var terminalError: String?
         var terminalReceived = false
         do {
@@ -788,6 +816,19 @@ private struct CodeSessionDetailView: View {
         if let id = streamedResponseID,
            let index = messages.firstIndex(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
             messages[index].content = streamedContent
+        }
+        if terminalReplay {
+            if !terminalReceived && errorMessage == nil {
+                errorMessage = "已完成任务的事件记录尚未完整，请下拉刷新重试"
+            }
+            await load()
+            if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
+                taskDetail = recovery.task
+                if let task = recovery.task { branch = task.branch }
+            }
+            isReplayingTerminalRecovery = false
+            if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
+            return
         }
         if cancellationPending && !terminalReceived {
             activeAdmission = admission
