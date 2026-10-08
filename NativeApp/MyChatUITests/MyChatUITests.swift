@@ -545,6 +545,7 @@ final class MyChatUITests: XCTestCase {
 
         let close = app.buttons["artifact-preview-close"].firstMatch
         XCTAssertTrue(waitForHittable(close, timeout: 10))
+        let originalCloseMinX = close.frame.minX
         let origin = app.coordinate(withNormalizedOffset: .zero)
         let width = app.frame.width
         let y = app.frame.height * 0.55
@@ -560,6 +561,13 @@ final class MyChatUITests: XCTestCase {
         dragFromLeadingEdge(34)
         XCTAssertTrue(waitForHittable(close, timeout: 5),
             "A cancelled edge swipe must restore the artifact detail")
+        let settleDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while abs(close.frame.minX - originalCloseMinX) > 2,
+              ProcessInfo.processInfo.systemUptime < settleDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(close.frame.minX, originalCloseMinX, accuracy: 3,
+            "A cancelled edge swipe must return the detail to its starting position")
         XCTAssertFalse(artifact.isHittable,
             "The artifact row must remain covered after a cancelled edge swipe")
 
