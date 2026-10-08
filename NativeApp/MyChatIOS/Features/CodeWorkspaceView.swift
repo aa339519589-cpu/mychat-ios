@@ -826,7 +826,6 @@ private struct CodeSessionDetailView: View {
                 taskDetail = recovery.task
                 if let task = recovery.task { branch = task.branch }
             }
-            isReplayingTerminalRecovery = false
             if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
             return
         }
