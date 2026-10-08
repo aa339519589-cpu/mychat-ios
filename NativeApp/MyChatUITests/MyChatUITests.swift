@@ -133,6 +133,25 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "paper-closed-after-repeat")
     }
 
+    @MainActor private func openConnectorSettings(in app: XCUIApplication) {
+        app.buttons["header.sidebar"].tap()
+        let accountSettings = app.buttons["sidebar.accountSettings"].firstMatch
+        XCTAssertTrue(accountSettings.waitForExistence(timeout: 5))
+        accountSettings.tap()
+        let connectors = app.buttons["连接器"].firstMatch
+        XCTAssertTrue(connectors.waitForExistence(timeout: 5))
+        connectors.tap()
+        XCTAssertTrue(app.buttons["添加连接器"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    @MainActor private func waitForKeyboardDismissal(in app: XCUIApplication) {
+        let keyboardDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in !app.keyboards.firstMatch.exists },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [keyboardDismissed], timeout: 5), .completed)
+    }
+
     @MainActor private func launch(extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test-mode"] + extra
@@ -214,6 +233,103 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["connectors.default.health"].waitForExistence(timeout: 8))
         XCTAssertFalse(app.buttons["connectors.default.gmail"].exists)
         XCTAssertFalse(app.staticTexts["Gmail"].exists)
+    }
+
+    @MainActor func testConnectorDirectoryPushesAndPreservesEachPriorScreen() {
+        let app = launch()
+        openConnectorSettings(in: app)
+
+        let addMenu = app.buttons["添加连接器"].firstMatch
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+        addMenu.tap()
+        app.buttons["浏览连接器"].firstMatch.tap()
+
+        let directorySearch = app.textFields["connector.directory.search"].firstMatch
+        let sample = app.buttons["connector.catalog.sample"].firstMatch
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 8))
+        XCTAssertTrue(sample.waitForExistence(timeout: 8))
+        sample.tap()
+
+        let name = app.textFields["connector.name"].firstMatch
+        let serverURL = app.textFields["connector.server-url"].firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, "Sample service")
+        XCTAssertEqual(serverURL.value as? String, "https://connector.example.invalid/mcp")
+        XCTAssertTrue(app.navigationBars["连接服务"].exists)
+
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5),
+            "Popping the editor must reveal the same directory screen")
+        XCTAssertTrue(sample.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let editorName = app.textFields["connector.name"].firstMatch
+        XCTAssertTrue(editorName.waitForExistence(timeout: 5))
+        editorName.tap()
+        editorName.typeText("Unsaved draft")
+        app.buttons["connector.directory"].tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5))
+        sample.tap()
+        XCTAssertEqual(editorName.value as? String, "Sample service",
+            "Selecting a common service must update the editor that remains beneath the directory")
+
+        app.buttons["connector.directory"].tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(editorName.waitForExistence(timeout: 5))
+        XCTAssertEqual(editorName.value as? String, "Sample service",
+            "Returning from the nested directory must preserve the editor state")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5),
+            "Canceling the editor must return to connector settings")
+    }
+
+    @MainActor func testConnectorEditorSaveCancelAndRepeatedOpenResetState() {
+        let app = launch()
+        openConnectorSettings(in: app)
+        let addMenu = app.buttons["添加连接器"].firstMatch
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let name = app.textFields["connector.name"].firstMatch
+        let serverURL = app.textFields["connector.server-url"].firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Fixture saved connector")
+        serverURL.tap()
+        serverURL.typeText("https://fixture.example.invalid/mcp")
+        app.buttons["无"].tap()
+        let connect = app.buttons["connector.connect"]
+        XCTAssertTrue(connect.isEnabled)
+        connect.tap()
+
+        XCTAssertTrue(app.staticTexts["Fixture saved connector"].waitForExistence(timeout: 10),
+            "A successful isolated save must return to the connector list")
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let reopenedName = app.textFields["connector.name"].firstMatch
+        XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
+        XCTAssertEqual(reopenedName.value as? String, "",
+            "Reopening a saved editor must start a fresh custom connector")
+        reopenedName.tap()
+        reopenedName.typeText("Canceled draft")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5),
+            "Back/cancel must pop the editor without dismissing the Settings navigation flow")
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
+        XCTAssertEqual(reopenedName.value as? String, "",
+            "Reopening after cancel must not restore a discarded draft")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
     }
 
     /// Reproduces transcript/composer geometry: the newest row must clear the
@@ -703,6 +819,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(add.isHittable)
             add.tap()
             XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 10))
+            waitForKeyboardDismissal(in: app)
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             close.tap()
 
@@ -711,6 +828,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(model.isHittable)
             model.tap()
             XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            waitForKeyboardDismissal(in: app)
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             close.tap()
             app.terminate()
