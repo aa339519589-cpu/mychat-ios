@@ -237,6 +237,111 @@ final class CodeWorkspaceUITests: XCTestCase {
         app.terminate()
     }
 
+    @MainActor func testCodeCancelRetriesAndRecoversWhenTerminalEventIsLost() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ui-test-mode", "--ui-test-code-display",
+            "--ui-test-code-cancel-lost-sse", "--ui-test-code-cancel-first-fails"
+        ]
+        app.launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
+        sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000064"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+
+        let composer = app.buttons["code.session.send"]
+        let stopReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "停止 Code 任务"),
+            object: composer
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [stopReady], timeout: 10), .completed)
+        XCTAssertTrue(composer.isEnabled)
+
+        composer.tap()
+        let retryReady = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "重试停止 Code 任务"),
+            object: composer
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [retryReady], timeout: 10), .completed,
+            "A failed cancellation request must restore the real stop control")
+        XCTAssertTrue(composer.isEnabled)
+
+        composer.tap()
+        let waitingForConfirmation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@ AND isEnabled == false", "等待停止确认"),
+            object: composer
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [waitingForConfirmation], timeout: 10), .completed,
+            "Accepted cancellation must disable duplicate stop requests while awaiting the backend")
+
+        let reconciled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "发送编程消息"),
+            object: composer
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [reconciled], timeout: 25), .completed,
+            "Recovery should settle the composer after backend cancellation even with a lost terminal SSE")
+        let cancelledTask = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@", "cancelled · main")).firstMatch
+        XCTAssertTrue(cancelledTask.waitForExistence(timeout: 5))
+        app.terminate()
+    }
+
+    @MainActor func testTerminalRecoveryReplaysEventsWithoutShowingStopOrPublishingEarly() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-code-terminal-replay"]
+        app.launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
+        sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000066"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+
+        let replay = app.descendants(matching: .any)
+            .matching(identifier: "code.terminal-replay").firstMatch
+        XCTAssertTrue(replay.waitForExistence(timeout: 10))
+        let composer = app.buttons["code.session.send"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 5))
+        XCTAssertFalse(composer.label.contains("停止"))
+        XCTAssertFalse(app.staticTexts["编程任务正在处理"].exists)
+        XCTAssertFalse(app.buttons["发布拉取请求"].exists,
+            "A recovered plan must not be publishable until terminal replay has finished")
+        XCTAssertTrue(app.staticTexts["写入 README.md"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["发布拉取请求"].exists,
+            "The user must not be able to repeat the publish while replay is active")
+        let replayedText = app.staticTexts.matching(NSPredicate(format: "label == %@", "终态任务回放正文"))
+        XCTAssertTrue(replayedText.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(replayedText.count, 1,
+            "A repeated event ID must not duplicate its streamed content")
+
+        XCTAssertTrue(app.staticTexts["已发布"].waitForExistence(timeout: 10))
+        let finishedReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: replay
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [finishedReplay], timeout: 10), .completed,
+            "A terminal replay must release its recovery state after refreshing persisted evidence")
+        let restoredComposer = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "发送编程消息"),
+            object: composer
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [restoredComposer], timeout: 5), .completed)
+        let draft = app.descendants(matching: .any).matching(identifier: "code.session.draft").firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 5))
+        draft.tap()
+        draft.typeText("Follow-up after terminal recovery")
+        XCTAssertTrue(composer.isEnabled,
+            "The recovered session must accept another draft once terminal replay has finished")
+        XCTAssertFalse(app.buttons["停止 Code 任务"].exists)
+        XCTAssertFalse(app.buttons["创建仓库"].exists)
+        XCTAssertFalse(app.buttons["发布拉取请求"].exists)
+        app.terminate()
+    }
+
     @MainActor private func screenshot(_ app: XCUIApplication, name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
