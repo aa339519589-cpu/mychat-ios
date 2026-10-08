@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_offline_code_ui_tests:
-        description: "Run fixture-backed CodeWorkspace UI tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        description: "Run fixture-backed CodeWorkspace UI and runtime tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
         required: false
         type: boolean
         default: false
@@ -38,7 +38,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build | tee "$RUNNER_TEMP/build102-xcodebuild.log"
 
-      - name: Run offline CodeWorkspace UI tests on installed iOS 27 simulator
+      - name: Run fixture-backed CodeWorkspace UI and runtime tests on installed iOS 27 simulator
         if: ${{ inputs.run_offline_code_ui_tests }}
         working-directory: NativeApp
         run: |
@@ -59,7 +59,7 @@ jobs:
           PY
           )"
           if [[ -z "$device_id" ]]; then
-            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. CodeWorkspace UI tests skipped; no runtime download was attempted."
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. CodeWorkspace UI and runtime tests skipped; no runtime download was attempted."
             exit 0
           fi
           # Start only the runner-provided simulator; never install a runtime.
@@ -73,5 +73,6 @@ jobs:
             -parallel-testing-enabled NO \
             -collect-test-diagnostics never \
             -only-testing:MyChatUITests/CodeWorkspaceUITests \
+            -only-testing:MyChatRuntimeTests/CodeWorkspaceTests \
             CODE_SIGNING_ALLOWED=NO \
             test
