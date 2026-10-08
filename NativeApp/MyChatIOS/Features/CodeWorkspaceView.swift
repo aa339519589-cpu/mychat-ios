@@ -835,11 +835,6 @@ private struct CodeSessionDetailView: View {
         }
         guard eventSubscriptionToken == subscriptionToken,
               eventSubscriptionJobID == admission.jobID else { return }
-        // The byte stream has ended. Release its handle before recovery so the
-        // same still-running task can be resubscribed with a fresh token.
-        eventSubscription = nil
-        eventSubscriptionJobID = nil
-        eventSubscriptionToken = nil
         if let id = streamedResponseID,
            let index = messages.firstIndex(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
             messages[index].content = streamedContent
@@ -867,6 +862,12 @@ private struct CodeSessionDetailView: View {
             if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
             return
         }
+        // A terminal replay keeps its token until the owning Task clears the
+        // replay flag after the persisted state refresh. Live streams release
+        // their handle here so a still-running job can be resubscribed below.
+        eventSubscription = nil
+        eventSubscriptionJobID = nil
+        eventSubscriptionToken = nil
         if cancellationPending && !terminalReceived {
             activeAdmission = admission
             isCancelling = false
