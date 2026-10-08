@@ -1925,7 +1925,7 @@ private struct AssistantProgressRow: View {
         .sheet(isPresented: $expanded) {
             VStack(spacing: 0) {
                 ChatSheetHeader(title: "思考摘要")
-                ScrollView { MarkdownBody(summary ?? "", typography: .response).padding(20) }
+                ScrollView { MarkdownBody(summary ?? "", typography: .reasoningSummary).padding(20) }
             }
             .background(MyChatTheme.canvas)
             .presentationDetents([.medium, .large]).presentationCornerRadius(34)
@@ -3803,12 +3803,14 @@ struct MarkdownBody: View {
     enum Typography {
         case response
         case thought
+        case reasoningSummary
         case user
 
         var font: Font {
             switch self {
             case .response: return MyChatTypography.responseBody
             case .thought: return MyChatTypography.thoughtBody
+            case .reasoningSummary: return MyChatTypography.reasoningSummaryBody
             case .user: return MyChatTypography.userMessage
             }
         }
@@ -3817,6 +3819,7 @@ struct MarkdownBody: View {
             switch self {
             case .response: return MyChatTypography.responseBodyLineSpacing
             case .thought: return MyChatTypography.thoughtBodyLineSpacing
+            case .reasoningSummary: return MyChatTypography.reasoningSummaryBodyLineSpacing
             case .user: return MyChatTypography.userMessageLineSpacing
             }
         }
@@ -3825,6 +3828,7 @@ struct MarkdownBody: View {
             switch self {
             case .response: return MyChatTypography.responseBodySize
             case .thought: return MyChatTypography.thoughtBodySize
+            case .reasoningSummary: return MyChatTypography.reasoningSummaryBodySize
             case .user: return 17
             }
         }
@@ -3833,6 +3837,7 @@ struct MarkdownBody: View {
             switch self {
             case .response: return .response
             case .thought: return .thought
+            case .reasoningSummary: return .response
             case .user: return .user
             }
         }
@@ -3870,6 +3875,7 @@ struct MarkdownBody: View {
             switch typography {
             case .response: bodyLineSpacing = MyChatTypography.responseHanLineSpacing
             case .thought: bodyLineSpacing = MyChatTypography.thoughtHanLineSpacing
+            case .reasoningSummary: bodyLineSpacing = MyChatTypography.reasoningSummaryHanLineSpacing
             case .user: bodyLineSpacing = typography.lineSpacing
             }
         } else {
@@ -3895,6 +3901,11 @@ struct MarkdownBody: View {
             case .thought:
                 text = presentation.thoughtText
                 codeText = presentation.thoughtCodeText
+            case .reasoningSummary:
+                let scale = MyChatTypography.reasoningSummaryBodySize / MyChatTypography.responseBodySize
+                let summaryText = MyChatResponseTypesetting.response(presentation.text, scale: scale)
+                text = summaryText
+                codeText = MessageInlinePresentationCache.Presentation.codeDecoratedText(summaryText, parsed: presentation.text)
             case .user:
                 // The user-message case is handled above to preserve exact input.
                 text = AttributedString(source)
@@ -4478,7 +4489,7 @@ enum MessageInlinePresentationCache {
             mathHTML = hasInlineMath ? InlineMathPresentation.html(mathSource) : ""
         }
 
-        private static func codeDecoratedText(_ text: AttributedString, parsed: AttributedString) -> Text? {
+        fileprivate static func codeDecoratedText(_ text: AttributedString, parsed: AttributedString) -> Text? {
             guard #available(iOS 18.0, *),
                   parsed.runs.contains(where: { $0.inlinePresentationIntent?.contains(.code) == true }) else {
                 return nil
