@@ -326,6 +326,7 @@ private struct CodeSessionDetailView: View {
                                 Label(activity.toolName, systemImage: activity.isComplete ? "checkmark.circle" : "gearshape")
                                     .font(MyChatTypography.appStatus)
                                     .accessibilityLabel("\(activity.toolName)，\(activity.isComplete ? "已完成" : "正在执行")")
+                                    .accessibilityIdentifier("code.live-tool.\(activity.toolCallID)")
                             }
                             ForEach(Array(memoryChanges.enumerated()), id: \.offset) { _, change in
                                 HStack(spacing: 8) {
@@ -347,6 +348,7 @@ private struct CodeSessionDetailView: View {
                                     ForEach(plans) { action in
                                         Label(PresentationText.plain(action.summary), systemImage: planSymbol(action.kind))
                                             .font(MyChatSystemFont.appFont(size: 14, design: .monospaced, weight: .regular))
+                                            .accessibilityIdentifier("code.plan.\(action.id.uuidString.lowercased())")
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -362,6 +364,7 @@ private struct CodeSessionDetailView: View {
                                     Text(PresentationText.plain(errorMessage))
                                         .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
                                         .foregroundStyle(Color.red)
+                                        .accessibilityIdentifier("code.session.error")
                                     if terminalReplayFailed { terminalReplayRetryButton }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1129,29 +1132,103 @@ private struct CodeTaskEvidenceView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("\(detail.status) · \(detail.branch)", systemImage: "cloud")
                 .font(MyChatTypography.caption)
+                .accessibilityIdentifier("code.task.status")
+            if let error = CodeTaskErrorPresentation.concise(detail.error) {
+                Text(error)
+                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("任务错误：\(error)")
+                    .accessibilityIdentifier("code.task.error")
+            }
             ForEach(detail.toolCalls) { tool in
                 DisclosureGroup("\(tool.toolName) · \(tool.status)") {
-                    if let error = tool.error { Text(error).foregroundStyle(.red) }
+                    if let error = CodeTaskErrorPresentation.concise(tool.error) {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("工具错误：\(error)")
+                            .accessibilityIdentifier("code.task.tool.error.\(tool.id)")
+                    }
                     if let output = tool.output,
                        let data = try? JSONEncoder().encode(output),
                        let text = String(data: data, encoding: .utf8) {
-                        ScrollView(.horizontal) { Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) }
+                        ScrollView(.horizontal) {
+                            Text(text)
+                                .font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("code.task.tool.output.\(tool.id)")
+                        }
                     }
                     if let duration = tool.durationMs { Text("\(duration) ms").font(MyChatTypography.caption) }
-                }.padding(.vertical, 8)
+                }
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("code.task.tool.\(tool.id)")
             }
             ForEach(detail.artifacts) { artifact in
                 DisclosureGroup(artifact.title ?? artifact.kind) {
                     if let content = artifact.content {
-                        ScrollView(.horizontal) { Text(content).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) }
+                        ScrollView(.horizontal) {
+                            Text(content)
+                                .font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("code.task.artifact.content.\(artifact.id)")
+                        }
                     }
-                }.padding(.vertical, 8)
+                }
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("code.task.artifact.\(artifact.id)")
             }
             if let raw = detail.pullRequestUrl, let url = URL(string: raw),
                url.scheme == "https", url.host == "github.com", url.user == nil, url.password == nil {
                 Link("打开 GitHub PR", destination: url).frame(minHeight: 44)
             }
         }.accessibilityIdentifier("code.evidence")
+    }
+}
+
+private enum CodeTaskErrorPresentation {
+    static func concise(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let firstLine = raw.split(whereSeparator: \.isNewline)
+            .map { String($0) }
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        guard let firstLine else { return nil }
+        var message = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return nil }
+
+        message = message.replacingOccurrences(
+            of: #"(?i)(\b[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*[:=]).*$"#,
+            with: "$1 [已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"\b([A-Z][A-Z0-9_]*\s*=).*$"#,
+            with: "$1[已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"\b([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"#,
+            with: "$1[凭据已隐藏]@",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9+/=_-]{8,}"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)(?:access_token|refresh_token|token|api[_-]?key|client_secret|password|secret|credential)=([^&#\s]+)"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        if message.count > 240 {
+            message = String(message.prefix(240)) + "…"
+        }
+        return PresentationText.plain(message)
     }
 }
 
@@ -1551,11 +1628,13 @@ private struct CodeTasksSheet: View {
                                 Text(task.goal)
                                     .font(MyChatSystemFont.appFont(size: 16, weight: .regular))
                                     .lineLimit(3)
-                                if let error = task.error, !error.isEmpty {
-                                    Text(PresentationText.plain(error))
+                                if let error = CodeTaskErrorPresentation.concise(task.error) {
+                                    Text(error)
                                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                                         .foregroundStyle(Color.red)
                                         .lineLimit(2)
+                                        .accessibilityLabel("任务错误：\(error)")
+                                        .accessibilityIdentifier("code.task-list.error.\(task.id)")
                                 }
                             }
                             .padding(14)
