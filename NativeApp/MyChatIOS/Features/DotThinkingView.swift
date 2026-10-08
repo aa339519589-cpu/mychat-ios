@@ -77,6 +77,7 @@ final class DotAnimationSurface: UIControl {
     private var positionLink: CADisplayLink?
     private var displayedContentY: CGFloat?
     private var targetContentY: CGFloat?
+    private var positionID: UUID?
     private var previousPositionTime: CFTimeInterval?
     private lazy var positionTarget = DotPositionTarget(self)
     private var frames: DotMotionFrames?
@@ -125,7 +126,13 @@ final class DotAnimationSurface: UIControl {
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     deinit { loading?.cancel(); idleTimer?.invalidate(); positionLink?.invalidate(); observers.forEach(NotificationCenter.default.removeObserver) }
 
-    func configure(isGenerating: Bool, reduceMotion: Bool, isSuspended: Bool) {
+    func configure(isGenerating: Bool, reduceMotion: Bool, isSuspended: Bool, positionID: UUID) {
+        if self.positionID != positionID {
+            self.positionID = positionID
+            displayedContentY = nil
+            targetContentY = nil
+            previousPositionTime = nil
+        }
         let changedGeneration = self.isGenerating != isGenerating
         self.isGenerating = isGenerating
         self.reduceMotion = reduceMotion
@@ -297,8 +304,7 @@ final class DotAnimationSurface: UIControl {
         let elapsed = min(1.0 / 30, max(1.0 / 120, now - (previousPositionTime ?? now - 1.0 / 60)))
         previousPositionTime = now
         var displayed = displayedContentY ?? y
-        let oldTarget = targetContentY ?? y
-        if scroll.isTracking || scroll.isDragging || scroll.isDecelerating || abs(y - oldTarget) > 180 {
+        if scroll.isTracking || scroll.isDragging || scroll.isDecelerating {
             displayed = y
         } else {
             // A reparse can briefly reduce layout height. Keep the visual

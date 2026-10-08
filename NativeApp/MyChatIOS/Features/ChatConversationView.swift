@@ -247,7 +247,7 @@ private struct TranscriptSnapshot {
     private let model: AppModel
     private var subscription: AnyCancellable?
     private var leadingTextSubscription: AnyCancellable?
-    private var leadingProcessSubscription: AnyCancellable?
+    private var processEntriesSubscription: AnyCancellable?
     private var interacting = false
     private var modalVisible = false
     private var scheduled = false
@@ -267,15 +267,11 @@ private struct TranscriptSnapshot {
             next.messages = messages
             self.snapshot = next
         }
-        leadingProcessSubscription = model.$processEntriesByMessageID.dropFirst().sink { [weak self] entries in
-            guard let self, !self.interacting, !self.modalVisible,
-                  let id = model.messages.last(where: { $0.role == .assistant })?.id else { return }
-            let firstText = entries[id]?.contains { if case .text = $0.content { return true }; return false } == true
-                && self.snapshot.processEntries[id]?.contains { if case .text = $0.content { return true }; return false } != true
-            let firstSummary = entries[id]?.contains { if case .reasoningSummary = $0.content { return true }; return false } == true
-                && self.snapshot.processEntries[id]?.contains { if case .reasoningSummary = $0.content { return true }; return false } != true
-            guard firstText || firstSummary else { return }
-            var next = TranscriptSnapshot(model)
+        processEntriesSubscription = model.$processEntriesByMessageID.dropFirst().sink { [weak self] entries in
+            guard let self, self.snapshot.conversationID == model.activeConversationID else { return }
+            // Publish each streamed process delta in this main-actor turn. Scroll
+            // anchoring and bottom-follow stay owned by ChatScrollController.
+            var next = self.snapshot
             next.processEntries = entries
             self.snapshot = next
         }
@@ -283,7 +279,6 @@ private struct TranscriptSnapshot {
             model.$messages.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$editingMessageID.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$queuedCommands.dropFirst().map { _ in () }.eraseToAnyPublisher(),
-            model.$processEntriesByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$searchesByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$memoryChangesByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$toolActivitiesByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
@@ -313,9 +308,8 @@ private struct TranscriptSnapshot {
 
     private func schedule() {
         pending = true
-        // While UIKit owns an active drag or deceleration, retain only the
-        // latest transcript snapshot. Avoid enqueueing one main-queue closure
-        // per streamed message update; the scroll path remains compositor-led.
+        // While UIKit owns an active drag or deceleration, defer non-stream layout state.
+        // Live processEntries publish separately without changing the scroll target.
         if (interacting || modalVisible), snapshot.conversationID == model.activeConversationID { return }
         guard !scheduled else { return }
         scheduled = true
@@ -341,18 +335,20 @@ private struct TranscriptSnapshot {
 
 private struct AssistantResponseFooter: View {
     @StateObject private var presentation: AssistantFooterPresentation
+    private let positionID: UUID
     let isSuspended: Bool
     @Environment(\.chatScrollController) private var scrollController
 
     init(appModel: AppModel, messageID: UUID, isSuspended: Bool) {
         _presentation = StateObject(wrappedValue: AssistantFooterPresentation(appModel, messageID: messageID))
+        self.positionID = messageID
         self.isSuspended = isSuspended
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             StableDotCompanion(isGenerating: presentation.isGenerating, isSuspended: isSuspended,
-                controller: scrollController)
+                controller: scrollController, positionID: positionID)
                 .frame(width: 48, height: 48)
             Spacer(minLength: 0)
         }
@@ -367,10 +363,12 @@ private struct StableDotCompanion: UIViewRepresentable {
     let isGenerating: Bool
     let isSuspended: Bool
     let controller: ChatScrollController?
+    let positionID: UUID
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeUIView(context: Context) -> DotAnimationSurface { DotAnimationSurface() }
     func updateUIView(_ view: DotAnimationSurface, context: Context) {
-        view.configure(isGenerating: isGenerating, reduceMotion: reduceMotion, isSuspended: isSuspended)
+        view.configure(isGenerating: isGenerating, reduceMotion: reduceMotion, isSuspended: isSuspended,
+                       positionID: positionID)
         controller?.registerCompanion(view)
         KeyboardMotionAudit.companionView = view
     }
@@ -379,9 +377,8 @@ private struct StableDotCompanion: UIViewRepresentable {
     }
 }
 
-// The transcript deliberately freezes during scrolling. Keep only this small
-// generation flag live so a completed response never keeps typing while a drag
-// is in progress. Streamed body changes with the same last ID do not publish.
+// Scroll position remains native during user interaction. Live process entries
+// publish separately; ChatScrollController owns follow and reading-anchor motion.
 @MainActor final class AssistantFooterPresentation: ObservableObject {
     @Published private(set) var isGenerating: Bool
     @Published private(set) var showsDisclaimer: Bool

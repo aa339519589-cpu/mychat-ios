@@ -164,7 +164,6 @@ final class AppModel: ObservableObject {
     private var resumedPlanGenerationIDs: Set<UUID> = []
     private var titleTasks: [UUID: Task<Void, Never>] = [:]
     private var streamAccumulators: [UUID: ChatStreamAccumulator] = [:]
-    private var assistantPublishTasks: [UUID: Task<Void, Never>] = [:]
     private var pendingAssistantUpdates: [UUID: (id: UUID, value: ChatStreamAccumulator)] = [:]
     private var regenerationBackups: [UUID: [ChatMessage]] = [:]
     private var pendingProjectDeletions: Set<String> = []
@@ -528,7 +527,6 @@ final class AppModel: ObservableObject {
             conversations.removeAll { UUID(uuidString: $0.id) == conversationID }
             if let recovery = pendingPlanRecoveryCommands[conversationID] { clearPlanRecovery(recovery) }
             planTranscriptCheckpointTasks.removeValue(forKey: conversationID)?.cancel()
-            assistantPublishTasks.removeValue(forKey: conversationID)?.cancel()
             pendingAssistantUpdates[conversationID] = nil
             generationIDs[conversationID] = nil
             conversationToolHistoryCache[conversationID] = nil
@@ -738,8 +736,6 @@ final class AppModel: ObservableObject {
         pendingCommands = [:]
         queuedCommands = [:]
         streamAccumulators = [:]
-        assistantPublishTasks.values.forEach { $0.cancel() }
-        assistantPublishTasks = [:]
         pendingAssistantUpdates = [:]
         regenerationBackups = [:]
         pendingProjectDeletions = []
@@ -4013,18 +4009,18 @@ final class AppModel: ObservableObject {
 
     private func updateAssistant(id: UUID, conversationID: UUID, accumulator: ChatStreamAccumulator) {
         pendingAssistantUpdates[conversationID] = (id, accumulator)
-        let currentContent = messages.first(where: { $0.id == id })?.content ?? ""
-        if accumulator.terminal != nil || (currentContent.isEmpty && !accumulator.content.isEmpty) {
+        let currentMessages = activeConversationID == conversationID
+            ? messages : conversationMessageCache[conversationID] ?? []
+        let current = currentMessages.first(where: { $0.id == id })
+        let visibleMedia = accumulator.media.isEmpty ? nil : accumulator.media
+        let firstText = (current?.content.isEmpty ?? true) && !accumulator.content.isEmpty
+        let mediaChanged = current?.media != visibleMedia
+
+        // Each SSE delta is already projected immediately through processEntries.
+        // Publish canonical message state on first visible text/media and at terminal,
+        // without pacing the stream or copying the full transcript array on every delta.
+        if accumulator.terminal != nil || firstText || mediaChanged {
             flushAssistantUpdate(conversationID)
-        } else if assistantPublishTasks[conversationID] == nil {
-            // Consume every SSE delta, but publish at the transcript's 25 Hz
-            // render cadence. Faster model-side publishes only copy the full
-            // message array again while the transcript view discards them.
-            assistantPublishTasks[conversationID] = Task { [weak self] in
-                do { try await Task.sleep(for: .milliseconds(40)) }
-                catch { return }
-                self?.flushAssistantUpdate(conversationID)
-            }
         }
     }
 
@@ -4091,7 +4087,6 @@ final class AppModel: ObservableObject {
     }
 
     private func flushAssistantUpdate(_ conversationID: UUID) {
-        assistantPublishTasks.removeValue(forKey: conversationID)?.cancel()
         guard let update = pendingAssistantUpdates.removeValue(forKey: conversationID) else { return }
         var current = activeConversationID == conversationID
             ? messages : conversationMessageCache[conversationID] ?? []

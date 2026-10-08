@@ -2283,6 +2283,40 @@ import CoreText
         XCTAssertEqual(entries[4].content, .tool(ChatToolActivity(toolCallID: "tool-1", toolName: "memory_search", isComplete: true)))
     }
 
+    func testStreamDeltasReachTheRenderedProcessSnapshotOneByOneWithoutWaiting() {
+        let job = UUID()
+        var bodyEntries: [ChatProcessEntry] = []
+        var summaryEntries: [ChatProcessEntry] = []
+        var bodySnapshot = ""
+        var summarySnapshot = ""
+        let bodyParts = ["first", " second", " third"]
+        let summaryParts = ["Checking ", "the inputs", ", then deciding."]
+        let bodyPrefixes = ["first", "first second", "first second third"]
+        let summaryPrefixes = ["Checking ", "Checking the inputs", "Checking the inputs, then deciding."]
+
+        for index in bodyParts.indices {
+            ChatProcessEntry.record(
+                ChatJobEvent(jobID: job, sequence: index + 1, payload: .textDelta(bodyParts[index])),
+                into: &bodyEntries
+            )
+            bodySnapshot = bodyEntries.compactMap {
+                if case let .text(value) = $0.content { return value }
+                return nil
+            }.joined()
+            XCTAssertEqual(bodySnapshot, bodyPrefixes[index])
+
+            ChatProcessEntry.record(
+                ChatJobEvent(jobID: job, sequence: index + 4, payload: .reasoningSummaryDelta(summaryParts[index])),
+                into: &summaryEntries
+            )
+            summarySnapshot = summaryEntries.compactMap {
+                if case let .reasoningSummary(value) = $0.content { return value }
+                return nil
+            }.joined()
+            XCTAssertEqual(summarySnapshot, summaryPrefixes[index])
+        }
+    }
+
     private func waitUntil(_ predicate: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(1)
         while !predicate(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
