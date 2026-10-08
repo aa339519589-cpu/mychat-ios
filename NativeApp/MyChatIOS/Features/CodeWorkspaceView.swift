@@ -560,7 +560,7 @@ private struct CodeSessionDetailView: View {
                 toolActivities = []
                 memoryChanges = []
                 receipt = nil
-                if isTerminalCodeStatus(recovery.task?.status) || isTerminalCodeStatus(admission.status) {
+                if isTerminalCodeStatus(recovery.trackingStatus) {
                     activeAdmission = nil
                     isCancelling = false
                     cancellationPending = false
@@ -878,8 +878,7 @@ private struct CodeSessionDetailView: View {
                 taskDetail = recovery.task
                 if let task = recovery.task { branch = task.branch }
                 let recoveredAdmission = recovery.operationAdmission ?? recovery.admission
-                if isTerminalCodeStatus(recovery.task?.status)
-                    || isTerminalCodeStatus(recoveredAdmission?.status) {
+                if isTerminalCodeStatus(recovery.trackingStatus) {
                     activeAdmission = nil
                     cancellationPending = false
                     cancellationRetryAllowed = false
@@ -916,8 +915,7 @@ private struct CodeSessionDetailView: View {
             taskDetail = recovery.task
             if let task = recovery.task { branch = task.branch }
             if let admission = recovery.operationAdmission ?? recovery.admission,
-               !isTerminalCodeStatus(recovery.task?.status),
-               !isTerminalCodeStatus(admission.status) {
+               !isTerminalCodeStatus(recovery.trackingStatus) {
                 lastTaskID = admission.taskID
                 activeAdmission = admission
                 streamedResponseID = recovery.admission?.responseID ?? admission.responseID ?? admission.taskID
@@ -995,8 +993,7 @@ private struct CodeSessionDetailView: View {
             if let task = recovery.task { branch = task.branch }
             let currentAdmission = recovery.operationAdmission ?? recovery.admission
             let terminal = isTerminalCodeStatus(confirmedTerminalStatus)
-                || isTerminalCodeStatus(recovery.task?.status)
-                || isTerminalCodeStatus(currentAdmission?.status)
+                || isTerminalCodeStatus(recovery.trackingStatus)
 
             if terminal {
                 activeAdmission = nil

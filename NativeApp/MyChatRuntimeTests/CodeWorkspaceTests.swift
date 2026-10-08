@@ -121,6 +121,51 @@ import SwiftUI
         XCTAssertNotNil(recovery.sessionId)
     }
 
+    func testRecoveryTracksPublicationJobInsteadOfCompletedCodingTask() throws {
+        for status in ["queued", "running", "cancelling", "completed", "cancelled", "failed"] {
+            let recovery = try recoveryStatusFixture(taskStatus: "completed",
+                admissionStatus: "completed", operationStatus: status)
+            XCTAssertEqual(recovery.trackingStatus, status,
+                "The publication job owns the active/terminal state even though its coding task completed")
+        }
+    }
+
+    func testRecoveryTracksCodingJobBeforeLaggingTaskSnapshot() throws {
+        let running = try recoveryStatusFixture(taskStatus: "completed",
+            admissionStatus: "running", operationStatus: nil)
+        XCTAssertEqual(running.trackingStatus, "running")
+        let cancelled = try recoveryStatusFixture(taskStatus: "running",
+            admissionStatus: "cancelled", operationStatus: nil)
+        XCTAssertEqual(cancelled.trackingStatus, "cancelled")
+    }
+
+    func testRecoveryFallsBackToTaskStatusOnlyWithoutJobAdmissions() throws {
+        let terminal = try recoveryStatusFixture(taskStatus: "cancelled",
+            admissionStatus: nil, operationStatus: nil)
+        XCTAssertEqual(terminal.trackingStatus, "cancelled")
+        let empty = try JSONDecoder().decode(CodeTaskRecovery.self,
+            from: Data(#"{"admission":null,"task":null,"operationAdmission":null}"#.utf8))
+        XCTAssertNil(empty.trackingStatus)
+    }
+
+    private func recoveryStatusFixture(taskStatus: String, admissionStatus: String?,
+                                       operationStatus: String?) throws -> CodeTaskRecovery {
+        let taskID = "33333333-3333-3333-3333-333333333333"
+        func admission(_ status: String?, jobID: String) -> Any {
+            guard let status else { return NSNull() }
+            return ["schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+                "status": status, "created": false,
+                "streamUrl": "/api/v1/jobs/\(jobID)/events?from_seq=0"] as [String: Any]
+        }
+        let task: [String: Any] = ["id": taskID, "status": taskStatus, "branch": "main",
+            "toolCalls": [], "artifacts": []]
+        let payload: [String: Any] = ["task": task,
+            "admission": admission(admissionStatus, jobID: "22222222-2222-2222-2222-222222222222"),
+            "operationAdmission": admission(operationStatus, jobID: "55555555-5555-5555-5555-555555555555")]
+        return try JSONDecoder().decode(CodeTaskRecovery.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+    }
+
     func testFactoryModelAndReasoningDefaultsAreHaikuMediumAndToolsAreEnabled() async throws {
         let keys = factoryPreferenceKeys
         let previous = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }

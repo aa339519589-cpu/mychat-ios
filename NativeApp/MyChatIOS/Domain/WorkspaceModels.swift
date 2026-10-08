@@ -501,6 +501,12 @@ struct CodeTaskRecovery: Decodable, Sendable {
     var sessionId: String? = nil
     var task: CodeTaskDetail? = nil
     var operationAdmission: CodeAdmission? = nil
+
+    // Publication runs as a separate durable job after the coding task ends.
+    // The selected job's live status must outrank a terminal task snapshot.
+    var trackingStatus: String? {
+        operationAdmission?.status ?? admission?.status ?? task?.status
+    }
 }
 
 struct CodeBranches: Decodable, Sendable {
