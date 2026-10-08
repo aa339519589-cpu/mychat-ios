@@ -534,6 +534,47 @@ final class MyChatUITests: XCTestCase {
         }
     }
 
+    @MainActor func testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
+        let app = launch(extra: ["--ui-test-artifacts-large"])
+        app.buttons["打开侧边栏"].firstMatch.tap()
+        app.buttons["可视化"].firstMatch.tap()
+
+        let artifact = app.buttons["artifact-record-70000000-0000-4000-8000-000000000064"].firstMatch
+        XCTAssertTrue(waitForHittable(artifact, timeout: 10))
+        artifact.tap()
+
+        let close = app.buttons["artifact-preview-close"].firstMatch
+        XCTAssertTrue(waitForHittable(close, timeout: 10))
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let width = app.frame.width
+        let y = app.frame.height * 0.55
+
+        func dragFromLeadingEdge(_ distance: CGFloat) {
+            let start = origin.withOffset(CGVector(dx: 5, dy: y))
+            start.press(forDuration: 0.03,
+                thenDragTo: origin.withOffset(CGVector(dx: 5 + distance, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0.08)
+        }
+
+        // A short edge drag must settle back in place without dismissing the cover.
+        dragFromLeadingEdge(34)
+        XCTAssertTrue(waitForHittable(close, timeout: 5),
+            "A cancelled edge swipe must restore the artifact detail")
+        XCTAssertFalse(artifact.isHittable,
+            "The artifact row must remain covered after a cancelled edge swipe")
+
+        // The same natural gesture must dismiss the detail and work again after re-entry.
+        for _ in 0..<2 {
+            if !close.isHittable { artifact.tap() }
+            XCTAssertTrue(waitForHittable(close, timeout: 10))
+            dragFromLeadingEdge(width * 0.33)
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: close)
+            waitForExpectations(timeout: 8)
+            XCTAssertTrue(waitForHittable(artifact, timeout: 8),
+                "The artifact list must be restored after the edge swipe")
+        }
+    }
+
     @MainActor func testArtifactLibraryKeepsEveryDocumentInPackage() {
         let app = launch(extra: ["--ui-test-document-library"])
         app.buttons["打开侧边栏"].firstMatch.tap()
