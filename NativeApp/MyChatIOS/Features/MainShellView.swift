@@ -666,7 +666,8 @@ enum DrawerMotion {
     static func intent(_ delta: CGPoint) -> Intent {
         let x = abs(delta.x), y = abs(delta.y)
         if y >= 8, y * 1.8 > x { return .vertical }
-        if x >= 12, x >= y * 1.8 { return .horizontal }
+        // Ignore small horizontal finger drift so compact controls keep their tap.
+        if x >= 24, x >= y * 1.8 { return .horizontal }
         return .undecided
     }
     static func shadeOpacity(progress: CGFloat) -> CGFloat {
