@@ -2109,9 +2109,9 @@ final class AppModel: ObservableObject {
         return try await codeClient.apply(command, accessToken: session.accessToken)
     }
 
-    func cancelCodeRun(_ admission: CodeAdmission) async throws {
+    func cancelCodeRun(_ admission: CodeAdmission) async throws -> ChatCancelResponse {
         let session = try await refreshedSession()
-        _ = try await chatClient.cancel(
+        return try await chatClient.cancel(
             jobID: admission.jobID,
             accessToken: session.accessToken,
             reason: "user_requested"
