@@ -5,6 +5,7 @@ import WebKit
 import PDFKit
 import HealthKit
 import CoreText
+import Combine
 @testable import MyChat
 
 @MainActor final class MyChatRuntimeTests: XCTestCase {
@@ -2281,6 +2282,88 @@ import CoreText
         XCTAssertEqual(entries[2].content, .reasoningSummary("API 摘要"))
         XCTAssertEqual(entries[3].content, .thinking("再思考"))
         XCTAssertEqual(entries[4].content, .tool(ChatToolActivity(toolCallID: "tool-1", toolName: "memory_search", isComplete: true)))
+    }
+
+    func testPlanProviderDeltasReachAppModelAndTranscriptBeforeCompletion() async throws {
+        let transport = ControlledChatTransport()
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Offline Plan stream regression"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+
+        let updates = ChatTranscriptUpdates(model)
+        // Scrolling or an open sheet must not turn the stream back into a
+        // terminal-only snapshot. These flags only own non-stream layout state.
+        updates.setInteracting(true)
+        updates.setModalVisible(true)
+        var bodies: [String] = []
+        var summaries: [String] = []
+        let observation = updates.$snapshot.sink { snapshot in
+            guard model.isCurrentConversationGenerating else { return }
+            let entries = snapshot.processEntries[command.assistantMessageID, default: []]
+            let body = entries.compactMap { entry -> String? in
+                if case let .text(value) = entry.content { return value }
+                return nil
+            }.joined()
+            let summary = entries.compactMap { entry -> String? in
+                if case let .reasoningSummary(value) = entry.content { return value }
+                return nil
+            }.joined()
+            if !body.isEmpty, bodies.last != body { bodies.append(body) }
+            if !summary.isEmpty, summaries.last != summary { summaries.append(summary) }
+        }
+        defer { observation.cancel() }
+
+        let events: [[String: Any]] = [
+            ["type": "response.reasoning_summary_text.delta", "delta": "Checking "],
+            ["type": "response.reasoning_summary_text.delta", "delta": "the inputs"],
+            ["type": "response.reasoning_summary_text.delta", "delta": ", then deciding."],
+            ["type": "response.output_text.delta", "delta": "first"],
+            ["type": "response.output_text.delta", "delta": " second"],
+            ["type": "response.output_text.delta", "delta": " third"],
+            ["type": "response.completed", "response": ["output": [[
+                "type": "message", "content": [["type": "output_text", "text": "first second third"]]
+            ]]]]
+        ]
+        let frames = try events.map { event in
+            let data = try JSONSerialization.data(withJSONObject: event)
+            return "data: " + String(decoding: data, as: UTF8.self) + "\n\n"
+        }.joined()
+        let recorder = ChatGPTPlanRequestRecorder()
+        recorder.scriptedResponses = [(200, Data(frames.utf8), "text/event-stream")]
+        ChatGPTPlanFixtureURLProtocol.recorder = recorder
+        defer { ChatGPTPlanFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatGPTPlanFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let stream = ChatGPTPlanProvider.stream(
+            session: session, requestBody: Data("{}".utf8), accessToken: "isolated-plan-fixture",
+            executeTool: { _, _ in XCTFail("No tool call belongs in this fixture"); return "{}" },
+            refresh: { XCTFail("The offline stream must not refresh credentials"); return "" }
+        )
+        // Exercise the same event loop runChatGPTPlan calls. No sleeps, fake
+        // display timer, or reducer-only substitute exists between these deltas.
+        try await model.consumeChatGPTPlanEvents(
+            stream, command: command, isPrivate: true,
+            accumulator: ChatStreamAccumulator(), sequence: 0
+        )
+        XCTAssertEqual(bodies, ["first", "first second", "first second third"])
+        XCTAssertEqual(summaries, ["Checking ", "Checking the inputs", "Checking the inputs, then deciding."])
+        XCTAssertEqual(model.messages.last?.content, "first second third")
+        XCTAssertFalse(model.isCurrentConversationGenerating)
+        let timing = try XCTUnwrap(ChatGenerationDiagnostics.records[command.generationID])
+        XCTAssertNotNil(timing.milliseconds["firstText"])
+        XCTAssertNotNil(timing.milliseconds["firstReasoningSummary"])
+        XCTAssertNotNil(timing.milliseconds["completed"])
+        XCTAssertEqual(recorder.requests.count, 1)
+        transport.complete(command, text: "first second third", sequence: 8)
+        try await waitUntil { model.generatingConversationIDs.isEmpty }
     }
 
     func testStreamDeltasReachTheRenderedProcessSnapshotOneByOneWithoutWaiting() {

@@ -207,7 +207,7 @@ struct ChatConversationView: View, Equatable {
 
 }
 
-private struct TranscriptSnapshot {
+struct TranscriptSnapshot {
     var messages: [ChatMessage]
     var processEntries: [UUID: [ChatProcessEntry]]
     var searches: [UUID: [ChatToolSearch]]
@@ -242,7 +242,7 @@ private struct TranscriptSnapshot {
     }
 }
 
-@MainActor private final class ChatTranscriptUpdates: ObservableObject {
+@MainActor final class ChatTranscriptUpdates: ObservableObject {
     @Published private(set) var snapshot: TranscriptSnapshot
     private let model: AppModel
     private var subscription: AnyCancellable?
@@ -314,9 +314,8 @@ private struct TranscriptSnapshot {
         guard !scheduled else { return }
         scheduled = true
         // @Published sends before the model changes; read once after the write.
-        // AppModel already coalesces assistant deltas to 25 Hz. Publish the
-        // latest snapshot on the next main-queue turn instead of adding a
-        // second 40 ms delay that would halve visible streaming cadence.
+        // Only non-stream state takes this next-turn snapshot. Text and public
+        // summary deltas publish synchronously through processEntriesSubscription.
         let delay: DispatchTimeInterval = .milliseconds(0)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }

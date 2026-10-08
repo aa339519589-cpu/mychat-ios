@@ -7,11 +7,13 @@ import UIKit
 struct DotThinkingView: UIViewRepresentable {
     var isGenerating = true
     var isSuspended = false
+    @State private var positionID = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeUIView(context: Context) -> DotAnimationSurface { DotAnimationSurface() }
     func updateUIView(_ view: DotAnimationSurface, context: Context) {
-        view.configure(isGenerating: isGenerating, reduceMotion: reduceMotion, isSuspended: isSuspended)
+        view.configure(isGenerating: isGenerating, reduceMotion: reduceMotion, isSuspended: isSuspended,
+                       positionID: positionID)
     }
     static func dismantleUIView(_ view: DotAnimationSurface, coordinator: ()) { view.stop() }
 }

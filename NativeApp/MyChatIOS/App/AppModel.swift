@@ -3634,138 +3634,10 @@ final class AppModel: ObservableObject {
                 },
                 modelSupportsVision: model.supportsVision
             )
-            for try await event in stream {
-                try Task.checkCancellation()
-                guard generationIDs[conversationID] == command.generationID else { return }
-                ChatGenerationDiagnostics.mark(command.generationID, stage: .firstEvent)
-                switch event {
-                case let .textDelta(delta):
-                    sequence += 1
-                    accumulator.apply(ChatJobEvent(
-                        jobID: command.generationID,
-                        sequence: sequence,
-                        payload: .textDelta(delta)
-                    ))
-                    streamAccumulators[conversationID] = accumulator
-                    updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
-                                    accumulator: accumulator)
-                case let .reasoningSummaryDelta(delta):
-                    sequence += 1
-                    let event = ChatJobEvent(
-                        jobID: command.generationID,
-                        sequence: sequence,
-                        payload: .reasoningSummaryDelta(delta)
-                    )
-                    accumulator.apply(event)
-                    recordProcessEvent(event, command: command)
-                    streamAccumulators[conversationID] = accumulator
-                    updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
-                                    accumulator: accumulator)
-                case let .toolActivity(id, name, isComplete):
-                    sequence += 1
-                    let event = ChatJobEvent(
-                        jobID: command.generationID,
-                        sequence: sequence,
-                        payload: .toolActivity(ChatToolActivity(
-                            toolCallID: id,
-                            toolName: name,
-                            isComplete: isComplete
-                        ))
-                    )
-                    accumulator.apply(event)
-                    recordProcessEvent(event, command: command)
-                    streamAccumulators[conversationID] = accumulator
-                    updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
-                                    accumulator: accumulator)
-                    recordToolActivity(ChatToolActivity(
-                        toolCallID: id,
-                        toolName: name,
-                        isComplete: isComplete
-                    ), messageID: command.assistantMessageID, conversationID: conversationID)
-                case let .toolOutcome(callID, rawOutcome):
-                    guard let rawData = rawOutcome.data(using: .utf8),
-                          let envelope = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any],
-                          let eventObject = envelope["event"] as? [String: Any] else { continue }
-                    if let searchObject = eventObject["search"],
-                       let searchData = try? JSONSerialization.data(withJSONObject: searchObject),
-                       let search = try? JSONDecoder().decode(ChatToolSearch.self, from: searchData) {
-                        sequence += 1
-                        let event = ChatJobEvent(jobID: command.generationID, sequence: sequence,
-                                                 payload: .toolSearch(search))
-                        accumulator.apply(event)
-                        recordProcessEvent(event, command: command)
-                        searchesByMessageID[command.assistantMessageID, default: []].append(search)
-                    }
-                    if let memoryObject = eventObject["memory"],
-                       let memoryData = try? JSONSerialization.data(withJSONObject: memoryObject),
-                       let change = try? JSONDecoder().decode(ChatMemoryEvent.self, from: memoryData) {
-                        sequence += 1
-                        let event = ChatJobEvent(jobID: command.generationID, sequence: sequence,
-                                                 payload: .memoryChange(change))
-                        accumulator.apply(event)
-                        recordProcessEvent(event, command: command)
-                        recordMemoryChange(change, messageID: command.assistantMessageID,
-                                           conversationID: conversationID)
-                        if change.ok { Task { [weak self] in await self?.refreshMemoryListAfterToolMutation() } }
-                    }
-                    if let appObject = eventObject["connectorApp"],
-                       let appData = try? JSONSerialization.data(withJSONObject: appObject),
-                       let payload = try? JSONDecoder().decode(ChatConnectorAppPayload.self, from: appData) {
-                        recordConnectorApp(ChatConnectorAppEvent(id: callID, payload: payload),
-                                           messageID: command.assistantMessageID,
-                                           conversationID: conversationID)
-                    }
-                case let .completed(finalText):
-                    sequence += 1
-                    accumulator.apply(ChatJobEvent(
-                        jobID: command.generationID,
-                        sequence: sequence,
-                        payload: .terminal(ChatTerminalSnapshot(
-                            status: .completed,
-                            content: finalText,
-                            thinking: accumulator.thinking,
-                            sequence: sequence,
-                            errorCode: nil,
-                            media: [],
-                            tokenUsage: nil,
-                            codeReceipt: nil
-                        ))
-                    ))
-                    streamAccumulators[conversationID] = accumulator
-                    updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
-                                    accumulator: accumulator)
-                    markModelOutputCompleted(command)
-                    conversationErrors[conversationID] = nil
-                    regenerationBackups[conversationID] = nil
-
-                    guard !isPrivate else { return }
-                    do {
-                        let myChatSession = try await refreshedSession()
-                        let assistantDate = (activeConversationID == conversationID ? messages
-                            : (conversationMessageCache[conversationID] ?? []))
-                            .first(where: { $0.id == command.assistantMessageID })?.createdAt ?? Date()
-                        let completedAssistant = ChatMessage(
-                            id: command.assistantMessageID,
-                            role: .assistant,
-                            content: finalText,
-                            thinking: accumulator.persistedThinking,
-                            createdAt: assistantDate
-                        )
-                        try await chatGPTPlanHistoryClient.persistTurn(
-                            command: command,
-                            assistantMessage: completedAssistant,
-                            accessToken: myChatSession.accessToken
-                        )
-                        clearPlanRecovery(command)
-                        scheduleConversationCacheSave(userID: myChatSession.user.id)
-                    } catch {
-                        conversationErrors[conversationID] = error.localizedDescription
-                    }
-                }
-            }
-            if accumulator.terminal?.status != .completed {
-                throw ChatGPTPlanError.invalidResponse
-            }
+            try await consumeChatGPTPlanEvents(
+                stream, command: command, isPrivate: isPrivate,
+                accumulator: accumulator, sequence: sequence
+            )
         } catch is CancellationError {
             guard generationIDs[conversationID] == command.generationID else { return }
             restoreRejectedRegeneration(command)
@@ -3776,6 +3648,156 @@ final class AppModel: ObservableObject {
             restoreRejectedRegeneration(command)
             markPlanRecoveryInterrupted(command)
             conversationErrors[conversationID] = error.localizedDescription
+        }
+    }
+
+    /// The production Plan event consumer is also exercised by the offline
+    /// provider-to-transcript test without reading credentials or opening a live request.
+    func consumeChatGPTPlanEvents(
+        _ stream: AsyncThrowingStream<ChatGPTPlanStreamEvent, Error>,
+        command: ChatAppendCommand,
+        isPrivate: Bool,
+        accumulator initialAccumulator: ChatStreamAccumulator,
+        sequence initialSequence: Int
+    ) async throws {
+        let conversationID = command.conversationID
+        var accumulator = initialAccumulator
+        var sequence = initialSequence
+        for try await event in stream {
+            try Task.checkCancellation()
+            guard generationIDs[conversationID] == command.generationID else { return }
+            ChatGenerationDiagnostics.mark(command.generationID, stage: .firstEvent)
+            switch event {
+            case let .textDelta(delta):
+                sequence += 1
+                let event = ChatJobEvent(
+                    jobID: command.generationID,
+                    sequence: sequence,
+                    payload: .textDelta(delta)
+                )
+                accumulator.apply(event)
+                recordProcessEvent(event, command: command)
+                streamAccumulators[conversationID] = accumulator
+                updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
+                                accumulator: accumulator)
+            case let .reasoningSummaryDelta(delta):
+                sequence += 1
+                let event = ChatJobEvent(
+                    jobID: command.generationID,
+                    sequence: sequence,
+                    payload: .reasoningSummaryDelta(delta)
+                )
+                accumulator.apply(event)
+                recordProcessEvent(event, command: command)
+                streamAccumulators[conversationID] = accumulator
+                updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
+                                accumulator: accumulator)
+            case let .toolActivity(id, name, isComplete):
+                sequence += 1
+                let event = ChatJobEvent(
+                    jobID: command.generationID,
+                    sequence: sequence,
+                    payload: .toolActivity(ChatToolActivity(
+                        toolCallID: id,
+                        toolName: name,
+                        isComplete: isComplete
+                    ))
+                )
+                accumulator.apply(event)
+                recordProcessEvent(event, command: command)
+                streamAccumulators[conversationID] = accumulator
+                updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
+                                accumulator: accumulator)
+                recordToolActivity(ChatToolActivity(
+                    toolCallID: id,
+                    toolName: name,
+                    isComplete: isComplete
+                ), messageID: command.assistantMessageID, conversationID: conversationID)
+            case let .toolOutcome(callID, rawOutcome):
+                guard let rawData = rawOutcome.data(using: .utf8),
+                      let envelope = try? JSONSerialization.jsonObject(with: rawData) as? [String: Any],
+                      let eventObject = envelope["event"] as? [String: Any] else { continue }
+                if let searchObject = eventObject["search"],
+                   let searchData = try? JSONSerialization.data(withJSONObject: searchObject),
+                   let search = try? JSONDecoder().decode(ChatToolSearch.self, from: searchData) {
+                    sequence += 1
+                    let event = ChatJobEvent(jobID: command.generationID, sequence: sequence,
+                                             payload: .toolSearch(search))
+                    accumulator.apply(event)
+                    recordProcessEvent(event, command: command)
+                    searchesByMessageID[command.assistantMessageID, default: []].append(search)
+                }
+                if let memoryObject = eventObject["memory"],
+                   let memoryData = try? JSONSerialization.data(withJSONObject: memoryObject),
+                   let change = try? JSONDecoder().decode(ChatMemoryEvent.self, from: memoryData) {
+                    sequence += 1
+                    let event = ChatJobEvent(jobID: command.generationID, sequence: sequence,
+                                             payload: .memoryChange(change))
+                    accumulator.apply(event)
+                    recordProcessEvent(event, command: command)
+                    recordMemoryChange(change, messageID: command.assistantMessageID,
+                                       conversationID: conversationID)
+                    if change.ok { Task { [weak self] in await self?.refreshMemoryListAfterToolMutation() } }
+                }
+                if let appObject = eventObject["connectorApp"],
+                   let appData = try? JSONSerialization.data(withJSONObject: appObject),
+                   let payload = try? JSONDecoder().decode(ChatConnectorAppPayload.self, from: appData) {
+                    recordConnectorApp(ChatConnectorAppEvent(id: callID, payload: payload),
+                                       messageID: command.assistantMessageID,
+                                       conversationID: conversationID)
+                }
+            case let .completed(finalText):
+                sequence += 1
+                let event = ChatJobEvent(
+                    jobID: command.generationID,
+                    sequence: sequence,
+                    payload: .terminal(ChatTerminalSnapshot(
+                        status: .completed,
+                        content: finalText,
+                        thinking: accumulator.thinking,
+                        sequence: sequence,
+                        errorCode: nil,
+                        media: [],
+                        tokenUsage: nil,
+                        codeReceipt: nil
+                    ))
+                )
+                accumulator.apply(event)
+                recordProcessEvent(event, command: command)
+                streamAccumulators[conversationID] = accumulator
+                updateAssistant(id: command.assistantMessageID, conversationID: conversationID,
+                                accumulator: accumulator)
+                markModelOutputCompleted(command)
+                conversationErrors[conversationID] = nil
+                regenerationBackups[conversationID] = nil
+
+                guard !isPrivate else { return }
+                do {
+                    let myChatSession = try await refreshedSession()
+                    let assistantDate = (activeConversationID == conversationID ? messages
+                        : (conversationMessageCache[conversationID] ?? []))
+                        .first(where: { $0.id == command.assistantMessageID })?.createdAt ?? Date()
+                    let completedAssistant = ChatMessage(
+                        id: command.assistantMessageID,
+                        role: .assistant,
+                        content: finalText,
+                        thinking: accumulator.persistedThinking,
+                        createdAt: assistantDate
+                    )
+                    try await chatGPTPlanHistoryClient.persistTurn(
+                        command: command,
+                        assistantMessage: completedAssistant,
+                        accessToken: myChatSession.accessToken
+                    )
+                    clearPlanRecovery(command)
+                    scheduleConversationCacheSave(userID: myChatSession.user.id)
+                } catch {
+                    conversationErrors[conversationID] = error.localizedDescription
+                }
+            }
+        }
+        if accumulator.terminal?.status != .completed {
+            throw ChatGPTPlanError.invalidResponse
         }
     }
 
