@@ -332,7 +332,24 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 return (503, ["error": "隔离测试未配置任务恢复"])
             }
             return (200, ["task": NSNull(), "admission": NSNull()])
-        case "/api/connectors": return (200, ["connectors": []])
+        case "/api/connectors":
+            if method == "POST" {
+                let accessToken = body["accessToken"] as? String
+                let connector: [String: Any] = [
+                    "id": "90000000-0000-4000-8000-000000000066",
+                    "name": body["name"] as? String ?? "Fixture connector",
+                    "serverUrl": body["serverUrl"] as? String ?? "https://connector.example.invalid/mcp",
+                    "enabled": true,
+                    "hasAccessToken": accessToken != nil,
+                    "authType": accessToken == nil ? "none" : "bearer",
+                    "toolCount": 0,
+                    "tools": [],
+                    "createdAt": date,
+                    "updatedAt": date
+                ]
+                return (201, ["connector": connector])
+            }
+            return (200, ["connectors": []])
         case "/api/connectors/directory": return (200, ["entries": [["id": "sample", "name": "Sample service", "description": "An isolated directory entry", "serverUrl": "https://connector.example.invalid/mcp", "authType": "oauth"]], "nextCursor": NSNull()])
         case "/api/tts": return (503, ["error": "隔离测试：模拟语音提供方失败"])
         case "/rest/v1/conversations":
