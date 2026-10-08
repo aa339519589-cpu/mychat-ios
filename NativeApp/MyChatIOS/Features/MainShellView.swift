@@ -3048,19 +3048,49 @@ private struct ChatModelSelectionSheet: View {
     private func modelRows(_ models: [ModelCatalogItem], raised: Bool = true) -> some View {
         VStack(spacing: 0) {
             ForEach(models) { model in
+                let isSelected = model.id == appModel.selectedModelID
                 Button {
-                    if model.id != appModel.selectedModelID { HapticFeedback.play(.selection) }
+                    if !isSelected { HapticFeedback.play(.selection) }
                     appModel.selectModel(model); closeSheet()
                 } label: {
-                    HStack {
+                    HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(model.chatDisplayName).font(MyChatTypography.navigation)
-                            Text(description(model)).font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
+                            Text(model.chatDisplayName)
+                                .font(MyChatTypography.navigation)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(description(model))
+                                .font(MyChatTypography.metadata)
+                                .foregroundStyle(MyChatTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Spacer()
-                        if model.id == appModel.selectedModelID { Image(systemName: "checkmark").foregroundStyle(selectionColor).font(.system(size: 20, weight: .medium)) }
-                    }.frame(minHeight: raised ? 70 : 62).contentShape(Rectangle())
-                }.buttonStyle(ModelSelectionPressStyle()).disabled(!model.isSelectable).opacity(model.isSelectable ? 1 : 0.5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(1)
+
+                        Group {
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(selectionColor)
+                                    .font(.system(size: 20, weight: .medium))
+                            } else {
+                                Color.clear
+                            }
+                        }
+                        .frame(width: 28, height: 28, alignment: .center)
+                        .frame(maxHeight: .infinity, alignment: .center)
+                        .accessibilityHidden(true)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: raised ? 70 : 62, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ModelSelectionPressStyle())
+                .disabled(!model.isSelectable)
+                .opacity(model.isSelectable ? 1 : 0.5)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(model.chatDisplayName), \(description(model))")
+                .accessibilityValue(isSelected ? "已选择" : "未选择")
+                .accessibilityHint(model.isSelectable ? "双击选择此模型" : "此模型当前不可用")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .accessibilityIdentifier("model.option.\(model.id)")
                 if raised && model.id != models.last?.id { Divider() }
             }
         }
