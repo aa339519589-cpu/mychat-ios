@@ -377,7 +377,8 @@ struct InteractiveArtifactView: UIViewRepresentable {
         private var pending: InteractiveArtifactView?
         private var ready = false
         private var applying = false
-        private var signature: String?
+        private var appliedColorScheme: ColorScheme?
+        private var appliedRawHTML: String?
 
         func update(_ parent: InteractiveArtifactView, in view: WKWebView) {
             pending = parent
@@ -391,10 +392,14 @@ struct InteractiveArtifactView: UIViewRepresentable {
 
         private func applyLatest(in view: WKWebView) {
             guard ready, !applying, let parent = pending else { return }
-            let next = "\(parent.colorScheme):\(parent.rawHTML)"
-            guard next != signature else { return }
+            // Return swipes update the surrounding SwiftUI view each frame. Compare
+            // these immutable inputs separately to avoid building another full-size
+            // HTML string just to confirm the document hasn't changed.
+            guard parent.colorScheme != appliedColorScheme || parent.rawHTML != appliedRawHTML else { return }
+            let nextColorScheme = parent.colorScheme
+            let nextRawHTML = parent.rawHTML
             applying = true
-            let dark = parent.colorScheme == .dark
+            let dark = nextColorScheme == .dark
             // This policy comes before the generated document. Any CSP supplied
             // by the document can only further restrict it, never loosen it.
             let document = """
@@ -402,14 +407,18 @@ struct InteractiveArtifactView: UIViewRepresentable {
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'">
             <style>:root{color-scheme:\(dark ? "dark" : "light")}html,body{margin:0;min-height:100%;background:transparent;color:\(dark ? "#f1f0ea" : "#20201e");font-family:-apple-system,BlinkMacSystemFont,sans-serif}*{box-sizing:border-box}img,svg,canvas{max-width:100%}</style>
-            </head><body>\(parent.rawHTML)</body></html>
+            </head><body>\(nextRawHTML)</body></html>
             """
             // Arguments, not string interpolation, cross into the trusted world.
             view.callAsyncJavaScript("document.getElementById('app').srcdoc = html;",
                                      arguments: ["html": document], in: nil, in: .defaultClient) { [weak self, weak view] result in
                 guard let self, let view else { return }
                 self.applying = false
-                if case .success = result { self.signature = next; self.applyLatest(in: view) }
+                if case .success = result {
+                    self.appliedColorScheme = nextColorScheme
+                    self.appliedRawHTML = nextRawHTML
+                    self.applyLatest(in: view)
+                }
             }
         }
 
