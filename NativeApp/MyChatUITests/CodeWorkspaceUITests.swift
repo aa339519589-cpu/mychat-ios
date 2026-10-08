@@ -147,7 +147,13 @@ final class CodeWorkspaceUITests: XCTestCase {
         XCTAssertTrue(title.waitForExistence(timeout: 10))
         XCTAssertTrue(send.waitForExistence(timeout: 10))
         XCTAssertFalse(app.buttons["停止 Code 任务"].exists)
-        XCTAssertFalse(app.buttons["编程会话操作"].exists)
+        let actions = app.buttons["打开编程操作"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        actions.tap()
+        XCTAssertTrue(app.staticTexts["新建对话"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["模型"].exists)
+        app.buttons["关闭"].firstMatch.tap()
+        XCTAssertTrue(title.exists)
         XCTAssertGreaterThanOrEqual(send.frame.width, 44)
         XCTAssertGreaterThanOrEqual(send.frame.height, 44)
 
