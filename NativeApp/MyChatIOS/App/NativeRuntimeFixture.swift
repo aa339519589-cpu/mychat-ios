@@ -374,6 +374,15 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             if let content = historicalTestContent {
                 return (200, [["id": "77700000-0000-4000-8000-000000000064", "role": "assistant", "content": content, "seq": 2, "created_at": date]])
             }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-summary-reference") {
+                let summary = "核对研究资料包并规划后续步骤。\n\n第二段摘要仍然保留，展开后可以继续阅读。"
+                let reply = "<document>\ntitle: 摘要样式测试\nfilename: summary.md\nsummary: 这是文档描述。\n\n# 测试正文\n\n文档内容保持独立。\n</document>\n\n保留摘要下方的回复正文。"
+                return (200, [
+                    ["id": "40000000-0000-4000-8000-000000000063", "role": "user", "content": "整理资料并生成文件。", "seq": 1, "created_at": date],
+                    ["id": "40000000-0000-4000-8000-000000000064", "role": "assistant", "content": reply,
+                     "thinking": ChatReasoningSummaryStorage.encode(summary) ?? "", "seq": 2, "created_at": date]
+                ].reversed().map { $0 })
+            }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-document-reference") {
                 var reply = "<document>\ntitle: 文章 慢下来\nfilename: 文章 慢下来.md\nsummary: 撰写一篇主题自选的文章。\n\n" + NativeRuntimeFixture.referenceArticle + "\n</document>\n\n我写了一篇关于\"慢下来\"的短文,放在上面的文件里了。想换主题或风格(比如更幽默、更正式),告诉我就行。"
                 if ProcessInfo.processInfo.arguments.contains("--ui-test-multiple-documents") {

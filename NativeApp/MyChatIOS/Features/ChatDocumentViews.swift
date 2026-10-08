@@ -211,24 +211,42 @@ struct DocumentThoughtRow: View {
     let reasoningSummary: String?
     let isGenerating: Bool
     @State private var detailPresented = false
+
+    private var detailText: String {
+        for candidate in [reasoningSummary, summary] {
+            if let text = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                return text
+            }
+        }
+        return ""
+    }
+
+    private var previewText: String {
+        detailText.split(whereSeparator: \.isNewline).first.map(String.init)
+            ?? (isGenerating ? "正在思考…" : "思考完成")
+    }
+
     var body: some View {
         Button { detailPresented = true } label: {
             HStack(spacing: 8) {
-                DotThinkingView(isGenerating: isGenerating, isSuspended: detailPresented)
-                    .frame(width: 32, height: 32)
-                Text(summary ?? (isGenerating ? "正在思考…" : "思考完成"))
-                    .font(MyChatTypography.caption).lineLimit(1)
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(MyChatSystemFont.appFont(size: 15))
+                    .accessibilityHidden(true)
+                Text(previewText)
+                    .font(MyChatTypography.appStatus).lineLimit(1)
                 Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 12))
             }
             .foregroundStyle(MyChatTheme.secondaryText)
             .frame(minHeight: 40, alignment: .leading).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityLabel("查看思考摘要").accessibilityIdentifier("document.thinking")
+        .buttonStyle(.plain).disabled(detailText.isEmpty)
+        .accessibilityLabel("查看思考摘要").accessibilityValue(previewText)
+        .accessibilityIdentifier("document.thinking")
         .sheet(isPresented: $detailPresented) {
             VStack(spacing: 0) {
                 ChatSheetHeader(title: "思考摘要")
                 ScrollView {
-                    MarkdownBody(reasoningSummary ?? summary ?? "", typography: .response)
+                    MarkdownBody(detailText, typography: .reasoningSummary)
                         .padding(20).frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityIdentifier("document.thinking.content")
                 }

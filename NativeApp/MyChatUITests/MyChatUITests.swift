@@ -1247,6 +1247,41 @@ final class MyChatUITests: XCTestCase {
         }
     }
 
+    @MainActor func testReasoningSummaryShowsProviderPreviewAndReopensInBothAppearances() {
+        let preview = "核对研究资料包并规划后续步骤。"
+        let continuation = "第二段摘要仍然保留，展开后可以继续阅读。"
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-summary-reference", "-AppleInterfaceStyle", appearance])
+            app.buttons["header.sidebar"].firstMatch.tap()
+            let conversation = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(conversation, timeout: 10))
+            conversation.tap()
+
+            let row = app.buttons["document.thinking"].firstMatch
+            XCTAssertTrue(waitForHittable(row, timeout: 10))
+            XCTAssertEqual(row.value as? String, preview,
+                "The collapsed row must show the public provider summary, not the document description")
+            XCTAssertGreaterThanOrEqual(row.frame.height, 40)
+            XCTAssertLessThanOrEqual(row.frame.maxX, app.frame.maxX - 8)
+            saveScreenshot(app, "reasoning-summary-preview-" + appearance)
+
+            for cycle in 0..<3 {
+                row.tap()
+                XCTAssertTrue(app.staticTexts["思考摘要"].firstMatch.waitForExistence(timeout: 5))
+                XCTAssertTrue(app.staticTexts[preview].firstMatch.waitForExistence(timeout: 5))
+                XCTAssertTrue(app.staticTexts[continuation].firstMatch.exists,
+                    "Opening the summary must preserve every paragraph")
+                saveScreenshot(app, "reasoning-summary-expanded-\(appearance)-\(cycle)")
+                let close = app.buttons["关闭"].firstMatch
+                XCTAssertTrue(waitForHittable(close, timeout: 5))
+                close.tap()
+                XCTAssertTrue(waitForHittable(row, timeout: 5))
+                XCTAssertEqual(row.value as? String, preview)
+            }
+            app.terminate()
+        }
+    }
+
     @MainActor func testDocumentCardFilesListPreviewDownloadAndRepeatedDismissal() {
         for appearance in ["Light", "Dark"] {
             let app = launch(extra: ["--ui-test-document-reference", "--ui-test-open-conversation", "-AppleInterfaceStyle", appearance])
