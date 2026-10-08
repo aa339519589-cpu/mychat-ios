@@ -1114,8 +1114,7 @@ private struct MessageBlock: View, Equatable {
                             // Provider reasoning is private and must never be rendered as chat copy.
                             EmptyView()
                         case let .reasoningSummary(summary):
-                            AssistantProgressRow(label: summary.split(whereSeparator: \.isNewline).first.map(String.init) ?? "思考摘要",
-                                summary: summary)
+                            AssistantProgressRow(label: "思考摘要", summary: summary)
                         case .search(_):
                             EmptyView()
                         case let .tool(activity):
@@ -1909,11 +1908,12 @@ private struct AssistantProgressRow: View {
     let label: String
     let summary: String?
     @State private var expanded = false
+    private var previewText: String { PublicReasoningSummaryPreview.text(summary) ?? label }
     var body: some View {
         Button { if summary != nil { expanded = true } } label: {
             HStack(spacing: 8) {
                 Image(systemName: "clock.arrow.circlepath").font(MyChatSystemFont.appFont(size: 15))
-                Text(label).font(MyChatTypography.appStatus).lineLimit(1)
+                Text(previewText).font(MyChatTypography.appStatus).lineLimit(1)
                 if summary != nil { Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 12)) }
             }
             .foregroundStyle(MyChatTheme.secondaryText)

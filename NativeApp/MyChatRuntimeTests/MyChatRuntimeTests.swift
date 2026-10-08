@@ -10,6 +10,43 @@ import CoreText
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
 
+    func testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence() {
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。"), "正在核对资料。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果"), "开始整理结果")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果并检查引用。"), "开始整理结果并检查引用。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("Checked the files. Now verifying the references"),
+            "Now verifying the references")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("核对已完成。开始整理结论。"), "开始整理结论。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("One step.\n\nLatest public update.\n  \n"),
+            "Latest public update.")
+
+        let job = UUID()
+        var entries: [ChatProcessEntry] = []
+        let deltas = ["正在核对资料。", "\n\n开始整理", "结果并检查引用。"]
+        let previews = ["正在核对资料。", "开始整理", "开始整理结果并检查引用。"]
+        for (index, delta) in deltas.enumerated() {
+            ChatProcessEntry.record(ChatJobEvent(jobID: job, sequence: index + 1,
+                payload: .reasoningSummaryDelta(delta)), into: &entries)
+            guard case let .reasoningSummary(summary)? = entries.last?.content else {
+                XCTFail("The actual public-summary event must produce a summary entry")
+                return
+            }
+            XCTAssertEqual(PublicReasoningSummaryPreview.text(summary), previews[index])
+        }
+        XCTAssertEqual(entries.count, 1, "Incremental previews must update the same process entry")
+    }
+
+    func testPublicSummaryPreviewKeepsOnlyExplicitPublicTextAndHandlesEmptyValues() {
+        XCTAssertNil(PublicReasoningSummaryPreview.text(nil))
+        XCTAssertNil(PublicReasoningSummaryPreview.text(" \n\t\n "))
+        XCTAssertNil(PublicReasoningSummaryPreview.text(ChatReasoningSummaryStorage.decode("private provider thinking")))
+        let summary = "核对资料并规划下一步。"
+        XCTAssertEqual(PublicReasoningSummaryPreview.text(
+            ChatReasoningSummaryStorage.decode(ChatReasoningSummaryStorage.encode(summary))), summary)
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("Checking version 1.2 and example.com"),
+            "Checking version 1.2 and example.com")
+    }
+
     func testHapticSemanticsRespectPreferenceAndReducedMotion() {
         let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
         for event in events {
