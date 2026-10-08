@@ -76,6 +76,12 @@ import HealthKit
         Self.reads.removeValue(forKey: ownerID)?.task.cancel()
     }
 
+    /// Cancel the one in-flight read for this account without touching its opt-in preference or another account's cache.
+    static func cancelPendingModelContextRead(ownerID: String) {
+        guard !ownerID.isEmpty else { return }
+        Self.reads.removeValue(forKey: ownerID)?.task.cancel()
+    }
+
     func disconnect() {
         authorizationWasRequested = false
         setEnabled(false)

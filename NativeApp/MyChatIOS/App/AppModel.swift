@@ -613,6 +613,9 @@ final class AppModel: ObservableObject {
     }
 
     func acceptAuthentication(_ session: AuthSession) {
+        if let previousOwnerID = authSession?.user.id, previousOwnerID != session.user.id {
+            HealthConnector.cancelPendingModelContextRead(ownerID: previousOwnerID)
+        }
         if authSession?.user.id != session.user.id {
             accountGeneration = UUID()
             memoryReloadToken = nil
@@ -695,6 +698,9 @@ final class AppModel: ObservableObject {
         memoryReloadToken = nil
         memoryMutationRevision &+= 1
         let recoveryOwnerID = authSession?.user.id
+        if let recoveryOwnerID {
+            HealthConnector.cancelPendingModelContextRead(ownerID: recoveryOwnerID)
+        }
         let abandonedPlanIDs = Array(pendingPlanRecoveryCommands.keys)
         pendingPlanRecoveryCommands = [:]
         planTranscriptCheckpointTasks.values.forEach { $0.cancel() }
@@ -3271,6 +3277,13 @@ final class AppModel: ObservableObject {
         generationTasks[conversationID] = task
     }
 
+    private func loadHealthContext(ownerID: String, enabled: Bool) async -> (text: String?, readyAt: Double) {
+        let text: String?
+        if enabled { text = await HealthConnector.modelContext(ownerID: ownerID) }
+        else { text = nil }
+        return (text, ProcessInfo.processInfo.systemUptime)
+    }
+
     private func run(
         command: ChatAppendCommand,
         recovery: ChatGenerationRecovery? = nil,
@@ -3324,8 +3337,14 @@ final class AppModel: ObservableObject {
                 admission = recovery.admission
             } else {
                 var requestCommand = command
+                let healthContextReadyAt: Double
                 if requestCommand.healthContext == nil {
-                    requestCommand.healthContext = await HealthConnector.modelContext(ownerID: session.user.id)
+                    let health = await loadHealthContext(ownerID: session.user.id,
+                        enabled: ConnectorEnabledPreference.value(kind: "health", ownerID: session.user.id))
+                    requestCommand.healthContext = health.text
+                    healthContextReadyAt = health.readyAt
+                } else {
+                    healthContextReadyAt = ProcessInfo.processInfo.systemUptime
                 }
                 if !ConnectorEnabledPreference.value(kind: "health", ownerID: session.user.id) {
                     requestCommand.healthContext = nil
@@ -3333,6 +3352,8 @@ final class AppModel: ObservableObject {
                 try Task.checkCancellation()
                 guard generationIDs[conversationID] == command.generationID,
                       authSession?.user.id == session.user.id else { return }
+                ChatGenerationDiagnostics.mark(command.generationID, stage: .healthContextReady,
+                    receivedAt: healthContextReadyAt)
                 pendingCommands[conversationID] = requestCommand
                 ChatGenerationDiagnostics.mark(command.generationID, stage: .requestStarted)
                 let connection = try await chatClient.openAppendTurn(requestCommand, accessToken: session.accessToken)
@@ -3551,6 +3572,11 @@ final class AppModel: ObservableObject {
                 myChatSession = try await generationSession()
             }
             ChatGenerationDiagnostics.mark(command.generationID, stage: .authenticationReady)
+            guard generationIDs[conversationID] == command.generationID,
+                  authSession?.user.id == myChatSession.user.id else { return }
+            let healthEnabled = !isPrivate
+                && ConnectorEnabledPreference.value(kind: "health", ownerID: myChatSession.user.id)
+            async let healthSnapshot = loadHealthContext(ownerID: myChatSession.user.id, enabled: healthEnabled)
             let prepared = try await chatGPTPlanHistoryClient.prepareContext(
                 command: command,
                 modelName: model.displayName,
@@ -3584,12 +3610,20 @@ final class AppModel: ObservableObject {
                 searchesByMessageID[command.assistantMessageID, default: []].append(search)
             }
 
+            let loadedHealth = await healthSnapshot
+            try Task.checkCancellation()
+            guard generationIDs[conversationID] == command.generationID,
+                  authSession?.user.id == myChatSession.user.id else { return }
+            let healthContext = ConnectorEnabledPreference.value(kind: "health", ownerID: myChatSession.user.id)
+                ? loadedHealth.text : nil
+            ChatGenerationDiagnostics.mark(command.generationID, stage: .healthContextReady,
+                receivedAt: loadedHealth.readyAt)
             ChatGenerationDiagnostics.mark(command.generationID, stage: .requestStarted)
             let stream = try await chatGPTPlanProvider.streamResponse(
                 model: model.slug,
                 messages: context,
                 attachments: command.attachments,
-                systemPrompt: [prepared.systemPrompt, isPrivate ? nil : await HealthConnector.modelContext(ownerID: myChatSession.user.id)]
+                systemPrompt: [prepared.systemPrompt, healthContext]
                     .compactMap { $0 }.joined(separator: "\n\n"),
                 reasoningEffort: command.reasoningEffort?.rawValue ?? "none",
                 tools: prepared.tools,
@@ -3873,6 +3907,7 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             guard generationIDs[conversationID] == command.generationID else { return }
             ChatGenerationDiagnostics.mark(command.generationID, stage: .authenticationReady)
+            ChatGenerationDiagnostics.mark(command.generationID, stage: .healthContextReady)
             let privateRequest = try chatClient.privateStreamRequest(command: command, messages: context)
             ChatGenerationDiagnostics.mark(command.generationID, stage: .requestStarted)
             try Task.checkCancellation()
@@ -4890,7 +4925,7 @@ final class SystemPermissionsService: NSObject, ObservableObject, CLLocationMana
 
 /// Numeric lifecycle evidence only: no prompts, replies, tokens or keys.
 @MainActor enum ChatGenerationDiagnostics {
-    enum Stage: String { case sent, authenticationReady, requestStarted, admitted, firstEvent, firstText, firstMarkdownPublished, firstGlyphDrawn, firstReasoningSummary,
+    enum Stage: String { case sent, authenticationReady, healthContextReady, requestStarted, admitted, firstEvent, firstText, firstMarkdownPublished, firstGlyphDrawn, firstReasoningSummary,
         cancelRequested, localStop, cancelAccepted, cancelComplete, cancelFailed, completed }
     struct Record: Codable, Sendable {
         let generationID: UUID

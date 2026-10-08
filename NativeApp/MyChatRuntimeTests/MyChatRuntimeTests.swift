@@ -883,23 +883,29 @@ import CoreText
         ChatGenerationDiagnostics.begin(command)
         let start = ChatGenerationDiagnostics.records[command.generationID]!.monotonicStart
 
-        ChatGenerationDiagnostics.mark(command.generationID, stage: .firstText, receivedAt: start + 0.010)
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .authenticationReady, receivedAt: start + 0.005)
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .healthContextReady, receivedAt: start + 0.010)
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .requestStarted, receivedAt: start + 0.015)
+        ChatGenerationDiagnostics.mark(command.generationID, stage: .firstText, receivedAt: start + 0.020)
         ChatGenerationDiagnostics.markFirstMarkdownPublished(
-            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.020
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.030
         )
         ChatGenerationDiagnostics.markFirstGlyphDrawn(
-            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.030
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.040
         )
         // A callback delivered out of order must retain the actual earliest draw.
         ChatGenerationDiagnostics.markFirstGlyphDrawn(
-            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.025
+            assistantMessageID: command.assistantMessageID, receivedAt: start + 0.035
         )
 
         let record = ChatGenerationDiagnostics.records[command.generationID]!
         XCTAssertEqual(record.assistantMessageID, command.assistantMessageID)
-        XCTAssertEqual(record.milliseconds["firstText"] ?? -1, 10, accuracy: 0.02)
-        XCTAssertEqual(record.milliseconds["firstMarkdownPublished"] ?? -1, 20, accuracy: 0.02)
-        XCTAssertEqual(record.milliseconds["firstGlyphDrawn"] ?? -1, 25, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["authenticationReady"] ?? -1, 5, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["healthContextReady"] ?? -1, 10, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["requestStarted"] ?? -1, 15, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstText"] ?? -1, 20, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstMarkdownPublished"] ?? -1, 30, accuracy: 0.02)
+        XCTAssertEqual(record.milliseconds["firstGlyphDrawn"] ?? -1, 35, accuracy: 0.02)
     }
 
     func testConversationNavigationAnchorsWithoutInheritingThePreviousGenerationAnimation() async throws {
