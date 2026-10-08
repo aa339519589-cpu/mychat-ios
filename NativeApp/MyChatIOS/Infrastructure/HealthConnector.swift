@@ -170,8 +170,9 @@ import HealthKit
             } else { summary = details.first ?? "" }
             sections.append(.init(name: HealthContextText.name(identifier), summary: summary, details: details))
         }
-        if #available(iOS 26, *), let medication = try? await medications(), !medication.isEmpty {
-            sections.append(.init(name: "用药列表", summary: medication.joined(separator: "\n"), details: []))
+        if #available(iOS 26, *), let medication = try? await medications(),
+           let section = HealthContextText.medicationSection(medication) {
+            sections.append(section)
         }
         let authorizedDocuments = records.values.flatMap { $0 }.compactMap { $0 as? HKDocumentSample }
         let documents = authorizedDocuments.compactMap { Self.documentRecords[ownerID]?[$0.uuid] }
@@ -403,7 +404,16 @@ struct HealthContextSection {
 }
 
 enum HealthContextText {
+    // UTF-16 code units, not model tokens. The provider's total token budget
+    // remains a separate constraint; this bound cannot promise unlimited history.
     static let maximumCharacters = 128_000
+    static func medicationSection(_ records: [String]) -> HealthContextSection? {
+        guard !records.isEmpty else { return nil }
+        // Each medication remains an indivisible detail. The compact summary
+        // must not absorb the list and silently lose records to its small quota.
+        return HealthContextSection(name: "用药列表", summary: "本次共读取\(records.count)条用药记录。", details: records)
+    }
+
     static func name(_ identifier: String) -> String {
         let labels = ["HKCategoryTypeIdentifierSleepAnalysis": "睡眠",
             "HKQuantityTypeIdentifierHeartRate": "心率", "HKQuantityTypeIdentifierRestingHeartRate": "静息心率",
@@ -533,14 +543,19 @@ enum HealthContextText {
         let summaryLimit = min(4_096, (maximumCharacters / 2) / max(1, sections.count))
         lines.append(contentsOf: sections.map {
             let summary = $0.summary.utf16.count <= summaryLimit ? $0.summary
-                : String(decoding: $0.summary.utf16.prefix(max(0, summaryLimit - 20)), as: UTF16.self) + "…（汇总过长，详情见记录）"
+                : String(decoding: $0.summary.utf16.prefix(max(0, summaryLimit - 20)), as: UTF16.self) + "…（汇总已截短）"
             return "【\($0.name)】\(summary)"
         })
         var size = lines.joined(separator: "\n").utf16.count
         let suffix = "\n部分明细超过本次上下文容量；类型汇总保留，明细不是全部历史。"
         var omitted = false
         for section in sections {
-            for detail in section.details where detail != section.summary || section.summary.utf16.count > summaryLimit {
+            // A summary-only section still represents data. If its preview was
+            // shortened, attempt the complete record under the same total budget
+            // and report omission if it cannot fit. Do not silently discard it.
+            let details = section.details.isEmpty && section.summary.utf16.count > summaryLimit
+                ? [section.summary] : section.details
+            for detail in details where detail != section.summary || section.summary.utf16.count > summaryLimit {
                 let line = "【\(section.name)明细】\(detail)"
                 if size + line.utf16.count + suffix.utf16.count + 1 <= maximumCharacters {
                     lines.append(line); size += line.utf16.count + 1

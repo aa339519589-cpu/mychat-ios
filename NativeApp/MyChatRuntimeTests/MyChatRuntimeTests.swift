@@ -331,6 +331,42 @@ import Combine
         XCTAssertLessThanOrEqual(long.utf16.count, HealthContextText.maximumCharacters)
     }
 
+    func testHealthMedicationDetailsSurviveSmallPerTypeUTF16SummaryQuota() throws {
+        let records = (1...20).map { "SYNTHETIC_MED_\($0); " + String(repeating: "x", count: 100) }
+        let medication = try XCTUnwrap(HealthContextText.medicationSection(records))
+        XCTAssertEqual(medication.details, records)
+        let otherTypes = (0..<209).map {
+            HealthContextSection(name: "syntheticType\($0)", summary: "available", details: [])
+        }
+        let text = try XCTUnwrap(HealthContextText.make(sections: otherTypes + [medication], date: Date()))
+        for record in records { XCTAssertTrue(text.contains(record), "A medication must not vanish into the summary quota") }
+        for index in 0..<209 { XCTAssertTrue(text.contains("【syntheticType\(index)】available")) }
+        XCTAssertLessThanOrEqual(text.utf16.count, HealthContextText.maximumCharacters)
+        XCTAssertFalse(text.contains("部分明细超过"))
+        XCTAssertNil(HealthContextText.medicationSection([]))
+    }
+
+    func testHealthMedicationOverflowReportsRealOmissionWithinUTF16Budget() throws {
+        let records = (1...2_000).map { "SYNTHETIC_MED_\($0); " + String(repeating: "x", count: 250) }
+        let medication = try XCTUnwrap(HealthContextText.medicationSection(records))
+        let text = try XCTUnwrap(HealthContextText.make(sections: [medication], date: Date()))
+        XCTAssertTrue(text.contains("本次共读取2000条用药记录"))
+        XCTAssertTrue(text.contains(records[0]))
+        XCTAssertFalse(text.contains(records[records.count - 1]))
+        XCTAssertTrue(text.contains("部分明细超过本次上下文容量"))
+        XCTAssertLessThanOrEqual(text.utf16.count, HealthContextText.maximumCharacters)
+    }
+
+    func testHealthSummaryOnlyUTF16OverflowDoesNotPromiseMissingDetails() throws {
+        let text = try XCTUnwrap(HealthContextText.make(sections: [
+            .init(name: "syntheticLargeRecord", summary: String(repeating: "x", count: 200_000), details: [])
+        ], date: Date()))
+        XCTAssertTrue(text.contains("汇总已截短"))
+        XCTAssertTrue(text.contains("部分明细超过本次上下文容量"))
+        XCTAssertFalse(text.contains("详情见记录"))
+        XCTAssertLessThanOrEqual(text.utf16.count, HealthContextText.maximumCharacters)
+    }
+
     func testHealthPercentAndHeartRateUseReadableUnits() {
         let date = Date(timeIntervalSince1970: 1_000)
         let oxygen = HKQuantitySample(type: HKQuantityType(.oxygenSaturation), quantity: HKQuantity(unit: .percent(), doubleValue: 0.97), start: date, end: date)
