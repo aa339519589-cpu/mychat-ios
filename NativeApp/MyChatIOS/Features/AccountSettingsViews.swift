@@ -767,9 +767,8 @@ struct CustomModelsSettingsView: View {
 struct MCPConnectorsSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
     @StateObject private var authenticator = MCPWebAuthenticator()
-    @State private var editorSelection: ConnectorEditorSelection?
-    @State private var directoryVisible = false
-    @State private var selectedEntry: MCPDirectoryEntry?
+    @State private var editorPresented = false
+    @State private var directoryPresented = false
     @State private var connectorToDelete: MCPConnectorRecord?
     @State private var busyConnectorIDs: Set<String> = []
     @State private var operationError: String?
@@ -814,19 +813,24 @@ struct MCPConnectorsSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("浏览连接器", systemImage: "square.grid.2x2") { selectedEntry = nil; directoryVisible = true }
-                    Button("添加自定义连接器", systemImage: "plus") { editorSelection = ConnectorEditorSelection(entry: nil) }
+                    Button("浏览连接器", systemImage: "square.grid.2x2") { directoryPresented = true }
+                    Button("添加自定义连接器", systemImage: "plus") { editorPresented = true }
                 } label: { Image(systemName: "plus") }.accessibilityLabel("添加连接器")
             }
         }
         .task { await appModel.reloadConnectors() }
         .refreshable { await appModel.reloadConnectors() }
-        .sheet(item: $editorSelection) { selection in
-            MCPConnectorEditor(entry: selection.entry)
+        .navigationDestination(isPresented: $editorPresented) {
+            MCPConnectorEditor(entry: nil, onConnected: { editorPresented = false })
                 .environmentObject(appModel)
         }
-        .sheet(isPresented: $directoryVisible, onDismiss: { if let selectedEntry { editorSelection = ConnectorEditorSelection(entry: selectedEntry) } }) {
-            MCPConnectorDirectoryView { selectedEntry = $0 }.environmentObject(appModel)
+        .navigationDestination(isPresented: $directoryPresented) {
+            MCPConnectorDirectoryView(
+                opensEditorOnSelection: true,
+                onSelect: { _ in },
+                onConnected: { directoryPresented = false }
+            )
+            .environmentObject(appModel)
         }
         .confirmationDialog("断开此连接器？", isPresented: Binding(
             get: { connectorToDelete != nil },
@@ -944,16 +948,11 @@ struct MCPConnectorsSettingsView: View {
     }
 }
 
-private struct ConnectorEditorSelection: Identifiable {
-    let entry: MCPDirectoryEntry?
-    var id: String { entry?.id ?? "custom" }
-}
-
 private struct MCPConnectorEditor: View {
     @EnvironmentObject private var appModel: AppModel
-    @Environment(\.dismiss) private var dismiss
     @StateObject private var authenticator = MCPWebAuthenticator()
-    @State private var directoryVisible = false
+    @State private var directoryPresented = false
+    private let onConnected: () -> Void
     @State private var authMode = "oauth"
     @State private var clientID = ""
     @State private var clientSecret = ""
@@ -964,95 +963,91 @@ private struct MCPConnectorEditor: View {
     @State private var saving = false
     @State private var errorMessage: String?
 
-    init(entry: MCPDirectoryEntry? = nil) {
+    init(entry: MCPDirectoryEntry? = nil, onConnected: @escaping () -> Void) {
+        self.onConnected = onConnected
         _name = State(initialValue: entry?.name ?? "")
         _serverURL = State(initialValue: entry?.serverUrl ?? "")
         _authMode = State(initialValue: entry?.authType ?? "oauth")
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Button { directoryVisible = true } label: {
-                        Label("常用服务", systemImage: "square.grid.2x2")
-                            .font(MyChatTypography.button).frame(minHeight: 44)
-                    }
-                    .accessibilityIdentifier("connector.directory")
-
-                    TextField("名称", text: $name)
-                        .textContentType(.name)
-                        .settingsField()
-                        .accessibilityIdentifier("connector.name")
-
-                    TextField("MCP 服务地址", text: $serverURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .settingsField()
-                        .accessibilityIdentifier("connector.server-url")
-                        .disabled(pendingAuthorization != nil)
-
-                    Picker("认证", selection: $authMode) {
-                        Text("OAuth").tag("oauth")
-                        Text("令牌").tag("bearer")
-                        Text("无").tag("none")
-                    }.pickerStyle(.segmented).disabled(pendingAuthorization != nil)
-                    if authMode == "bearer" {
-                        SecureField("访问令牌", text: $accessToken)
-                            .textContentType(.password).textInputAutocapitalization(.never)
-                            .autocorrectionDisabled().settingsField()
-                            .accessibilityIdentifier("connector.access-token")
-                    } else if authMode == "oauth" {
-                        DisclosureGroup("OAuth 客户端") {
-                            TextField("客户端 ID", text: $clientID)
-                                .textInputAutocapitalization(.never).autocorrectionDisabled().settingsField()
-                            SecureField("客户端密钥", text: $clientSecret)
-                                .textInputAutocapitalization(.never).autocorrectionDisabled().settingsField()
-                            Text("回调地址")
-                                .font(MyChatTypography.caption)
-                            Text("https://mychat-nm6x.onrender.com/api/connectors/oauth/callback")
-                                .font(MyChatTypography.caption).textSelection(.enabled)
-                        }
-                    }
-
-                    SettingsErrorText(message: errorMessage)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Button { directoryPresented = true } label: {
+                    Label("常用服务", systemImage: "square.grid.2x2")
+                        .font(MyChatTypography.button).frame(minHeight: 44)
                 }
-                .padding(20)
+                .accessibilityIdentifier("connector.directory")
+
+                TextField("名称", text: $name)
+                    .textContentType(.name)
+                    .settingsField()
+                    .accessibilityIdentifier("connector.name")
+
+                TextField("MCP 服务地址", text: $serverURL)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .settingsField()
+                    .accessibilityIdentifier("connector.server-url")
+                    .disabled(pendingAuthorization != nil)
+
+                Picker("认证", selection: $authMode) {
+                    Text("OAuth").tag("oauth")
+                    Text("令牌").tag("bearer")
+                    Text("无").tag("none")
+                }.pickerStyle(.segmented).disabled(pendingAuthorization != nil)
+                if authMode == "bearer" {
+                    SecureField("访问令牌", text: $accessToken)
+                        .textContentType(.password).textInputAutocapitalization(.never)
+                        .autocorrectionDisabled().settingsField()
+                        .accessibilityIdentifier("connector.access-token")
+                } else if authMode == "oauth" {
+                    DisclosureGroup("OAuth 客户端") {
+                        TextField("客户端 ID", text: $clientID)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().settingsField()
+                        SecureField("客户端密钥", text: $clientSecret)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().settingsField()
+                        Text("回调地址")
+                            .font(MyChatTypography.caption)
+                        Text("https://mychat-nm6x.onrender.com/api/connectors/oauth/callback")
+                            .font(MyChatTypography.caption).textSelection(.enabled)
+                    }
+                }
+
+                SettingsErrorText(message: errorMessage)
             }
-            .foregroundStyle(MyChatTheme.text)
-            .background(MyChatTheme.canvas)
-            .navigationTitle("连接服务")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { dismiss() } label: { Image(systemName: "xmark") }
-                        .buttonStyle(MyChatIconButtonStyle())
-                        .accessibilityLabel("关闭")
-                        .disabled(saving)
+            .padding(20)
+        }
+        .foregroundStyle(MyChatTheme.text)
+        .background(MyChatTheme.canvas)
+        .navigationTitle("连接服务")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(action: save) {
+                    if saving { ProgressView().controlSize(.small) }
+                    else { Text("连接") }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(action: save) {
-                        if saving { ProgressView().controlSize(.small) }
-                        else { Text("连接") }
-                    }
-                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .accessibilityIdentifier("connector.connect")
-                }
+                .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("connector.connect")
             }
         }
-        .sheet(isPresented: $directoryVisible) {
-            MCPConnectorDirectoryView { entry in
-                name = entry.name
-                serverURL = entry.serverUrl
-                authMode = entry.authType
-                pendingAuthorization = nil
-            }.environmentObject(appModel)
+        .navigationDestination(isPresented: $directoryPresented) {
+            MCPConnectorDirectoryView(
+                opensEditorOnSelection: false,
+                onSelect: { entry in
+                    name = entry.name
+                    serverURL = entry.serverUrl
+                    authMode = entry.authType
+                    pendingAuthorization = nil
+                    directoryPresented = false
+                },
+                onConnected: onConnected
+            )
+            .environmentObject(appModel)
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(30)
     }
 
     private func save() {
@@ -1073,7 +1068,7 @@ private struct MCPConnectorEditor: View {
                     _ = try await appModel.createConnector(name: name, serverURL: serverURL,
                         accessTokenValue: authMode == "bearer" ? accessToken : nil)
                 }
-                dismiss()
+                onConnected()
             } catch {
                 errorMessage = error.localizedDescription
                 saving = false
@@ -1116,8 +1111,11 @@ private struct MCPConnectorEditor: View {
 
 private struct MCPConnectorDirectoryView: View {
     @EnvironmentObject private var appModel: AppModel
-    @Environment(\.dismiss) private var dismiss
-    let select: (MCPDirectoryEntry) -> Void
+    let opensEditorOnSelection: Bool
+    let onSelect: (MCPDirectoryEntry) -> Void
+    let onConnected: () -> Void
+    @State private var selectedEntry: MCPDirectoryEntry?
+    @State private var editorPresented = false
     @State private var query = ""
     @State private var entries: [MCPDirectoryEntry] = []
     @State private var nextCursor: String?
@@ -1126,53 +1124,66 @@ private struct MCPConnectorDirectoryView: View {
     @State private var requestID = UUID()
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(entries) { entry in
-                        Button { select(entry); dismiss() } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 10) {
-                                    Image(systemName: "square.grid.2x2").font(MyChatSystemFont.appFont(size: 16))
-                                        .frame(width: 28, height: 28).background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 7))
-                                    Text(entry.name).font(MyChatTypography.cardTitle)
-                                    Spacer(minLength: 6)
-                                    Text("连接").font(MyChatSystemFont.appFont(size: 13, weight: .medium))
-                                        .foregroundStyle(MyChatTheme.canvas).padding(.horizontal, 14).frame(height: 28)
-                                        .background(MyChatTheme.text, in: Capsule())
-                                }
-                                Text(entry.description).font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
-                                    .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                            }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 18))
-                                .contentShape(Rectangle())
-                        }.buttonStyle(.plain)
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(entries) { entry in
+                    Button {
+                        if opensEditorOnSelection {
+                            selectedEntry = entry
+                            editorPresented = true
+                        } else {
+                            onSelect(entry)
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 10) {
+                                Image(systemName: "square.grid.2x2").font(MyChatSystemFont.appFont(size: 16))
+                                    .frame(width: 28, height: 28).background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 7))
+                                Text(entry.name).font(MyChatTypography.cardTitle)
+                                Spacer(minLength: 6)
+                                Text("连接").font(MyChatSystemFont.appFont(size: 13, weight: .medium))
+                                    .foregroundStyle(MyChatTheme.canvas).padding(.horizontal, 14).frame(height: 28)
+                                    .background(MyChatTheme.text, in: Capsule())
+                            }
+                            Text(entry.description).font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
+                                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 18))
+                            .contentShape(Rectangle())
                     }
-                    if loading { ProgressView().padding() }
-                    if let error { Text(error).foregroundStyle(.red); Button("重试") { Task { await load(reset: true) } } }
-                    if entries.isEmpty && !loading && error == nil { Text("未找到可直接连接的服务").foregroundStyle(MyChatTheme.secondaryText).padding(.vertical, 50) }
-                    if nextCursor != nil { Button("加载更多") { Task { await load(reset: false) } }.disabled(loading) }
-                }.padding(.horizontal, 16).padding(.top, 12)
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("connector.catalog.\(entry.id)")
+                }
+                if loading { ProgressView().padding() }
+                if let error { Text(error).foregroundStyle(.red); Button("重试") { Task { await load(reset: true) } } }
+                if entries.isEmpty && !loading && error == nil { Text("未找到可直接连接的服务").foregroundStyle(MyChatTheme.secondaryText).padding(.vertical, 50) }
+                if nextCursor != nil { Button("加载更多") { Task { await load(reset: false) } }.disabled(loading) }
+            }.padding(.horizontal, 16).padding(.top, 12)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                TextField("搜索连接器", text: $query)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("connector.directory.search")
+            }.font(MyChatTypography.navigation).foregroundStyle(MyChatTheme.secondaryText)
+                .padding(.horizontal, 14).frame(height: 44)
+                .modifier(MyChatFloatingSurface(shape: Capsule(), isInteractive: true))
+                .padding(.horizontal, 16).padding(.vertical, 8)
+        }
+        .background(MyChatTheme.canvas).foregroundStyle(MyChatTheme.text)
+        .navigationTitle("连接器").navigationBarTitleDisplayMode(.inline)
+        .task(id: query) {
+            do { try await Task.sleep(for: .milliseconds(300)); await load(reset: true) }
+            catch { }
+        }
+        .tint(MyChatTheme.accent)
+        .navigationDestination(isPresented: $editorPresented) {
+            if let selectedEntry {
+                MCPConnectorEditor(entry: selectedEntry, onConnected: onConnected)
+                    .environmentObject(appModel)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                    TextField("搜索连接器", text: $query).textInputAutocapitalization(.never).autocorrectionDisabled()
-                }.font(MyChatTypography.navigation).foregroundStyle(MyChatTheme.secondaryText)
-                    .padding(.horizontal, 14).frame(height: 44)
-                    .modifier(MyChatFloatingSurface(shape: Capsule(), isInteractive: true))
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-            }
-            .background(MyChatTheme.canvas).foregroundStyle(MyChatTheme.text)
-            .navigationTitle("连接器").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) {
-                Button { dismiss() } label: { Image(systemName: "xmark") }.accessibilityLabel("取消")
-            } }
-            .task(id: query) {
-                do { try await Task.sleep(for: .milliseconds(300)); await load(reset: true) }
-                catch { }
-            }
-        }.tint(MyChatTheme.accent)
+        }
     }
 
     @MainActor private func load(reset: Bool) async {
