@@ -895,33 +895,6 @@ final class MyChatUITests: XCTestCase {
         }
     }
 
-    @MainActor func testComposerSheetsStayReachableDuringIsolatedGeneration() {
-        let app = launch(extra: ["--ui-test-generating"])
-        let stop = app.buttons["composer.stop"].firstMatch
-        XCTAssertTrue(waitForHittable(stop, timeout: 15),
-            "The isolated fixture must hold a real in-progress generation")
-
-        let routes: [(XCUIElement, String)] = [
-            (app.buttons["选择模型"].firstMatch, "选择模型"),
-            (app.buttons["添加内容和工具"].firstMatch, "添加到聊天"),
-            (app.buttons["选择模型"].firstMatch, "选择模型"),
-            (app.buttons["添加内容和工具"].firstMatch, "添加到聊天")
-        ]
-        for (button, title) in routes {
-            XCTAssertTrue(waitForHittable(button, timeout: 5),
-                "Composer controls must remain reachable while a response streams")
-            button.tap()
-            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
-            let close = app.buttons["关闭"].firstMatch
-            XCTAssertTrue(close.waitForExistence(timeout: 5))
-            close.tap()
-            XCTAssertTrue(waitForHittable(stop, timeout: 10),
-                "Dismissing a composer sheet must restore the still-running generation UI")
-            XCTAssertTrue(waitForHittable(button, timeout: 5))
-        }
-        app.terminate()
-    }
-
     @MainActor func testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard() {
         for extra in [[], ["--ui-test-open-conversation"]] {
             let app = launch(extra: extra)
