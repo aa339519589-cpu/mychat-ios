@@ -274,19 +274,35 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/mobile/config":
             return (200, ["supabaseUrl": "https://isolated.mychat.invalid", "supabaseAnonKey": "isolated-anon"])
         case "/api/models":
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-claude-models") {
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("--ui-test-claude-models") || arguments.contains("--ui-test-long-model-names") {
                 let routes = [("anthropic/claude-fable-5-1", "Claude Fable 5.1"),
                     ("anthropic/claude-opus-5-5", "Claude Opus 5.5"),
                     ("anthropic/claude-sonnet-5-5", "Claude Sonnet 5.5"),
                     ("anthropic/claude-sonnet-5", "Claude Sonnet 5"),
                     ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
                     ("anthropic/claude-haiku-4.5", "Claude Haiku 4.5")]
-                let models: [[String: Any]] = routes.map { id, name in
+                var models: [[String: Any]] = routes.map { id, name in
                     ["id": id, "name": name, "provider": "Anthropic", "access": "quota", "outputKind": "chat",
                      "promptPrice": 0, "completionPrice": 0, "contextLength": 100000,
                      "vision": true, "tools": true, "flagship": false,
                      "reasoningEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
                      "defaultReasoningEffort": "medium", "reasoningMandatory": false]
+                }
+                if arguments.contains("--ui-test-long-model-names") {
+                    let longModels: [(String, String, String)] = [
+                        ("fixture-long-english", "Experimental Multilingual Reasoning Model for Very Long Context and Advanced Tool Use",
+                         "Provider with a deliberately long English description to verify the model row layout"),
+                        ("fixture-long-chinese", "面向复杂知识工作和超长上下文的多语言研究与逻辑推理模型",
+                         "用于验证中文模型说明换行与勾选列对齐的服务提供方")
+                    ]
+                    models.append(contentsOf: longModels.map { id, name, provider in
+                        ["id": id, "name": name, "provider": provider, "access": "quota", "outputKind": "chat",
+                         "promptPrice": 0, "completionPrice": 0, "contextLength": 100000,
+                         "vision": true, "tools": false, "flagship": false,
+                         "reasoningEfforts": ["none", "low", "medium"], "defaultReasoningEffort": "medium",
+                         "reasoningMandatory": false]
+                    })
                 }
                 return (200, ["schemaVersion": 1, "configured": true, "owner": false, "trialLimit": 0, "models": models])
             }
