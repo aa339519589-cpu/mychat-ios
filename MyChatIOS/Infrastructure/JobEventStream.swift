@@ -67,6 +67,32 @@ struct JobEventStream: ChatEventStreaming {
         }
     }
 
+    /// Continue the admission POST immediately, with durable GET replay only
+    /// when that connection closes. No second authentication round trip.
+    func admittedEvents(bytes: URLSession.AsyncBytes, admission: ChatAdmission,
+                        accessToken: String) -> AsyncThrowingStream<ChatJobEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                defer { bytes.task.cancel() }
+                do {
+                    let state = StreamState(sequence: 0)
+                    do {
+                        if try await consumeBytes(bytes, admission: admission, state: state, continuation: continuation) {
+                            continuation.finish(); return
+                        }
+                    } catch is CancellationError { throw CancellationError() }
+                    catch let error as ChatTransportError where !error.isRetryable { throw error }
+                    catch { try Task.checkCancellation() }
+                    try await consume(admission: admission, accessToken: accessToken,
+                        fromSequence: state.sequence, continuation: continuation)
+                    continuation.finish()
+                } catch is CancellationError { continuation.finish() }
+                catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { @Sendable _ in bytes.task.cancel(); task.cancel() }
+        }
+    }
+
     @MainActor func events(
         admission: CodeAdmission,
         accessToken: String,
@@ -185,6 +211,7 @@ struct JobEventStream: ChatEventStreaming {
         request.timeoutInterval = maximumDuration
         request.httpBody = privateRequest.body
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -239,6 +266,7 @@ struct JobEventStream: ChatEventStreaming {
         request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         request.timeoutInterval = maximumDuration
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("mychat-ios/1.0", forHTTPHeaderField: "X-Client-Info")
@@ -260,6 +288,12 @@ struct JobEventStream: ChatEventStreaming {
             throw ChatTransportError.invalidResponse
         }
 
+        return try await consumeBytes(bytes, admission: admission, state: state, continuation: continuation)
+    }
+
+    private func consumeBytes(_ bytes: URLSession.AsyncBytes, admission: ChatAdmission,
+                              state: StreamState,
+                              continuation: AsyncThrowingStream<ChatJobEvent, Error>.Continuation) async throws -> Bool {
         var parser = SSEByteParser()
         for try await byte in bytes {
             guard let frame = try parser.consume(byte: byte) else { continue }
@@ -358,6 +392,11 @@ struct JobEventStream: ChatEventStreaming {
                 sequence: header.seq,
                 payload: .thinkingDelta(payload.thinking)
             ))
+        case "reasoning.summary.delta":
+            let payload: ReasoningSummaryPayload = try payload(from: data, kind: header.kind)
+            state.reasoningSummary += payload.reasoningSummary
+            continuation.yield(ChatJobEvent(jobID: jobID, sequence: header.seq,
+                payload: .reasoningSummaryDelta(payload.reasoningSummary)))
         case "tool.search":
             let payload: ToolSearchPayload = try payload(from: data, kind: header.kind)
             continuation.yield(ChatJobEvent(
@@ -417,10 +456,11 @@ struct JobEventStream: ChatEventStreaming {
             let payload: SnapshotPayload = try payload(from: data, kind: header.kind)
             if let content = payload.content { state.content = content }
             if let thinking = payload.thinking { state.thinking = thinking }
+            if let summary = payload.reasoningSummary { state.reasoningSummary = summary }
             if let media = payload.media { state.media = media }
             let snapshot = ChatJobSnapshot(
                 content: state.content,
-                thinking: state.thinking,
+                thinking: ChatReasoningSummaryStorage.encode(state.reasoningSummary) ?? state.thinking,
                 media: state.media
             )
             continuation.yield(ChatJobEvent(
@@ -495,7 +535,7 @@ struct JobEventStream: ChatEventStreaming {
         header: EventHeader? = nil
     ) -> ChatTransportError {
         let diagnostic = SSEDiagnostic(
-            error: error.errorDescription ?? "SSE protocol error",
+            error: error.errorDescription ?? "SSE 协议错误",
             frame: frame,
             header: header,
             inspection: data.map(JSONInspection.init(data:))
@@ -570,6 +610,7 @@ private final class StreamState {
     var sequence: Int
     var content = ""
     var thinking = ""
+    var reasoningSummary = ""
     var media: [ChatGeneratedMedia] = []
 
     init(sequence: Int) {
@@ -602,7 +643,7 @@ struct SSEByteParser {
         previousWasCR = byte == 13
         if byte == 10 || byte == 13 { return try consumeBufferedLine() }
         guard bytes.count < 16 * 1_024 * 1_024 else {
-            throw ChatTransportError.malformedEnvelope("SSE line exceeds limit")
+            throw ChatTransportError.malformedEnvelope("SSE 单行内容超过限制")
         }
         bytes.append(byte)
         return nil
@@ -693,6 +734,10 @@ private struct ThinkingPayload: Decodable {
     let thinking: String
 }
 
+private struct ReasoningSummaryPayload: Decodable {
+    let reasoningSummary: String
+}
+
 private struct ToolSearchPayload: Decodable {
     let search: ChatToolSearch
 }
@@ -721,6 +766,7 @@ private struct AgentPlanPayload: Decodable {
 private struct SnapshotPayload: Decodable {
     let content: String?
     let thinking: String?
+    let reasoningSummary: String?
     let media: [ChatGeneratedMedia]?
 }
 

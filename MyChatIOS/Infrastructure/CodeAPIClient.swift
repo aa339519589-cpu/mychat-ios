@@ -23,11 +23,11 @@ enum CodeAPIError: LocalizedError, Equatable, Sendable {
         case let .invalidRequest(message):
             return message
         case .invalidResponse:
-            return "Code 服务返回了无效响应"
+            return "编程服务返回了无效响应"
         case .unsafeURL:
-            return "Code 服务返回了不安全的事件流地址"
+            return "编程服务返回了不安全的事件流地址"
         case .mismatchedResponse:
-            return "Code 服务响应与本次任务不一致"
+            return "编程服务响应与本次任务不一致"
         case let .server(_, message, _):
             return message
         }
@@ -178,7 +178,7 @@ struct CodeAPIClient: CodeAPIServing {
             throw CodeAPIError.invalidRequest("模型标识无效")
         }
         guard !command.messages.isEmpty, command.messages.count <= 20 else {
-            throw CodeAPIError.invalidRequest("Code 消息上下文无效")
+            throw CodeAPIError.invalidRequest("编程消息上下文无效")
         }
         let total = command.messages.reduce(0) { $0 + $1.content.utf8.count }
         guard total <= 2_000_000,
@@ -186,7 +186,7 @@ struct CodeAPIClient: CodeAPIServing {
                   ($0.role == "user" || $0.role == "assistant")
                       && $0.content.utf16.count <= 100_000
               }) else {
-            throw CodeAPIError.invalidRequest("Code 消息上下文过大")
+            throw CodeAPIError.invalidRequest("编程消息上下文过大")
         }
     }
 
@@ -288,7 +288,7 @@ struct CodeAPIClient: CodeAPIServing {
         let flat = try? JSONDecoder().decode(CodeFlatError.self, from: data)
         return .server(
             status: status,
-            message: flat?.error ?? "Code 服务暂时不可用",
+            message: flat?.error ?? "编程服务暂时不可用",
             retryable: status == 429 || status >= 500
         )
     }

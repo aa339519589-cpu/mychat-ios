@@ -1,5 +1,24 @@
 import Foundation
 
+actor BackendReadinessPrewarmer {
+    static let shared = BackendReadinessPrewarmer()
+    private var pending: Task<Void, Never>?
+    private var lastStarted = Date.distantPast
+
+    func start() {
+        guard pending == nil, Date().timeIntervalSince(lastStarted) >= 120 else { return }
+        lastStarted = Date()
+        pending = Task {
+            defer { pending = nil }
+            var request = URLRequest(url: URL(string: "https://mychat-nm6x.onrender.com/api/ready")!)
+            request.timeoutInterval = 75
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            // Read-only foreground warmup: no keepalive loop or paid request.
+            _ = try? await URLSession.shared.data(for: request)
+        }
+    }
+}
+
 struct MobileConfiguration: Codable, Equatable, Sendable {
     let supabaseURL: URL
     let supabaseAnonKey: String

@@ -473,6 +473,7 @@ struct CodeSessionStart: Equatable, Sendable {
 struct CodeAgentStep: Codable, Equatable, Sendable {
     let kind: String
     let label: String
+    var eventID: String? = nil
 }
 
 struct CodePlanAction: Codable, Equatable, Identifiable, Sendable {
@@ -548,13 +549,13 @@ struct CodePlanAction: Codable, Equatable, Identifiable, Sendable {
     var summary: String {
         switch kind {
         case .createRepository:
-            return "Create repository \(name ?? "")".trimmingCharacters(in: .whitespaces)
+            return "创建仓库 \(name ?? "")".trimmingCharacters(in: .whitespaces)
         case .writeFile:
-            return "Write \(path ?? "file")"
+            return "写入 \(path ?? "文件")"
         case .deleteFile:
-            return "Delete \(path ?? "file")"
+            return "删除 \(path ?? "文件")"
         case .enablePages:
-            return "Enable GitHub Pages"
+            return "启用 GitHub Pages"
         }
     }
 }
@@ -652,12 +653,12 @@ struct ChatArtifactBlock: Codable, Equatable, Identifiable, Sendable {
 
         var displayName: String {
             switch self {
-            case .vega: return "Chart"
-            case .mermaid: return "Diagram"
-            case .functionPlot: return "Function plot"
-            case .inlineArtifact: return "Graphic"
-            case .artifact: return "Artifact"
-            case .document: return "Document"
+            case .vega: return "图表"
+            case .mermaid: return "流程图"
+            case .functionPlot: return "函数图像"
+            case .inlineArtifact: return "图形"
+            case .artifact: return "可视化内容"
+            case .document: return "文档"
             }
         }
     }
@@ -779,7 +780,7 @@ enum ChatArtifactParser {
     }
 
     static func title(for block: ChatArtifactBlock) -> String {
-        if block.kind == .document { return ChatDocument.from(block)?.title ?? "Document" }
+        if block.kind == .document { return ChatDocument.from(block)?.title ?? "文档" }
         if block.kind == .artifact || block.kind == .inlineArtifact {
             for pattern in [
                 #"<title[^>]*>([^<]+)</title>"#,

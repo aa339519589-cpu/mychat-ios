@@ -7,16 +7,17 @@ struct SidebarView: View, Equatable {
     @StateObject private var updates: SidebarUpdates
     @ScaledMetric(relativeTo: .body) private var conversationRowHeight: CGFloat = MyChatTheme.sidebarConversationHeight
     @State private var conversationActionError: String?
-    @State private var showsAllChats = false
     let width: CGFloat
     let interactionLocked: Bool
     let openSettings: () -> Void
+    let openAllChats: () -> Void
     let close: () -> Void
 
     init(appModel: AppModel, width: CGFloat, interactionLocked: Bool,
-         openSettings: @escaping () -> Void, close: @escaping () -> Void) {
+         openSettings: @escaping () -> Void, openAllChats: @escaping () -> Void, close: @escaping () -> Void) {
         self.appModel = appModel; self.width = width
         self.interactionLocked = interactionLocked; self.openSettings = openSettings; self.close = close
+        self.openAllChats = openAllChats
         _updates = StateObject(wrappedValue: SidebarUpdates(appModel))
     }
 
@@ -31,8 +32,8 @@ struct SidebarView: View, Equatable {
 
             conversationList
 
-            sidebarFooter
         }
+        .overlay(alignment: .bottom) { sidebarFooter.zIndex(1) }
         .frame(width: width)
         .ignoresSafeArea(.container, edges: .bottom)
         // Keep the controls' enabled appearance unchanged while UIKit animates
@@ -40,24 +41,14 @@ struct SidebarView: View, Equatable {
         .allowsHitTesting(!interactionLocked)
         .foregroundStyle(MyChatTheme.text)
         .background(MyChatTheme.sidebar.ignoresSafeArea())
-        .fullScreenCover(isPresented: $showsAllChats) {
-            ConversationHistorySheet(appModel: appModel) {
-                showsAllChats = false
-                close()
-            }
-            .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
-            .presentationCornerRadius(34)
-            .presentationBackground(MyChatTheme.canvas)
-        }
         .alert(
-            "Conversation action failed",
+            "对话操作失败",
             isPresented: Binding(
                 get: { conversationActionError != nil },
                 set: { if !$0 { conversationActionError = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { conversationActionError = nil }
+            Button("好", role: .cancel) { conversationActionError = nil }
         } message: {
             Text(PresentationText.plain(conversationActionError ?? ""))
         }
@@ -68,9 +59,9 @@ struct SidebarView: View, Equatable {
             .font(MyChatTypography.brandSidebar)
             .lineSpacing(MyChatTypography.brandSidebarLineSpacing)
             .accessibilityAddTraits(.isHeader)
-            .padding(.horizontal, MyChatTheme.sidebarInset)
+            .padding(.horizontal, 20)
             .padding(.top, 8)
-            .padding(.bottom, 14)
+            .padding(.bottom, 16)
     }
 
     private var destinationList: some View {
@@ -85,8 +76,9 @@ struct SidebarView: View, Equatable {
                     appModel.selectedDestination = destination
                     close()
                 } label: {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 14) {
                         SidebarDestinationGlyph(destination: destination)
+                            .frame(width: 20, height: 21)
                             .frame(width: 22, height: 24)
 
                         Text(destination.rawValue)
@@ -144,13 +136,13 @@ struct SidebarView: View, Equatable {
                     pinnedConversationList
                 }
 
-                Text("Recents")
+                Text("最近")
                     .font(MyChatTypography.sidebarSection)
                     .lineSpacing(MyChatTypography.metadataLineSpacing)
-                    .foregroundStyle(MyChatTheme.secondaryText)
+                    .foregroundStyle(MyChatTheme.sidebarSecondary)
                     .padding(.horizontal, MyChatTheme.sidebarInset)
-                    .padding(.top, 12)
-                    .padding(.bottom, 11)
+                    .padding(.top, 16)
+                    .padding(.bottom, 9)
                     .accessibilityAddTraits(.isHeader)
 
                 if recentConversations.isEmpty {
@@ -166,10 +158,11 @@ struct SidebarView: View, Equatable {
                         LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(recentConversations) { conversation in
                                 conversationButton(conversation)
-                                    .padding(.horizontal, 14)
+                                    .padding(.horizontal, 12)
                             }
+                            if filteredConversations.count > 8 { allChatsButton }
                         }
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 96)
                     }
                     .scrollIndicators(.hidden)
                     .scrollDisabled(interactionLocked)
@@ -183,7 +176,7 @@ struct SidebarView: View, Equatable {
     private var pinnedConversationList: some View {
         ScrollView(.vertical) {
             LazyVStack(alignment: .leading, spacing: 0) {
-                Text("Pinned")
+                Text("已置顶")
                     .font(MyChatTypography.sidebarSection)
                     .lineSpacing(MyChatTypography.metadataLineSpacing)
                     .foregroundStyle(MyChatTheme.secondaryText)
@@ -194,7 +187,7 @@ struct SidebarView: View, Equatable {
 
                 ForEach(pinnedConversations) { conversation in
                     conversationButton(conversation)
-                        .padding(.horizontal, 14)
+                        .padding(.horizontal, 12)
                 }
             }
         }
@@ -210,9 +203,9 @@ struct SidebarView: View, Equatable {
     appModel.openConversation(conversation)
             close()
         } label: {
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 ConversationBubbleGlyph()
-                    .stroke(MyChatTheme.secondaryText, style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round))
+                    .stroke(MyChatTheme.sidebarSecondary, style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round))
                     .frame(width: 18, height: 18)
                     .frame(width: 24)
                 VStack(alignment: .leading, spacing: 2) {
@@ -237,8 +230,8 @@ struct SidebarView: View, Equatable {
                         .foregroundStyle(MyChatTheme.secondaryText)
                 }
             }
-            .padding(.leading, MyChatTheme.sidebarInset - 14)
-            .frame(maxWidth: .infinity, minHeight: max(MyChatTheme.sidebarConversationHeight, conversationRowHeight), alignment: .leading)
+            .padding(.leading, MyChatTheme.sidebarInset - 12)
+            .frame(maxWidth: .infinity, minHeight: max(MyChatTheme.sidebarConversationHeight, conversationRowHeight) - 2, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -246,6 +239,7 @@ struct SidebarView: View, Equatable {
             isActive(conversation) ? MyChatTheme.selected : Color.clear,
             in: RoundedRectangle(cornerRadius: 13, style: .continuous)
         )
+        .padding(.vertical, 1)
         .accessibilityLabel(displayTitle(for: conversation))
         .accessibilityValue(isActive(conversation) ? "当前对话" : "")
         .accessibilityAddTraits(isActive(conversation) ? .isSelected : [])
@@ -263,14 +257,14 @@ struct SidebarView: View, Equatable {
                 }
             } label: {
                 Label(
-                    conversation.pinned ? "Unpin" : "Pin",
+                    conversation.pinned ? "取消置顶" : "置顶",
                     systemImage: conversation.pinned ? "pin.slash" : "pin"
                 )
             }
 
             Menu {
                 if appModel.projects.isEmpty {
-                    Text("No projects")
+                    Text("暂无项目")
                 } else {
                     ForEach(appModel.projects) { project in
                         Button {
@@ -308,11 +302,11 @@ struct SidebarView: View, Equatable {
                             }
                         }
                     } label: {
-                        Label("Remove from Project", systemImage: "folder.badge.minus")
+                        Label("从项目中移除", systemImage: "folder.badge.minus")
                     }
                 }
             } label: {
-                Label("Add to Project", systemImage: "folder.badge.plus")
+                Label { Text("添加到项目") } icon: { Image(uiImage: MyChatProjectIcon.menuImage) }
             }
 
             Divider()
@@ -325,7 +319,7 @@ struct SidebarView: View, Equatable {
                     }
                 }
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("删除", systemImage: "trash")
             }
         }
         .frame(maxWidth: .infinity)
@@ -338,26 +332,24 @@ struct SidebarView: View, Equatable {
         }?.name
     }
 
-    private var sidebarFooter: some View {
-        VStack(alignment: .leading, spacing: filteredConversations.count > 8 ? 14 : 0) {
-            if filteredConversations.count > 8 {
+    private var allChatsButton: some View {
                 Button {
                     guard !interactionLocked else { return }
-                    HapticFeedback.impact()
-                    showsAllChats = true
+                    openAllChats()
                 } label: {
                     HStack(spacing: 7) {
-                        Text("All chats").font(MyChatTypography.sidebarSection)
+                        Text("所有对话").font(MyChatTypography.sidebarSection)
                         Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 12, weight: .medium))
                     }
-                    .foregroundStyle(MyChatTheme.secondaryText)
+                    .foregroundStyle(MyChatTheme.sidebarSecondary)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, MyChatTheme.sidebarInset)
-            }
+    }
 
+    private var sidebarFooter: some View {
             HStack(spacing: 12) {
                 Button {
                     guard !interactionLocked else { return }
@@ -365,41 +357,29 @@ struct SidebarView: View, Equatable {
                 } label: {
                     Text(accountInitial)
                         .font(MyChatSystemFont.appFont(size: 17, design: .rounded, weight: .medium))
+                        // The glass is decorative. Give the actual button label
+                        // the whole circle so taps cannot reach a history row.
+                        .frame(width: 48, height: 48)
+                        .contentShape(Circle())
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .buttonStyle(MyChatIconButtonStyle(size: 48))
                 .accessibilityLabel("账户设置")
+                .accessibilityIdentifier("sidebar.accountSettings")
                 .accessibilityValue(accountTitle)
 
                 Spacer(minLength: 0)
 
-                Button {
+                NewChatButton(height: 48) {
                     guard !interactionLocked else { return }
                     HapticFeedback.impact()
                     appModel.beginNewChat()
                     close()
-                } label: {
-                    Label("New chat", systemImage: "plus")
-                        .font(MyChatSystemFont.appFont(size: 16, relativeTo: .body, weight: .regular))
-                        .lineSpacing(MyChatTypography.utilityLineSpacing)
-                        .foregroundStyle(MyChatTheme.newChatForeground)
-                        .padding(.horizontal, 15)
-                        .frame(minHeight: 44)
-                        .background(MyChatTheme.newChatSurface, in: Capsule())
                 }
-                .buttonStyle(.plain)
                 .accessibilityHint("开始一个新的对话")
             }
-            .padding(.horizontal, MyChatTheme.sidebarInset + 3)
-        }
-        .padding(.bottom, 24)
-        .background(MyChatTheme.sidebar)
-        .background(alignment: .top) {
-            LinearGradient(colors: [MyChatTheme.sidebar.opacity(0), MyChatTheme.sidebar],
-                           startPoint: .top, endPoint: .bottom)
-                .frame(height: 24)
-                .offset(y: -24)
-                .allowsHitTesting(false)
-        }
+            .padding(.leading, 28)
+            .padding(.trailing, 27)
+            .padding(.bottom, 29)
     }
 
     private var filteredConversations: [ConversationRecord] {
@@ -411,7 +391,7 @@ struct SidebarView: View, Equatable {
     }
 
     private var recentConversations: [ConversationRecord] {
-        filteredConversations.filter { !$0.pinned }
+        Array(filteredConversations.lazy.filter { !$0.pinned }.prefix(10))
     }
 
     private func displayTitle(for conversation: ConversationRecord) -> String {
@@ -433,10 +413,10 @@ struct SidebarView: View, Equatable {
     }
 }
 
-private struct ConversationHistorySheet: View {
-    @Environment(\.dismiss) private var dismiss
+struct ConversationHistorySheet: View {
     private let appModel: AppModel
     private let openChat: () -> Void
+    private let close: () -> Void
     @State private var rows: [HistoryRow]
     @State private var query = ""
     @State private var starredOnly = false
@@ -446,12 +426,13 @@ private struct ConversationHistorySheet: View {
     @State private var error: String?
     @State private var pageTask: Task<Void, Never>?
 
-    init(appModel: AppModel, openChat: @escaping () -> Void) {
+    init(appModel: AppModel, openChat: @escaping () -> Void, close: @escaping () -> Void) {
         self.appModel = appModel
         self.openChat = openChat
+        self.close = close
         var seen = Set<String>()
         _rows = State(initialValue: appModel.conversations.filter {
-            seen.insert($0.id.lowercased()).inserted
+            !appModel.isPrivateConversation($0.id) && seen.insert($0.id.lowercased()).inserted
         }.map {
             HistoryRow(record: $0, title: appModel.displayConversationTitle($0))
         })
@@ -460,23 +441,22 @@ private struct ConversationHistorySheet: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                Text("Chats").font(.system(size: 17, weight: .semibold))
+                Text("聊天").font(.system(size: 17, weight: .semibold))
                 HStack {
-                    Button { HapticFeedback.impact(); dismiss() } label: {
+                    Button(action: close) {
                         ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round)).frame(width: 16, height: 16)
                     }.buttonStyle(MyChatIconButtonStyle(size: 44)).accessibilityLabel("关闭聊天列表")
                     Spacer()
                     Menu {
-                        Toggle("Starred only", isOn: $starredOnly)
+                        Toggle("仅显示收藏", isOn: $starredOnly)
                     } label: { Image(systemName: "slider.vertical.3").font(.system(size: 18)) }
-                        .buttonStyle(MyChatIconButtonStyle(size: 44)).accessibilityLabel("Filter chats")
+                        .buttonStyle(MyChatIconButtonStyle(size: 44)).accessibilityLabel("筛选对话")
                 }
             }.padding(.horizontal, 20).frame(height: 52).padding(.bottom, 12)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredRows) { row in
                         Button {
-                            HapticFeedback.impact()
                             appModel.openConversation(row.record)
                             openChat()
                         } label: {
@@ -499,7 +479,7 @@ private struct ConversationHistorySheet: View {
                         .buttonStyle(.plain)
                     }
                     if filteredRows.isEmpty && !loading && error == nil {
-                        Text(query.isEmpty ? "No chats yet" : "No matching chats")
+                        Text(query.isEmpty ? "还没有对话" : "没有匹配的对话")
                             .font(MyChatTypography.navigation)
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(14)
@@ -511,9 +491,9 @@ private struct ConversationHistorySheet: View {
                             .font(MyChatTypography.caption)
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(.horizontal, 14)
-                        loadButton("Retry")
+                        loadButton("重试")
                     } else if hasMore {
-                        loadButton("Load more")
+                        loadButton("加载更多")
                     }
                 }
                 .padding(.top, 8)
@@ -523,17 +503,13 @@ private struct ConversationHistorySheet: View {
             .foregroundStyle(MyChatTheme.text)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(alignment: .trailing, spacing: 16) {
-                    Button {
-                        HapticFeedback.impact(); appModel.beginNewChat(); openChat()
-                    } label: {
-                        Label("New chat", systemImage: "plus").font(.system(size: 16))
-                            .padding(.horizontal, 16).frame(height: 42)
-                            .foregroundStyle(MyChatTheme.canvas).background(MyChatTheme.text, in: Capsule())
+                    NewChatButton {
+                        appModel.beginNewChat(); openChat()
                     }
-                    .buttonStyle(MyChatBubblePressStyle()).accessibilityIdentifier("history.new-chat")
+                    .accessibilityIdentifier("history.new-chat")
                     HStack(spacing: 10) {
                         Image(systemName: "magnifyingglass").font(.system(size: 18))
-                        TextField("Search", text: $query).font(.system(size: 17)).accessibilityIdentifier("history.search")
+                        TextField("搜索", text: $query).font(.system(size: 17)).accessibilityIdentifier("history.search")
                     }.padding(.horizontal, 16).frame(height: 48)
                         .modifier(MyChatFloatingSurface(shape: Capsule(), isInteractive: true))
                 }
@@ -562,7 +538,7 @@ private struct ConversationHistorySheet: View {
 
     private var filteredRows: [HistoryRow] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return rows.filter { (!starredOnly || $0.record.starred == true)
+        return rows.filter { !appModel.isPrivateConversation($0.record.id) && (!starredOnly || $0.record.starred == true)
             && (search.isEmpty || $0.title.localizedStandardContains(search)) }
     }
 
@@ -573,7 +549,7 @@ private struct ConversationHistorySheet: View {
         return formatter.date(from: value)
     }
     private static func relativeTime(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter(); formatter.locale = Locale(identifier: "en_US")
+        let formatter = RelativeDateTimeFormatter(); formatter.locale = Locale(identifier: "zh_CN")
         formatter.unitsStyle = .full
         return formatter.localizedString(for: date, relativeTo: Date())
     }
@@ -653,7 +629,7 @@ private struct SidebarDestinationGlyph: View {
 
     var body: some View {
         SidebarGlyphPath(destination: destination)
-            .stroke(MyChatTheme.text, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            .stroke(MyChatTheme.text, style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round))
             .accessibilityHidden(true)
     }
 }
@@ -693,9 +669,7 @@ private struct SidebarGlyphPath: Shape {
             curve(21, 20, 22.5, 17.5, 22, 19); line(23, 23); line(17, 22)
             curve(10, 20.5, 14, 22, 11.5, 21.5)
         case .projects:
-            move(6, 2.5); line(18, 2.5)
-            move(3.5, 6.5); line(20.5, 6.5)
-            move(3, 10.5); line(21, 10.5); line(19, 22); line(5, 22); line(3, 10.5); p.closeSubpath()
+            return MyChatProjectGlyph().path(in: rect)
         case .artifacts:
             p.addEllipse(in: CGRect(x: 1.5, y: 14, width: 9, height: 9))
             p.addRoundedRect(in: CGRect(x: 15, y: 12, width: 8, height: 11), cornerSize: CGSize(width: 0.5, height: 0.5))
@@ -737,40 +711,40 @@ struct CapabilitiesSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                NativeSettingsSection(title: "Capabilities") {
-                    capability("Inline visualizations", icon: "chart.xyaxis.line", isOn: $appModel.renderEnabled)
+                NativeSettingsSection(title: "功能") {
+                    capability("内联可视化", icon: "chart.xyaxis.line", isOn: $appModel.renderEnabled)
                     divider
-                    capability("Web search", icon: "globe", isOn: $appModel.webSearchEnabled)
+                    capability("网页搜索", icon: "globe", isOn: $appModel.webSearchEnabled)
                 }
-                NativeSettingsSection(title: "Memory") {
-                    capability("Generate memory from chats", isOn: Binding(
+                NativeSettingsSection(title: "记忆") {
+                    capability("从对话中生成记忆", isOn: Binding(
                         get: { appModel.memoryEnabled },
                         set: { value in Task { do { try await appModel.setMemoryEnabled(value) } catch { errorMessage = error.localizedDescription } } }
                     ))
                     divider
-                    capability("Include sensitive topics", isOn: Binding(
+                    capability("包含敏感主题", isOn: Binding(
                         get: { appModel.sensitiveMemoryEnabled },
                         set: { value in Task { do { try await appModel.setSensitiveMemoryEnabled(value) } catch { errorMessage = error.localizedDescription } } }
                     ))
                     divider
-                    NavigationLink { MemoryManagementView() } label: { NativeSettingsRow(title: "Memory files", icon: "") }.buttonStyle(.plain)
+                    NavigationLink { MemoryManagementView() } label: { NativeSettingsRow(title: "记忆文件", icon: "") }.buttonStyle(.plain)
                 }
-                NativeSettingsSection(title: "Tool access") {
-                    capability("Search past chats", icon: "clock.arrow.circlepath", isOn: Binding(
+                NativeSettingsSection(title: "工具访问") {
+                    capability("搜索历史对话", icon: "clock.arrow.circlepath", isOn: Binding(
                         get: { appModel.historyRetrievalEnabled }, set: { appModel.setHistoryRetrievalEnabled($0) }
                     ))
                     divider
-                    capability("Use memory in this chat", isOn: Binding(
+                    capability("在此对话中使用记忆", isOn: Binding(
                         get: { appModel.memoryEnabled && appModel.activeConversationMemoryEnabled },
                         set: { appModel.setActiveConversationMemoryEnabled($0) }
                     )).disabled(!appModel.canChangeActiveConversationMemory)
                 }
-                NativeSettingsSection(title: "Models") {
-                    NavigationLink { CustomModelsSettingsView() } label: { NativeSettingsRow(title: "Models & API", icon: "") }.buttonStyle(.plain)
+                NativeSettingsSection(title: "模型") {
+                    NavigationLink { CustomModelsSettingsView() } label: { NativeSettingsRow(title: "模型与 API", icon: "") }.buttonStyle(.plain)
                 }
                 if let errorMessage { Text(errorMessage).font(MyChatTypography.metadata).foregroundStyle(.red) }
             }.padding(.horizontal, 20).padding(.vertical, 16)
-        }.navigationTitle("Capabilities").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("功能").navigationBarTitleDisplayMode(.inline)
             .background(MyChatTheme.canvas).foregroundStyle(MyChatTheme.text)
     }
     private var divider: some View { Divider().padding(.horizontal, 18) }
@@ -796,14 +770,14 @@ private struct MemoryManagementView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Topics").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 20)
+                Text("主题").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 20)
                 if appModel.memoryPhase == .loading && appModel.memories.isEmpty { ProgressView().frame(maxWidth: .infinity).padding(24) }
                 ForEach(topics, id: \.self) { topic in
                     NavigationLink { MemoryTopicView(topic: topic) } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text(topic).font(.system(size: 17))
-                                Text("Saved memory").font(.system(size: 13)).foregroundStyle(MyChatTheme.secondaryText)
+                                Text("已保存的记忆").font(.system(size: 13)).foregroundStyle(MyChatTheme.secondaryText)
                             }
                             Spacer()
                             Image(systemName: "chevron.right").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
@@ -811,24 +785,24 @@ private struct MemoryManagementView: View {
                     }.buttonStyle(.plain).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
                         .accessibilityIdentifier("memory.topic." + topic)
                 }
-                if topics.isEmpty && appModel.memoryPhase != .loading { Text("No memory files yet").foregroundStyle(MyChatTheme.secondaryText).padding(20) }
+                if topics.isEmpty && appModel.memoryPhase != .loading { Text("还没有记忆文件").foregroundStyle(MyChatTheme.secondaryText).padding(20) }
                 if let message = appModel.memoryError ?? errorMessage { Text(message).font(MyChatTypography.metadata).foregroundStyle(.red) }
             }.padding(.horizontal, 20).padding(.top, 24).padding(.bottom, 20)
         }.safeAreaInset(edge: .bottom, spacing: 0) {
-            MemoryPromptInput(text: $newMemory, placeholder: "Tell MyChat what to remember", isSaving: isSaving, submit: addMemory)
-        }.navigationTitle("Memory files").navigationBarTitleDisplayMode(.inline)
+            MemoryPromptInput(text: $newMemory, placeholder: "告诉 MyChat 要记住什么", isSaving: isSaving, submit: addMemory)
+        }.navigationTitle("记忆文件").navigationBarTitleDisplayMode(.inline)
             .foregroundStyle(MyChatTheme.text).tint(MyChatTheme.text).background(MyChatTheme.canvas)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Button("Import", systemImage: "square.and.arrow.down") { importing = true }
-                        ShareLink(item: MemoryImportParser.export(appModel.memories)) { Label("Export", systemImage: "square.and.arrow.up") }.disabled(appModel.memories.isEmpty)
-                        Button("Delete all", systemImage: "trash", role: .destructive) { confirmsMemoryReset = true }.disabled(isResettingMemories || appModel.memories.isEmpty)
-                    } label: { Image(systemName: "ellipsis") }.accessibilityLabel("Memory actions")
+                        Button("导入", systemImage: "square.and.arrow.down") { importing = true }
+                        ShareLink(item: MemoryImportParser.export(appModel.memories)) { Label("导出", systemImage: "square.and.arrow.up") }.disabled(appModel.memories.isEmpty)
+                        Button("全部删除", systemImage: "trash", role: .destructive) { confirmsMemoryReset = true }.disabled(isResettingMemories || appModel.memories.isEmpty)
+                    } label: { Image(systemName: "ellipsis") }.accessibilityLabel("记忆操作")
                 }
             }.sheet(isPresented: $importing) { MemoryImportSheet { try await appModel.importMemories($0) } }
-            .confirmationDialog("Delete all memories?", isPresented: $confirmsMemoryReset, titleVisibility: .visible) {
-                Button("Delete all", role: .destructive) {
+            .confirmationDialog("删除全部记忆？", isPresented: $confirmsMemoryReset, titleVisibility: .visible) {
+                Button("全部删除", role: .destructive) {
                     isResettingMemories = true
                     Task { defer { isResettingMemories = false }; do { try await appModel.deleteAllMemories() } catch { errorMessage = error.localizedDescription } }
                 }
@@ -840,14 +814,18 @@ private struct MemoryManagementView: View {
         let input = newMemory
         Task {
             defer { isSaving = false }
-            do { try await appModel.interpretMemoryInstruction(input, topic: nil); newMemory = ""; errorMessage = nil }
+            do {
+                try await appModel.interpretMemoryInstruction(input, topic: nil)
+                if newMemory == input { newMemory = "" }
+                errorMessage = nil
+            }
             catch { errorMessage = error.localizedDescription }
         }
     }
 }
 private func memoryTopic(_ record: MemoryRecord) -> String {
     let value = record.topic?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return value.isEmpty || value.lowercased() == "general" ? "General" : value
+    return value.isEmpty || value.lowercased() == "general" ? "常规" : value
 }
 private struct MemoryTopicView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -863,18 +841,27 @@ private struct MemoryTopicView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 ForEach(rows) { memory in
-                    Text(memory.content).font(.system(size: 17)).lineSpacing(5).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                        .contextMenu { Button("Edit") { editing = memory } }
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(memoryFacts(memory.content).enumerated()), id: \.offset) { _, fact in
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("•").font(MyChatTypography.responseBody).accessibilityHidden(true)
+                                MarkdownBody(fact, typography: .response)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contextMenu { Button("编辑") { editing = memory } }
                         .accessibilityIdentifier("memory-record-" + memory.id)
                 }
                 if let errorMessage { Text(errorMessage).font(MyChatTypography.metadata).foregroundStyle(.red) }
             }.padding(20)
         }.safeAreaInset(edge: .bottom, spacing: 0) {
-            MemoryPromptInput(text: $instruction, placeholder: "Tell MyChat what to change or remove", isSaving: isSaving, submit: apply)
+            MemoryPromptInput(text: $instruction, placeholder: "告诉 MyChat 要记住或修改什么", isSaving: isSaving, submit: apply)
         }.navigationTitle(topic).navigationBarTitleDisplayMode(.inline).background(MyChatTheme.canvas)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { deleting = true } label: { Image(systemName: "trash") }.accessibilityLabel("Delete topic") } }
-            .confirmationDialog("Delete this topic?", isPresented: $deleting, titleVisibility: .visible) {
-                Button("Delete", role: .destructive) {
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { deleting = true } label: { Image(systemName: "trash") }.accessibilityLabel("删除主题") } }
+            .confirmationDialog("删除这个主题？", isPresented: $deleting, titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
                     isSaving = true
                     let snapshot = rows
                     Task { defer { isSaving = false }; do { for row in snapshot { try await appModel.deleteMemory(row) }; dismiss() } catch { errorMessage = error.localizedDescription } }
@@ -883,10 +870,25 @@ private struct MemoryTopicView: View {
                 MemoryEditSheet(memory: memory, delete: { try await appModel.deleteMemory(memory) }) { content, topic in try await appModel.updateMemory(memory, content: content, topic: topic) }
             }
     }
+    private func memoryFacts(_ content: String) -> [String] {
+        let separated = content.replacingOccurrences(of: #"(?:\r?\n)+|[；;。]+|(?<=[.!?])\s+"#,
+            with: "\n", options: .regularExpression)
+        return separated.components(separatedBy: "\n").map {
+            $0.replacingOccurrences(of: #"^\s*(?:[-*•]\s*|\d+[.)]\s+)"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+    }
     private func apply() {
         guard !isSaving, !instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isSaving = true; let text = instruction
-        Task { defer { isSaving = false }; do { try await appModel.interpretMemoryInstruction(text, topic: topic); instruction = ""; errorMessage = nil } catch { errorMessage = error.localizedDescription } }
+        Task {
+            defer { isSaving = false }
+            do {
+                try await appModel.interpretMemoryInstruction(text, topic: topic)
+                if instruction == text { instruction = "" }
+                errorMessage = nil
+            } catch { errorMessage = error.localizedDescription }
+        }
     }
 }
 private struct MemoryPromptInput: View {
@@ -896,7 +898,7 @@ private struct MemoryPromptInput: View {
     let submit: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            TextField(placeholder, text: $text, axis: .vertical).font(.system(size: 17)).lineLimit(1...4).accessibilityIdentifier("memory.content")
+            TextField(placeholder, text: $text, axis: .vertical).font(MyChatTypography.responseBody).lineLimit(1...4).accessibilityIdentifier("memory.content")
             HStack { Spacer(); Button(action: submit) {
                 Group { if isSaving { ProgressView().tint(.white) } else { Image(systemName: "arrow.up") } }
                     .foregroundStyle(.white).frame(width: 36, height: 36).background(MyChatTheme.thinking, in: Circle())

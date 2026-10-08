@@ -3,17 +3,18 @@ import UIKit
 import CoreText
 
 enum MyChatTheme {
-    static let brand = Color.dynamic(light: 0x708CB8, dark: 0x708CB8)
+    static let brand = Color.dynamic(light: 0xC86F4E, dark: 0xD68B68)
     static let onBrand = Color.dynamic(light: 0xFFFFFF, dark: 0x1C1512)
     static let accent = brand
     static let canvas = Color.dynamic(light: 0xF9F9F7, dark: 0x151515)
-    static let sidebar = Color.dynamic(light: 0xF3F3F1, dark: 0x111111)
+    static let sidebar = Color.dynamic(light: 0xF3F3F0, dark: 0x111111)
+    static let sidebarSecondary = Color.dynamic(light: 0x52514E, dark: 0x9A9A93)
     static let raised = Color.dynamic(light: 0xFFFFFF, dark: 0x202020)
     static let composer = Color.dynamic(light: 0xFDFDFB, dark: 0x292929)
-    static let selected = Color.dynamic(light: 0xE7E6E2, dark: 0x272727)
+    static let selected = Color.dynamic(light: 0xE7E6E1, dark: 0x272727)
     static let settingsAvatar = Color.dynamic(light: 0xE7E6E2, dark: 0x0B0B0B)
-    static let userBubble = Color.dynamic(light: 0xF0EFED, dark: 0x2C2C2A)
-    static let libraryCanvas = Color.dynamic(light: 0xF9F9F7, dark: 0x0B0B0B)
+    static let userBubble = Color.dynamic(light: 0xEFEFED, dark: 0x2C2C2A)
+    static let libraryCanvas = canvas
     static let text = Color.dynamic(light: 0x131313, dark: 0xF8F8F6)
     static let secondaryText = Color.dynamic(light: 0x80807B, dark: 0x9A9A93)
     static let border = Color.dynamic(light: 0xD6D5D0, dark: 0x3D3D3F)
@@ -28,8 +29,8 @@ enum MyChatTheme {
     static let sendActionSurface = thinking
     static let sendActionForeground = Color.white
     static let composerActionForeground = Color.dynamic(light: 0xFFFFFF, dark: 0x202020)
-    static let newChatSurface = Color.dynamic(light: 0xE7E6E2, dark: 0x303030)
-    static let newChatForeground = text
+    static let newChatSurface = Color.dynamic(light: 0x242424, dark: 0xF9F9F8)
+    static let newChatForeground = Color.dynamic(light: 0xFFFFFF, dark: 0x242424)
     static let headerControlSurface = Color.dynamic(light: 0xFFFFFF, dark: 0x292929)
     static let settingsControlSurface = Color.dynamic(light: 0xF0EFEB, dark: 0x292929)
     static let headerControlForeground = Color.dynamic(light: 0x353532, dark: 0xD1D1C8)
@@ -48,8 +49,8 @@ enum MyChatTheme {
     static let chatCardRadius: CGFloat = 20
     static let markdownTableRadius: CGFloat = 8
     static let sidebarInset: CGFloat = 24
-    static let sidebarDestinationHeight: CGFloat = 48
-    static let sidebarConversationHeight: CGFloat = 48
+    static let sidebarDestinationHeight: CGFloat = 50
+    static let sidebarConversationHeight: CGFloat = 50
     static let composerControlSize: CGFloat = 36
 }
 
@@ -58,7 +59,7 @@ enum MyChatTypography {
     static let brandHero = MyChatSystemFont.appFont(size: 32, relativeTo: .largeTitle, weight: .semibold)
     static let brandSidebar = MyChatSystemFont.appSerifFont(size: 25, relativeTo: .title2, weight: .medium)
     static let pageTitleEditorial = MyChatSystemFont.appFont(size: 25, relativeTo: .title1, weight: .semibold)
-    static let pageTitleUtility = MyChatSystemFont.appFont(size: 19, relativeTo: .headline, weight: .semibold)
+    static let pageTitleUtility = MyChatSystemFont.appFont(size: 17, relativeTo: .headline, weight: .semibold)
     static let emptyStatePrompt = MyChatSystemFont.appSerifFont(size: 24, relativeTo: .title2, weight: .medium)
 
     static let responseH1 = MyChatSystemFont.serif(size: 23, weight: .semibold, relativeTo: .title2)
@@ -68,8 +69,8 @@ enum MyChatTypography {
     static let responseBody = MyChatSystemFont.serif(size: responseBodySize, weight: .regular, relativeTo: .body)
     static let responseStrong = MyChatSystemFont.serif(size: responseBodySize, weight: .bold, relativeTo: .body)
     static let responseItalic = MyChatSystemFont.italic(size: responseBodySize, relativeTo: .body)
-    static let thoughtBodySize: CGFloat = 18
-    static let thoughtHanSize: CGFloat = 18.5
+    static let thoughtBodySize = responseBodySize
+    static let thoughtHanSize = responseHanSize
     static let thoughtBody = MyChatSystemFont.serif(size: thoughtBodySize, weight: .regular, relativeTo: .body)
     static let thoughtStrong = MyChatSystemFont.serif(size: thoughtBodySize, weight: .bold, relativeTo: .body)
     static let thoughtItalic = MyChatSystemFont.italic(size: thoughtBodySize, relativeTo: .body)
@@ -81,7 +82,7 @@ enum MyChatTypography {
     static let navigation = MyChatSystemFont.appFont(size: 17, relativeTo: .body, weight: .regular)
     static let sidebarPrimary = MyChatSystemFont.appFont(size: 17, relativeTo: .body, weight: .regular)
     static let sidebarConversation = MyChatSystemFont.appFont(size: 17, relativeTo: .body, weight: .regular)
-    static let sidebarSection = MyChatSystemFont.appFont(size: 15, relativeTo: .subheadline, weight: .medium)
+    static let sidebarSection = MyChatSystemFont.appFont(size: 14, relativeTo: .subheadline, weight: .regular)
     static let composerChip = MyChatSystemFont.appFont(size: 14, relativeTo: .subheadline, weight: .regular)
     static let cardTitle = MyChatSystemFont.appFont(size: 16, relativeTo: .body, weight: .semibold)
     static let cardBody = MyChatSystemFont.appFont(size: 16, relativeTo: .body, weight: .medium)
@@ -104,8 +105,8 @@ enum MyChatTypography {
     // tighter Han-only rhythm to match the reference layout.
     static let responseHanTracking: CGFloat = -0.55
     static let responseHanLineSpacing: CGFloat = 9.8
-    static let thoughtBodyLineSpacing: CGFloat = 7.7
-    static let thoughtHanLineSpacing: CGFloat = 10.3
+    static let thoughtBodyLineSpacing = responseBodyLineSpacing
+    static let thoughtHanLineSpacing = responseHanLineSpacing
     static let sidebarTracking: CGFloat = 0
     static let responseH1LineSpacing: CGFloat = 3
     static let responseH2LineSpacing: CGFloat = 4
@@ -117,6 +118,32 @@ enum MyChatTypography {
     static let captionLineSpacing: CGFloat = 4.5
     static let codeLineSpacing: CGFloat = 5.5
 
+}
+
+struct NewChatButton: View {
+    var height: CGFloat = 44
+    let action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 19, weight: .light))
+                    .frame(width: 20, height: 20)
+                Text("新建对话").font(MyChatSystemFont.appFont(size: 16))
+            }
+            .foregroundStyle(MyChatTheme.newChatForeground)
+            .frame(width: 118, height: height)
+            .background(MyChatTheme.newChatSurface, in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(
+                    LinearGradient(colors: [Color.white.opacity(colorScheme == .light ? 0.22 : 0.8), .clear],
+                                   startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            }
+            .contentShape(Capsule())
+        }
+        .buttonStyle(MyChatBubblePressStyle(glassSurface: false))
+    }
 }
 
 enum MyChatSystemFont {
@@ -161,8 +188,14 @@ enum MyChatSystemFont {
             : UIFont.systemFont(ofSize: size, weight: weight)
         let designed = design.flatMap { regular.fontDescriptor.withDesign($0) }
         let base = designed.map { UIFont(descriptor: $0, size: size) } ?? regular
-        guard let appHan else { return base }
-        return UIFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [appHan]]), size: size)
+        let han: UIFontDescriptor?
+        if weight >= .semibold { han = chineseSemibold }
+        else if weight >= .medium { han = chineseMedium }
+        else { han = appHan }
+        guard let han else { return base }
+        // A regular Han fallback previously erased the requested heading
+        // weight, making Chinese page titles look like floating body labels.
+        return UIFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [han]]), size: size)
     }
 
     static func appFont(size: CGFloat, design: UIFontDescriptor.SystemDesign? = nil,
@@ -375,7 +408,7 @@ enum MyChatResponseTypesetting {
 }
 
 extension Color {
-    fileprivate static func dynamic(light: UInt32, dark: UInt32) -> Color {
+    static func dynamic(light: UInt32, dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
             UIColor(rgb: traits.userInterfaceStyle == .dark ? dark : light)
         })
@@ -507,11 +540,16 @@ struct MyChatBubblePressFeedback: ViewModifier {
 
 @MainActor
 enum HapticFeedback {
-    private static let generator = UIImpactFeedbackGenerator(style: .rigid)
+    private static let generator = UIImpactFeedbackGenerator(style: .soft)
+    static let intensity: Float = 0.9
+
+    static func prepare() {
+        generator.prepare()
+    }
 
     static func impact() {
-        generator.impactOccurred(intensity: 0.9)
-        generator.prepare()
+        generator.impactOccurred(intensity: CGFloat(intensity))
+        prepare()
     }
 }
 
@@ -559,3 +597,43 @@ enum MyChatDebugLog {
     @inline(__always) static func event(_ message: @autoclosure () -> String) {}
 }
 #endif
+
+/// The same stacked tray glyph is used for every project entry.
+struct MyChatProjectGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        p.move(to: CGPoint(x: 7, y: 3)); p.addLine(to: CGPoint(x: 17, y: 3))
+        p.move(to: CGPoint(x: 5, y: 7)); p.addLine(to: CGPoint(x: 19, y: 7))
+        p.move(to: CGPoint(x: 4, y: 11))
+        p.addQuadCurve(to: CGPoint(x: 2.8, y: 12.4), control: CGPoint(x: 2.6, y: 11))
+        p.addLine(to: CGPoint(x: 4.5, y: 21))
+        p.addQuadCurve(to: CGPoint(x: 6, y: 22), control: CGPoint(x: 4.7, y: 22))
+        p.addLine(to: CGPoint(x: 18, y: 22))
+        p.addQuadCurve(to: CGPoint(x: 19.5, y: 21), control: CGPoint(x: 19.3, y: 22))
+        p.addLine(to: CGPoint(x: 21.2, y: 12.4))
+        p.addQuadCurve(to: CGPoint(x: 20, y: 11), control: CGPoint(x: 21.4, y: 11))
+        p.closeSubpath()
+        return p.applying(CGAffineTransform(scaleX: rect.width / 24, y: rect.height / 24)
+            .concatenating(CGAffineTransform(translationX: rect.minX, y: rect.minY)))
+    }
+}
+struct MyChatProjectIcon: View {
+    // Native menus extract an Image; arbitrary Shape views are not bridged.
+    @MainActor static let menuImage: UIImage = {
+        let size = CGSize(width: 24, height: 24)
+        return UIGraphicsImageRenderer(size: size).image { renderer in
+            let context = renderer.cgContext
+            context.setStrokeColor(UIColor.black.cgColor)
+            context.setLineWidth(24 / 15)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            context.addPath(MyChatProjectGlyph().path(in: CGRect(origin: .zero, size: size)).cgPath)
+            context.strokePath()
+        }.withRenderingMode(.alwaysTemplate)
+    }()
+    var size: CGFloat = 22
+    var body: some View {
+        MyChatProjectGlyph().stroke(style: StrokeStyle(lineWidth: size / 15, lineCap: .round, lineJoin: .round))
+            .frame(width: size, height: size).accessibilityHidden(true)
+    }
+}

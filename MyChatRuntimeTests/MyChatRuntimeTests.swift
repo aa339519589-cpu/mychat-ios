@@ -3,10 +3,319 @@ import SwiftUI
 import Speech
 import WebKit
 import PDFKit
+import HealthKit
+import CoreText
 @testable import MyChat
 
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
+
+    func testHealthConnectorRequestsHeartSleepAndWorkoutAlongsideActivity() {
+        let types = Set(HealthConnector.readTypes.map(\.identifier))
+        for identifier in [HKQuantityTypeIdentifier.heartRate.rawValue, HKQuantityTypeIdentifier.restingHeartRate.rawValue,
+            HKQuantityTypeIdentifier.appleExerciseTime.rawValue, HKQuantityTypeIdentifier.stepCount.rawValue,
+            HKCategoryTypeIdentifier.sleepAnalysis.rawValue, HKObjectType.workoutType().identifier] {
+            XCTAssertTrue(types.contains(identifier), identifier)
+        }
+        let start = Date(timeIntervalSince1970: 1000)
+        let overlapping = [DateInterval(start: start, duration: 3600),
+            DateInterval(start: start.addingTimeInterval(1800), duration: 3600)]
+        XCTAssertEqual(HealthSummaryText.coveredDuration(overlapping), 5400)
+    }
+
+    func testDefaultConnectorHealthSummaryNeverInventsDeniedOrMissingValues() {
+        XCTAssertNil(HealthSummaryText.make(date: Date(), steps: nil, kilometers: nil, kilocalories: nil))
+        let partial = HealthSummaryText.make(date: Date(), steps: 1234, kilometers: nil, kilocalories: 0)
+        XCTAssertTrue(partial?.contains("1234 步") == true)
+        XCTAssertTrue(partial?.contains("0 千卡") == true)
+        XCTAssertFalse(partial?.contains("距离：") == true)
+        XCTAssertNil(HealthSummaryText.make(date: Date(), steps: .nan, kilometers: .infinity, kilocalories: nil))
+    }
+
+    func testHealthCatalogCoversNutritionVitalsSymptomsClinicalAndSpecialTypes() {
+        let types = HealthConnector.readTypes
+        XCTAssertGreaterThanOrEqual(types.count, 200)
+        for type: HKObjectType in [HKQuantityType(.bloodGlucose), HKQuantityType(.oxygenSaturation), HKQuantityType(.dietaryVitaminC),
+            HKQuantityType(.heartRateVariabilitySDNN), HKCategoryType(.menstrualFlow), HKCategoryType(.coughing),
+            HKObjectType.electrocardiogramType(), HKObjectType.audiogramSampleType(), HKObjectType.visionPrescriptionType(),
+            HKObjectType.activitySummaryType(), HKSeriesType.workoutRoute(), HKSeriesType.heartbeat(), HKClinicalType(.labResultRecord)] {
+            XCTAssertTrue(types.contains(type), type.identifier)
+        }
+        if #available(iOS 26, *) {
+            XCTAssertFalse(types.contains(HKObjectType.medicationDoseEventType()))
+            XCTAssertTrue(HealthReadCatalog.sampleTypes.contains(HKObjectType.medicationDoseEventType()))
+            XCTAssertTrue(types.contains(HKObjectType.userAnnotatedMedicationType()))
+        }
+    }
+
+    func testHealthSleepIncludesOnsetWakeStagesAndExactIntervals() throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let start = try XCTUnwrap(formatter.date(from: "2026-10-07T23:00:00+08:00"))
+        func sleep(_ value: HKCategoryValueSleepAnalysis, _ offset: Double, _ minutes: Double) -> HKCategorySample {
+            HKCategorySample(type: HKCategoryType(.sleepAnalysis), value: value.rawValue,
+                start: start.addingTimeInterval(offset * 60), end: start.addingTimeInterval((offset + minutes) * 60))
+        }
+        let samples = [sleep(.inBed, 0, 480), sleep(.asleepCore, 0, 120), sleep(.asleepCore, 0, 60),
+            sleep(.asleepDeep, 120, 60), sleep(.awake, 180, 15), sleep(.asleepREM, 195, 105), sleep(.asleepCore, 300, 180)]
+        let summary = HealthContextText.sleepSummary(samples, formatter: formatter)
+        XCTAssertTrue(summary.contains("首段入睡=2026-10-07T23:00:00+08:00"))
+        XCTAssertTrue(summary.contains("末段醒来=2026-10-08T07:00:00+08:00"))
+        XCTAssertTrue(summary.contains("睡眠总时长=465分钟"))
+        XCTAssertTrue(summary.contains("浅睡（核心睡眠）=300分钟"))
+        XCTAssertTrue(summary.contains("深睡=60分钟"))
+        XCTAssertTrue(summary.contains("REM=105分钟"))
+        XCTAssertTrue(summary.contains("清醒=15分钟"))
+        let detail = HealthContextText.record(samples[5], unit: nil, formatter: formatter)
+        XCTAssertTrue(detail.contains("开始=2026-10-08T02:15:00+08:00"))
+        XCTAssertTrue(detail.contains("结束=2026-10-08T04:00:00+08:00"))
+        XCTAssertTrue(detail.contains("阶段=REM"))
+        let unclassified = HealthContextText.sleepSummary([sleep(.asleepUnspecified, 0, 60)], formatter: formatter)
+        XCTAssertFalse(unclassified.contains("深睡="))
+        XCTAssertFalse(unclassified.contains("REM="))
+    }
+
+    func testHealthContextKeepsAllTypeSummariesWhenDetailsExceedCapacity() throws {
+        let sections = (0..<210).map { HealthContextSection(name: "type\($0)", summary: "value=\($0)", details: [String(repeating: "细", count: 2_000)]) }
+        let text = try XCTUnwrap(HealthContextText.make(sections: sections, date: Date()))
+        XCTAssertLessThanOrEqual(text.utf16.count, HealthContextText.maximumCharacters)
+        XCTAssertTrue(text.contains("【type209】value=209"))
+        XCTAssertTrue(text.contains("部分明细超过"))
+        XCTAssertNil(HealthContextText.make(sections: [], date: Date()))
+        let long = try XCTUnwrap(HealthContextText.make(sections: [.init(name: "临床记录", summary: String(repeating: "字", count: 200_000), details: [])], date: Date()))
+        XCTAssertLessThanOrEqual(long.utf16.count, HealthContextText.maximumCharacters)
+    }
+
+    func testHealthPercentAndHeartRateUseReadableUnits() {
+        let date = Date(timeIntervalSince1970: 1_000)
+        let oxygen = HKQuantitySample(type: HKQuantityType(.oxygenSaturation), quantity: HKQuantity(unit: .percent(), doubleValue: 0.97), start: date, end: date)
+        let text = HealthContextText.record(oxygen, unit: .percent(), formatter: ISO8601DateFormatter())
+        XCTAssertTrue(text.contains("值=97.0 %"))
+        let heartUnit = HKUnit.count().unitDivided(by: .minute())
+        let heart = HKQuantitySample(type: HKQuantityType(.heartRate), quantity: HKQuantity(unit: heartUnit, doubleValue: 67), start: date, end: date)
+        XCTAssertTrue(HealthContextText.record(heart, unit: heartUnit, formatter: ISO8601DateFormatter()).contains("值=67.0 count/min"))
+    }
+
+    func testConnectorOffPersistsPerAccountAndStopsHealthContext() async {
+        let owner = "health-switch-test-" + UUID().uuidString
+        let requestedKey = "mychat.health.authorization-requested.\(owner)"
+        let versionKey = requestedKey + ".version"
+        let enabledKey = ConnectorEnabledPreference.key(kind: "health", ownerID: owner)
+        defer {
+            UserDefaults.standard.removeObject(forKey: requestedKey)
+            UserDefaults.standard.removeObject(forKey: enabledKey)
+            UserDefaults.standard.removeObject(forKey: versionKey)
+        }
+        UserDefaults.standard.set(true, forKey: requestedKey)
+        UserDefaults.standard.set(1, forKey: versionKey)
+        let connector = HealthConnector(ownerID: owner)
+        XCTAssertTrue(connector.isEnabled)
+        connector.setEnabled(false)
+        XCTAssertFalse(HealthConnector(ownerID: owner).isEnabled)
+        let context = await HealthConnector.modelContext(ownerID: owner)
+        XCTAssertNil(context)
+        XCTAssertTrue(ConnectorEnabledPreference.value(kind: "health", ownerID: owner + "-other"))
+        connector.setEnabled(true)
+        XCTAssertTrue(HealthConnector(ownerID: owner).isEnabled)
+        XCTAssertTrue(HealthConnector(ownerID: owner).authorizationWasRequested)
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: versionKey), 1,
+            "Switching off/on preserves the connection and never starts or completes authorization")
+        connector.disconnect()
+        XCTAssertFalse(HealthConnector(ownerID: owner).authorizationWasRequested)
+    }
+
+    func testGmailOAuthRejectsSpoofedAndDuplicateCallbacks() throws {
+        let valid = URL(string: "com.mychat.ios:/oauth2redirect?state=expected&code=abc")!
+        XCTAssertEqual(try GmailOAuth.authorizationCode(callback: valid, state: "expected"), "abc")
+        for value in [
+            "com.mychat.ios:/oauth2redirect?state=wrong&code=abc",
+            "com.mychat.ios:/oauth2redirect?state=expected&state=expected&code=abc",
+            "com.mychat.ios:/oauth2redirect?state=expected&code=abc&error=access_denied",
+            "com.mychat.ios://attacker/oauth2redirect?state=expected&code=abc",
+            "mychat:/oauth2redirect?state=expected&code=abc"
+        ] { XCTAssertThrowsError(try GmailOAuth.authorizationCode(callback: URL(string: value)!, state: "expected")) }
+        XCTAssertEqual(String(data: GmailOAuth.form(["code": "a+b&c =中文"]), encoding: .utf8), "code=a%2Bb%26c%20%3D%E4%B8%AD%E6%96%87")
+        let gmail = GmailConnector(ownerID: "unit-test", clientID: "")
+        XCTAssertFalse(gmail.isConfigured)
+        XCTAssertFalse(gmail.isConnected)
+    }
+
+    func testGmailReadsPlainTextWithoutExecutingHTML() throws {
+        let encoded = GmailOAuth.base64URL(Data("邮件正文 ✓".utf8))
+        let data = Data("{\"mimeType\":\"multipart/alternative\",\"parts\":[{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"\(encoded)\"}}]}".utf8)
+        XCTAssertEqual(try JSONDecoder().decode(GmailPayload.self, from: data).plainText, "邮件正文 ✓")
+    }
+
+    func testBuild102CodeSendEligibilityDoesNotSilentlyDisableForModelOrRepository() throws {
+        XCTAssertTrue(CodeSendEligibility.canSubmit(draft: "哈哈", isBusy: false))
+        XCTAssertFalse(CodeSendEligibility.canSubmit(draft: " \n\t", isBusy: false))
+        XCTAssertFalse(CodeSendEligibility.canSubmit(draft: "哈哈", isBusy: true))
+        XCTAssertNotNil(CodeSendEligibility.modelIssue(nil))
+        let data = Data(#"{"id":"custom-sonnet","name":"Sonnet 5.5","provider":"custom","access":"premium","outputKind":"chat","promptPrice":0,"completionPrice":0,"contextLength":200000,"vision":true,"tools":false,"flagship":false,"reasoningEfforts":[],"reasoningMandatory":false,"endpointID":"70000000-0000-4000-8000-000000000001"}"#.utf8)
+        let custom = try JSONDecoder().decode(ModelCatalogItem.self, from: data)
+        XCTAssertNil(CodeSendEligibility.modelIssue(custom),
+            "A connected custom text model must not depend on platform tools metadata")
+    }
+
+    func testChatBottomAnchorAccountsForKeyboardOcclusionOnce() {
+        // A 1,000 pt body plus 484 pt of keyboard/input reservation must end
+        // at y=416, independently of an ancestor's keyboard avoidance.
+        let fullViewport = CGRect(x: 0, y: 60, width: 390, height: 840)
+        let reducedViewport = CGRect(x: 0, y: 60, width: 390, height: 520)
+        let fullOffset = ChatBottomAnchor.offset(contentHeight: 1_484,
+            bottomPadding: 484, viewport: fullViewport, composerTop: 424, topInset: 0)
+        let reducedOffset = ChatBottomAnchor.offset(contentHeight: 1_484,
+            bottomPadding: 484, viewport: reducedViewport, composerTop: 424, topInset: 0)
+        XCTAssertEqual(fullOffset, 644)
+        XCTAssertEqual(reducedOffset, fullOffset,
+            "A reduced viewport must not apply the keyboard height a second time")
+        XCTAssertEqual(fullViewport.minY + 1_000 - fullOffset, 416,
+            "The last body row belongs immediately above the input")
+        let hiddenKeyboard = ChatBottomAnchor.offset(contentHeight: 1_148,
+            bottomPadding: 148, viewport: fullViewport, composerTop: 760, topInset: 0)
+        XCTAssertEqual(hiddenKeyboard, 308)
+        XCTAssertEqual(ChatBottomAnchor.offset(contentHeight: 620, bottomPadding: 484,
+            viewport: fullViewport, composerTop: 424, topInset: 60), -60,
+            "A short transcript must retain its top inset instead of being pulled offscreen")
+    }
+
+    func testBuild102NativeDismissalConsumesFocusRequestAndCanFocusAgain() async throws {
+        var text = "draft"
+        var focused = false
+        let editor = ComposerEditorSession()
+        let input = ComposerTextInput(text: Binding(get: { text }, set: { text = $0 }),
+            focused: Binding(get: { focused }, set: { focused = $0 }), editor: editor,
+            placeholder: "Message", submit: {})
+        let coordinator = input.makeCoordinator()
+        let view = ComposerTextView()
+        view.delegate = coordinator
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        let controller = UIViewController()
+        window.rootViewController = controller
+        controller.view.addSubview(view)
+        view.frame = CGRect(x: 20, y: 100, width: 350, height: 50)
+        window.makeKeyAndVisible()
+        defer { view.resignFirstResponder(); window.isHidden = true }
+        focused = true
+        coordinator.requestFocus(true, in: view)
+        XCTAssertTrue(view.isFirstResponder)
+        await Task.yield()
+        view.resignFirstResponder()
+        coordinator.requestFocus(true, in: view)
+        XCTAssertFalse(view.isFirstResponder, "A stale SwiftUI focus binding must not undo native dismissal")
+        await Task.yield()
+        coordinator.requestFocus(false, in: view)
+        focused = true
+        coordinator.requestFocus(true, in: view)
+        XCTAssertTrue(view.isFirstResponder, "A new explicit focus action must still open the keyboard")
+    }
+
+    func testBuild102TypingAtlasLoadsAll471Frames() async throws {
+        let frames = await DotMotionFrames.frames(for: .typing)
+        XCTAssertEqual(frames?.images.count, 471)
+        XCTAssertEqual(frames?.images.first?.width, 144)
+        XCTAssertEqual(frames?.images.last?.height, 144)
+        XCTAssertEqual(try XCTUnwrap(frames?.duration), 7.853981633974483, accuracy: 0.001)
+    }
+
+    func testBuild102SendCommitsTheLatestNativeTextBeforeDraftIsConsumed() {
+        var text = "older"
+        let input = ComposerTextInput(text: Binding(get: { text }, set: { text = $0 }),
+            focused: .constant(false), editor: ComposerEditorSession(), placeholder: "Message", submit: {})
+        let coordinator = input.makeCoordinator()
+        let view = ComposerTextView()
+        view.text = "latest text"
+        coordinator.textViewDidChange(view)
+        coordinator.commitText(view)
+        XCTAssertEqual(text, "latest text")
+        XCTAssertNil(coordinator.pendingEdit)
+    }
+
+    func testBuild102OlderTextAcknowledgementPreservesNewerNativeEdit() async {
+        var text = ""
+        let input = ComposerTextInput(text: Binding(get: { text }, set: { text = $0 }),
+            focused: .constant(false), editor: ComposerEditorSession(), placeholder: "Message", submit: {})
+        let coordinator = input.makeCoordinator()
+        let view = ComposerTextView()
+        view.text = "a"
+        coordinator.textViewDidChange(view)
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        XCTAssertEqual(text, "a")
+        view.text = "ab"
+        coordinator.textViewDidChange(view)
+        coordinator.acceptModelText("a")
+        XCTAssertEqual(coordinator.pendingEdit, "ab")
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        XCTAssertEqual(text, "ab")
+        view.text = "abc"
+        coordinator.textViewDidChange(view)
+        coordinator.acceptModelText("")
+        XCTAssertNil(coordinator.pendingEdit, "An explicit draft reset must still win")
+    }
+
+    func testBuild102PrimaryModelsUseRealRouteVersionsAndIncludePairedCurrentModels() async throws {
+        func model(_ id: String, route: String? = nil) throws -> ModelCatalogItem {
+            var object: [String: Any] = ["id": id, "name": "A custom display name", "provider": "Anthropic",
+                "access": "quota", "outputKind": "chat", "promptPrice": 0, "completionPrice": 0,
+                "contextLength": 100000, "vision": true, "tools": true, "flagship": false,
+                "reasoningEfforts": [], "reasoningMandatory": false]
+            if let route { object["endpointID"] = UUID().uuidString; object["upstreamModelID"] = route }
+            return try JSONDecoder().decode(ModelCatalogItem.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        let oldOpus = try model("anthropic/claude-opus-5")
+        let oldSonnet = try model("anthropic/claude-sonnet-5")
+        let fable = try model("anthropic/claude-fable-5-1")
+        let opus = try model("anthropic/claude-opus-5-5")
+        let sonnet = try model("paired-endpoint", route: "claude-sonnet-5-5")
+        let haiku = try model("anthropic/claude-haiku-5-5")
+        let primary = ModelCatalogItem.primaryChatModels([oldOpus, oldSonnet, sonnet, haiku, fable, opus], selectedID: sonnet.id)
+        XCTAssertEqual(primary.map(\.chatDisplayName), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"])
+        XCTAssertEqual(primary.map(\.id), [fable.id, opus.id, sonnet.id, haiku.id])
+        XCTAssertEqual(oldOpus.chatDisplayName, "Opus 5", "Never rename an old wire route as a newer model")
+
+        let catalogWithFallback = ModelCatalogItem.addingHaiku55Fallback(to: [fable, opus, sonnet])
+        let fallbackPrimary = ModelCatalogItem.primaryChatModels(catalogWithFallback, selectedID: nil)
+        XCTAssertEqual(fallbackPrimary.map(\.chatDisplayName), ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"])
+        XCTAssertEqual(fallbackPrimary.last?.id, "anthropic/claude-haiku-5.5")
+        XCTAssertEqual(fallbackPrimary.last?.isSelectable, sonnet.isSelectable)
+        XCTAssertEqual([AppDestination.chats.rawValue, AppDestination.projects.rawValue,
+                        AppDestination.code.rawValue, AppDestination.artifacts.rawValue],
+            ["聊天", "项目", "编程", "可视化"])
+
+        let now = Date(timeIntervalSince1970: 1_000)
+        let user = AuthUser(id: "fixture-user", email: nil, isAnonymous: false)
+        let usable = AuthSession(accessToken: "token", refreshToken: "refresh", tokenType: "bearer",
+            expiresAt: now.addingTimeInterval(45), user: user)
+        let expiring = AuthSession(accessToken: "token", refreshToken: "refresh", tokenType: "bearer",
+            expiresAt: now.addingTimeInterval(7), user: user)
+        XCTAssertTrue(ChatAuthenticationPolicy.canAdmitImmediately(usable, now: now))
+        XCTAssertFalse(ChatAuthenticationPolicy.canAdmitImmediately(expiring, now: now))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+        let client = ChatAPIClient(session: URLSession(configuration: configuration), baseURL: URL(string: "https://mychat.invalid")!)
+        defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+        for item in primary {
+            let message = ChatMessage(id: UUID(), role: .user, content: "test", thinking: nil, createdAt: Date())
+            let command = ChatAppendCommand(conversationID: UUID(), userMessage: message, modelID: item.id,
+                endpointID: item.endpointID.flatMap(UUID.init(uuidString:)), createConversation: true, title: "routing")
+            let accepted = try JSONSerialization.data(withJSONObject: [
+                "schemaVersion": 1, "jobId": UUID().uuidString.lowercased(),
+                "generationId": command.generationID.uuidString.lowercased(),
+                "userMessageId": command.userMessageID.uuidString.lowercased(),
+                "assistantMessageId": command.assistantMessageID.uuidString.lowercased(),
+                "status": "queued", "created": true,
+                "streamUrl": "https://mychat.invalid/api/v1/jobs/fixture/events"
+            ])
+            let recorder = ChatAdmissionRetryRecorder(responses: [(202, accepted, [:])])
+            ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+            _ = try await client.enqueueAppendTurn(command, accessToken: "fixture-token")
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(recorder.requestBodies.first)) as? [String: Any])
+            if let endpoint = item.endpointID {
+                XCTAssertEqual(body["endpointId"] as? String, endpoint.lowercased())
+                XCTAssertNil(body["modelId"])
+            } else { XCTAssertEqual(body["modelId"] as? String, item.id) }
+        }
+    }
 
     func testStreamingArtifactKeepsCompleteTokensAndOriginalMessageOrder() {
         let prefix = #"<svg viewBox="0 0 300 200"><circle id="sun" cx="100" cy="100" r="20"/>"#
@@ -23,6 +332,235 @@ import PDFKit
         XCTAssertEqual(document.blocks.last, .paragraph("After"))
         let growing = ChatArtifactParser.parse("Before\n\n<inline-artifact>" + prefix)
         XCTAssertEqual(growing.blocks.first?.id, document.artifacts.first?.id)
+    }
+
+    func testAnimatedDrawingReservesSpaceBeyondOld620PointClip() async throws {
+        var reportedHeight: CGFloat = 0
+        let raw = #"<svg viewBox="0 0 300 300"><circle id="moving" cx="100" cy="100" r="20"><animate id="motion" attributeName="cy" values="100;1000;100" dur="1s" repeatCount="indefinite"/></circle></svg>"#
+        let coordinator = ArtifactSandboxView.Coordinator()
+        let parent = ArtifactSandboxView(rawHTML: raw, colorScheme: .light, inline: true,
+            reduceMotion: false, contentHeight: { reportedHeight = max(reportedHeight, $0) })
+        let view = parent.makeWebView(coordinator: coordinator)
+        view.frame = CGRect(x: 0, y: 0, width: 390, height: 180)
+        defer { ArtifactSandboxView.dismantleUIView(view, coordinator: coordinator) }
+        func evaluate(_ script: String) async throws -> Bool {
+            try await withCheckedThrowingContinuation { continuation in
+                view.evaluateJavaScript(script, in: nil, in: .defaultClient) { result in
+                    switch result {
+                    case .success(let value): continuation.resume(returning: value as? Bool ?? false)
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+        for _ in 0..<100 {
+            if (try? await evaluate("document.getElementById('motion') !== null && !!window.__mychatMeasureArtifact")) == true { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        let measured = try await evaluate("const svg=document.querySelector('svg'); svg.pauseAnimations(); svg.setCurrentTime(0.5); window.__mychatMeasureArtifact(); getComputedStyle(svg).overflow==='visible'")
+        XCTAssertTrue(measured)
+        for _ in 0..<50 where reportedHeight <= 620 { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertGreaterThan(reportedHeight, 620, "Animated content outside the original viewBox must expand the actual surface")
+        let contained = try await evaluate("document.getElementById('moving').getBoundingClientRect().bottom <= document.getElementById('artifact').getBoundingClientRect().bottom")
+        XCTAssertTrue(contained)
+    }
+
+    func testSourcesBadgeOnlyAcceptsActualWebSearchResults() throws {
+        func search(kind: String?, url: String, conversation: String? = nil) throws -> ChatToolSearch {
+            var result: [String: Any] = ["title": "source", "url": url]
+            if let conversation { result["conversation_id"] = conversation }
+            var payload: [String: Any] = ["query": "query", "results": [result]]
+            if let kind { payload["kind"] = kind }
+            return try JSONDecoder().decode(ChatToolSearch.self, from: JSONSerialization.data(withJSONObject: payload))
+        }
+        XCTAssertTrue(try search(kind: "web", url: "https://example.com").isWebSearch)
+        XCTAssertTrue(try search(kind: nil, url: "https://example.com").isWebSearch)
+        XCTAssertFalse(try search(kind: "history", url: "https://example.com").isWebSearch)
+        XCTAssertFalse(try search(kind: "connector", url: "https://example.com").isWebSearch)
+        XCTAssertFalse(try search(kind: nil, url: "mychat://conversation/old").isWebSearch)
+        XCTAssertFalse(try search(kind: nil, url: "https://example.com", conversation: UUID().uuidString).isWebSearch)
+    }
+
+    /// Opt-in API probe only: no window, UI automation, screenshots or fixture
+    /// replies. The existing account secret stays in Keychain/server storage.
+    func testOptInLiveCustomEndpointFirstTextTiming() async throws {
+        guard let probeMode = ProcessInfo.processInfo.environment["MYCHAT_LIVE_NETWORK_PROBE"],
+              ["1", "catalog", "connect-models", "code"].contains(probeMode) else {
+            throw XCTSkip("Live network probe is opt-in")
+        }
+        let store = KeychainAuthSessionStore()
+        guard try store.load() != nil else { throw XCTSkip("No signed-in account in this simulator") }
+        URLProtocol.unregisterClass(NativeAuditURLProtocol.self)
+        defer { URLProtocol.registerClass(NativeAuditURLProtocol.self) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = []
+        let deadlineSeconds: Double = ["connect-models", "code"].contains(probeMode) ? 120 : 55
+        configuration.timeoutIntervalForRequest = probeMode == "connect-models" ? 45 : 25
+        configuration.timeoutIntervalForResource = deadlineSeconds
+        let session = URLSession(configuration: configuration)
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(deadlineSeconds))
+            if !Task.isCancelled { session.invalidateAndCancel() }
+        }
+        defer { deadline.cancel(); session.invalidateAndCancel() }
+        let config = MobileConfigurationClient(session: session)
+        let auth = SupabaseAuthClient(configurationClient: config, sessionStore: store, networkSession: session)
+        let token: String
+        print("LIVE_PROBE_STAGE auth")
+        if let stored = try store.load(), !stored.expires(within: 0) {
+            token = stored.accessToken
+        } else {
+            do {
+                guard let refreshed = try await auth.accessToken() else { throw XCTSkip("No active account") }
+                token = refreshed
+            } catch is CancellationError {
+                // The host app can refresh the same Keychain session at launch.
+                guard let current = try store.load(), !current.expires(within: 0) else { throw CancellationError() }
+                token = current.accessToken
+            }
+        }
+        print("LIVE_PROBE_STAGE endpoints")
+        let endpoints = try await AccountSettingsClient(configurationClient: config, session: session)
+            .fetchModelEndpoints(accessToken: token)
+        let candidates = endpoints.filter { !$0.needsReconnect && $0.outputKind == .chat }
+        let requestedModel = ProcessInfo.processInfo.environment["MYCHAT_LIVE_MODEL_ID"]
+        guard let endpoint = candidates.first(where: { $0.model == requestedModel })
+                ?? candidates.first(where: { $0.model.localizedCaseInsensitiveContains("sonnet") })
+                ?? candidates.first(where: { $0.model.localizedCaseInsensitiveContains("haiku") }),
+              let endpointID = UUID(uuidString: endpoint.id) else {
+            throw XCTSkip("This account has no connected Claude endpoint; no public-route fallback was used")
+        }
+        if probeMode == "catalog" || probeMode == "connect-models" {
+            print("CONNECTED_MODEL_IDS " + candidates.map(\.model).sorted().joined(separator: ", "))
+            var request = URLRequest(url: URL(string: "https://mychat-nm6x.onrender.com/api/endpoints/discover")!)
+            request.httpMethod = "POST"
+            request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["endpointId": endpoint.id])
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                return XCTFail("Stored-endpoint model discovery failed; credentials and body omitted")
+            }
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let models = try XCTUnwrap(payload["models"] as? [[String: Any]])
+            let claude = models.compactMap { $0["id"] as? String }.filter { $0.localizedCaseInsensitiveContains("claude") }
+            print("DISCOVERED_CLAUDE_MODEL_IDS " + claude.sorted().joined(separator: ", "))
+            XCTAssertFalse(claude.isEmpty)
+            if probeMode == "connect-models" {
+                let currentModels = ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]
+                for model in currentModels {
+                    guard claude.contains(model) else { return XCTFail("Requested model absent from the real upstream catalog: " + model) }
+                    if candidates.contains(where: { $0.model == model && $0.baseURL == endpoint.baseURL }) { continue }
+                    var create = URLRequest(url: URL(string: "https://mychat-nm6x.onrender.com/api/endpoints")!)
+                    create.httpMethod = "POST"
+                    create.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+                    create.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    create.httpBody = try JSONSerialization.data(withJSONObject: [
+                        "sourceEndpointId": endpoint.id, "model": model, "outputKind": "chat"
+                    ])
+                    let (createdData, createdResponse) = try await session.data(for: create)
+                    guard (createdResponse as? HTTPURLResponse)?.statusCode == 201 else {
+                        return XCTFail("Model connection failed: " + model + "; response body omitted")
+                    }
+                    let result = try XCTUnwrap(JSONSerialization.jsonObject(with: createdData) as? [String: Any])
+                    let saved = try XCTUnwrap(result["endpoint"] as? [String: Any])
+                    XCTAssertEqual(saved["model"] as? String, model)
+                    XCTAssertNil(saved["apiKey"])
+                    XCTAssertNil(saved["api_key"])
+                    print("CONNECTED_VERIFIED_MODEL " + model)
+                }
+                let saved = try await AccountSettingsClient(configurationClient: config, session: session)
+                    .fetchModelEndpoints(accessToken: token)
+                for model in currentModels {
+                    XCTAssertTrue(saved.contains { $0.model == model && $0.baseURL == endpoint.baseURL && !$0.needsReconnect })
+                }
+                print("ALL_CURRENT_MODELS_CONNECTED")
+            }
+            return
+        }
+        if probeMode == "code" {
+            print("LIVE_PROBE_STAGE code-session")
+            let account = try XCTUnwrap(store.load())
+            let workspace = WorkspaceDataClient(configurationClient: config, session: session)
+            let record = try await workspace.createCodeSession(userID: account.user.id,
+                repository: nil, title: "API check · Build 102", accessToken: token)
+            let sessionID = try XCTUnwrap(UUID(uuidString: record.id))
+            _ = try await workspace.createCodeMessage(userID: account.user.id, sessionID: record.id,
+                role: "user", content: "仅回复 OK。", metadata: nil, accessToken: token)
+            print("LIVE_PROBE_STAGE code-enqueue")
+            let command = CodeChatCommand(repository: record.repository, modelID: endpoint.model,
+                endpointID: endpointID, reasoningEffort: nil,
+                messages: [CodeContextMessage(role: "user", content: "仅回复 OK。")],
+                taskID: nil, responseID: UUID(), sessionID: sessionID)
+            let started = Date()
+            let admission: CodeAdmission
+            do {
+                admission = try await CodeAPIClient(session: session).enqueue(command, accessToken: token)
+            } catch {
+                let failure = error as NSError
+                print("CODE_ENQUEUE_FAILURE type=" + String(reflecting: type(of: error))
+                    + " domain=" + failure.domain + " code=" + String(failure.code)
+                    + " cancelled=" + String(Task.isCancelled))
+                throw error
+            }
+            print("CODE_API_ACCEPTED model=" + endpoint.model + " admittedMs=" + String(Int(Date().timeIntervalSince(started) * 1000)))
+            var firstText = false
+            var completed = false
+            for try await event in JobEventStream(session: session).events(admission: admission, accessToken: token) {
+                switch event.payload {
+                case let .textDelta(text) where !text.isEmpty:
+                    if !firstText { print("CODE_FIRST_TEXT_MS " + String(Int(Date().timeIntervalSince(started) * 1000))) }
+                    firstText = true
+                case let .terminal(terminal):
+                    XCTAssertEqual(terminal.status, .completed)
+                    completed = terminal.status == .completed
+                    print("CODE_TERMINAL " + terminal.status.rawValue)
+                default: break
+                }
+            }
+            XCTAssertTrue(firstText)
+            XCTAssertTrue(completed)
+            return
+        }
+        let command = ChatAppendCommand(conversationID: UUID(),
+            userMessage: ChatMessage(id: UUID(), role: .user,
+                content: ProcessInfo.processInfo.environment["MYCHAT_LIVE_PROMPT"] ?? "仅回复 OK。",
+                thinking: nil, createdAt: Date()),
+            modelID: endpoint.model, endpointID: endpointID, createConversation: true,
+            conversationMemoryEnabled: false, title: "Latency check · Build 102")
+        let start = Date()
+        var metrics: [String: Any] = ["model": endpoint.model, "generationID": command.generationID.uuidString]
+        func mark(_ key: String) { metrics[key] = Int(Date().timeIntervalSince(start) * 1000) }
+        defer {
+            if let data = try? JSONSerialization.data(withJSONObject: metrics, options: [.prettyPrinted, .sortedKeys]) {
+                let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent("live-network-probe.json")
+                try? data.write(to: url, options: .atomic)
+                print("LIVE_NETWORK_TIMING " + (String(data: data, encoding: .utf8) ?? ""))
+            }
+        }
+        let client = ChatAPIClient(session: session)
+        let connection = try await client.openAppendTurn(command, accessToken: token)
+        mark("admittedMs")
+        let events: AsyncThrowingStream<ChatJobEvent, Error>
+        if let admitted = connection.events { events = admitted }
+        else { events = JobEventStream(session: session).events(admission: connection.admission, accessToken: token) }
+        var firstText = false
+        for try await event in events {
+            if metrics["firstEventMs"] == nil { mark("firstEventMs") }
+            switch event.payload {
+            case let .textDelta(delta) where !delta.isEmpty:
+                if !firstText { firstText = true; mark("firstTextMs") }
+            case .modelOutputCompleted:
+                mark("modelOutputCompletedMs")
+            case let .terminal(terminal):
+                mark("terminalMs")
+                metrics["terminalStatus"] = terminal.status.rawValue
+                XCTAssertEqual(terminal.status, .completed)
+            default: break
+            }
+        }
+        XCTAssertTrue(firstText, "A completed first-token measurement requires actual model text")
     }
 
     func testStreamingArtifactPatchesSameCanvasWithoutDroppingDrawnNodes() async throws {
@@ -59,6 +597,307 @@ import PDFKit
         try await waitFor("document.getElementById('earth') !== null")
         let result = try await evaluate("document.getElementById('sun') === window.originalSun && document.querySelectorAll('circle').length === 2 && document.querySelectorAll('script').length === 0 && document.body.style.padding === '0px'")
         XCTAssertTrue(result)
+    }
+
+    func testDotOutputPositionNeverReversesDuringLayoutReparse() {
+        var displayed: CGFloat = 100
+        for target in [CGFloat(140), 120, 160, 130, 170] {
+            let next = DotOutputPosition.advance(displayed: displayed, target: target, elapsed: 1 / 60)
+            XCTAssertGreaterThanOrEqual(next, displayed)
+            XCTAssertLessThanOrEqual(next, max(displayed, target))
+            displayed = next
+        }
+        XCTAssertEqual(DotOutputPosition.advance(displayed: 100, target: 80, elapsed: 1 / 60), 100)
+        XCTAssertEqual(DotOutputPosition.advance(displayed: 100, target: 100.1, elapsed: 1 / 60), 100.1)
+    }
+
+    func testResponseRevealTimingKeepsGraphemesAndFinishesAfterCompletion() {
+        for source in ["中文渐进显示", "English streaming", "标题 **粗体** 👨‍👩‍👧‍👦 e\u{301}"] {
+            let count = source.count
+            let step = ResponseRevealTiming.step(added: count)
+            XCTAssertLessThanOrEqual(Double(max(0, count - 1)) * step, 0.080001)
+            for index in 0..<count {
+                let born = 100 + Double(index) * step
+                XCTAssertEqual(ResponseRevealTiming.opacity(now: born - 0.01, born: born), 0)
+                XCTAssertEqual(ResponseRevealTiming.opacity(now: born, born: born), 0.10)
+                XCTAssertEqual(ResponseRevealTiming.opacity(now: born + 0.12, born: born), 0.8875, accuracy: 0.000001)
+                XCTAssertEqual(ResponseRevealTiming.opacity(now: 100.33, born: born), 1)
+            }
+        }
+        XCTAssertEqual(ResponseRevealTiming.step(added: 1), 0)
+        XCTAssertLessThanOrEqual(9_999 * ResponseRevealTiming.step(added: 10_000), 0.080001)
+        XCTAssertEqual(Array("👨‍👩‍👧‍👦e\u{301}").count, 2)
+    }
+
+    func testConversationNavigationAnchorsWithoutInheritingThePreviousGenerationAnimation() async throws {
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 60, width: 390, height: 840))
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: 390, height: 1_600)
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        window.addSubview(scroll)
+        let controller = ChatScrollController()
+        controller.setComposerGeometry(ChatComposerGeometry(bottomPadding: 650, topInWindow: 424))
+        controller.setGenerationActive(true)
+        controller.attach(scroll, conversationID: UUID())
+        scroll.setContentOffset(CGPoint(x: 0, y: 40), animated: false)
+        controller.attach(scroll, conversationID: UUID())
+        try await Task.sleep(for: .milliseconds(30))
+        let expected = ChatReadingAnchor.offset(contentHeight: scroll.contentSize.height,
+            bottomPadding: 650, viewport: scroll.convert(scroll.bounds, to: nil),
+            composerTop: 424, topInset: scroll.adjustedContentInset.top)
+        XCTAssertEqual(scroll.contentOffset.y, expected, accuracy: 0.5,
+            "A new conversation must anchor once rather than animate from the previous conversation's offset")
+        controller.pauseFollowAnimation()
+    }
+
+    func testModelDisplayLabelsRemoveSeparatorsWithoutChangingRoutingIdentifiers() throws {
+        for (route, label, expected) in [("z-ai/glm-5.2", "GLM-5.2", "GLM5.2"),
+            ("chatgpt-plan:gpt-6-astra", "GPT-6-Astra", "GPT6 Astra"),
+            ("chatgpt-plan:gpt-5.6-sol", "GPT-5.6-Sol", "GPT5.6 Sol")] {
+            let payload: [String: Any] = ["id": route, "name": label, "provider": "test", "access": "quota",
+                "outputKind": "chat", "promptPrice": 0, "completionPrice": 0, "contextLength": 1000,
+                "vision": false, "tools": false, "flagship": false, "reasoningEfforts": [], "reasoningMandatory": false]
+            let model = try JSONDecoder().decode(ModelCatalogItem.self,
+                from: JSONSerialization.data(withJSONObject: payload))
+            XCTAssertEqual(model.chatDisplayName, expected)
+            XCTAssertEqual(model.id, route)
+        }
+    }
+
+    func testPrivateSendNeverAppearsInHistoryAndExitRemovesAllLocalGenerationState() async {
+        let model = NativeRuntimeFixture.makeModel()
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        let history = model.conversations
+        model.beginPrivateChat()
+        let id = model.activeConversationID!
+        model.draft = "private message"
+        model.sendDraft()
+        XCTAssertTrue(model.isPrivateChat)
+        XCTAssertEqual(model.activeConversationID, id)
+        XCTAssertEqual(model.conversations, history, "A private send must not create ordinary history metadata")
+        XCTAssertEqual(model.messages.count, 2)
+        model.beginNewChat()
+        XCTAssertFalse(model.isPrivateChat)
+        XCTAssertNil(model.activeConversationID)
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertEqual(model.conversations, history)
+        XCTAssertFalse(model.generatingConversationIDs.contains(id))
+        XCTAssertNil(model.conversationErrors[id])
+        XCTAssertNil(model.queuedCommands[id])
+        XCTAssertTrue(model.isPrivateConversation(id.uuidString))
+        model.openConversation(ConversationRecord(id: id.uuidString, title: "Private chat", updatedAt: "",
+            projectID: nil, starred: false, pinned: false))
+        XCTAssertNil(model.activeConversationID, "A stale private history entry must not trigger ordinary loading")
+    }
+
+    func testChinesePageHeadingPreservesItsRequestedWeight() {
+        let text = "选择模型" as CFString
+        let body = CTFontCreateForString(MyChatSystemFont.appUIFont(size: 17), text, CFRange(location: 0, length: 4))
+        let heading = CTFontCreateForString(MyChatSystemFont.appUIFont(size: 17, weight: .semibold), text, CFRange(location: 0, length: 4))
+        let bodyTraits = CTFontCopyTraits(body) as NSDictionary
+        let headingTraits = CTFontCopyTraits(heading) as NSDictionary
+        XCTAssertGreaterThan((headingTraits[kCTFontWeightTrait] as? NSNumber)?.doubleValue ?? 0,
+            (bodyTraits[kCTFontWeightTrait] as? NSNumber)?.doubleValue ?? 0)
+        XCTAssertEqual(CTFontGetSize(body), CTFontGetSize(heading))
+    }
+
+    func testDrawerShortSwipeWorksWhenReleaseVelocityIsZero() {
+        let singleSample = DrawerMotion.draggedOffset(origin: 0, translation: 252, width: 320)
+        XCTAssertEqual(singleSample, 252, "The began/ended samples must carry the real displacement even without changed")
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: singleSample, velocity: 0, width: 320,
+            cancelled: false, wasOpen: false))
+        XCTAssertEqual(DrawerMotion.draggedOffset(origin: 320, translation: -252, width: 320), 68)
+        XCTAssertEqual(DrawerMotion.draggedOffset(origin: 0, translation: -30, width: 320), 0)
+        XCTAssertLessThan(DrawerMotion.draggedOffset(origin: 320, translation: 1_000, width: 320), 332)
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 40, velocity: 800, width: 320,
+            cancelled: false, wasOpen: false))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 280, velocity: -800, width: 320,
+            cancelled: false, wasOpen: true))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 40, velocity: 0, width: 320,
+            cancelled: false, wasOpen: false))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 280, velocity: 0, width: 320,
+            cancelled: false, wasOpen: true))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 120, velocity: 1_200, width: 320,
+            cancelled: false, wasOpen: false))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 200, velocity: -1_200, width: 320,
+            cancelled: false, wasOpen: true))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 170, velocity: 0, width: 320,
+            cancelled: false, wasOpen: false))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 150, velocity: 0, width: 320,
+            cancelled: false, wasOpen: true))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 20, velocity: -10_000, width: 320,
+            cancelled: true, wasOpen: true))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 300, velocity: 10_000, width: 320,
+            cancelled: true, wasOpen: false))
+        XCTAssertEqual(DrawerMotion.initialVelocity(10_000, distance: 10), 20)
+        XCTAssertEqual(DrawerMotion.initialVelocity(-400, distance: 100), -4)
+        XCTAssertEqual(DrawerMotion.initialVelocity(-400, distance: -200), 2)
+    }
+
+    func testDrawerRequiresHorizontalIntentWithoutRaisingShortSwipeThreshold() {
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 4, y: 2)), .undecided)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 7, y: 14)), .vertical)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 18, y: 12)), .vertical)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 16, y: 3)), .horizontal)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: -16, y: 3)), .horizontal)
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 40, velocity: 0, width: 320, cancelled: false, wasOpen: false))
+        XCTAssertEqual(DrawerMotion.shadeOpacity(progress: 0), 0.38, accuracy: 0.0001)
+        XCTAssertEqual(DrawerMotion.shadeOpacity(progress: 0.5), 0.19, accuracy: 0.0001)
+        XCTAssertEqual(DrawerMotion.shadeOpacity(progress: 1), 0)
+        XCTAssertEqual(HapticFeedback.intensity, 0.9)
+    }
+
+    func testVisibleProcessTimelinePreservesTextToolSummaryOrderAndDeduplicatesSteps() {
+        let job = UUID()
+        var entries: [ChatProcessEntry] = []
+        let step = CodeAgentStep(kind: "read", label: "读取文件", eventID: "step-1")
+        let payloads: [ChatJobEventPayload] = [.textDelta("先看"), .textDelta("目录。"),
+            .agentStep(step), .reasoningSummaryDelta("核对文件"), .textDelta("目录有三份文件。"), .agentStep(step)]
+        for (index, payload) in payloads.enumerated() {
+            ChatProcessEntry.record(ChatJobEvent(jobID: job, sequence: index + 1, payload: payload), into: &entries)
+        }
+        XCTAssertEqual(entries.count, 4)
+        XCTAssertEqual(entries[0].content, .text("先看目录。"))
+        XCTAssertEqual(entries[1].content, .step(step))
+        XCTAssertEqual(entries[2].content, .reasoningSummary("核对文件"))
+        XCTAssertEqual(entries[3].content, .text("目录有三份文件。"))
+    }
+
+    func testDrawerIgnoresSmallMovementAndHonorsAReversedRelease() {
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 10, velocity: 0, width: 320, cancelled: false, wasOpen: false))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 310, velocity: 0, width: 320, cancelled: false, wasOpen: true))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 40, velocity: -150, width: 320, cancelled: false, wasOpen: false))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 280, velocity: 150, width: 320, cancelled: false, wasOpen: true))
+        XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 40, velocity: 0, width: 320, cancelled: true, wasOpen: true))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 280, velocity: 0, width: 320, cancelled: true, wasOpen: false))
+        XCTAssertFalse(DrawerMotion.targetIsOpen(offset: 145, velocity: 0, width: 320, cancelled: false, wasOpen: false, origin: 150))
+    }
+
+    func testSheetDragSharesGeometryAndDimmerAndRestoresCancelledDetent() {
+        let geometry = SheetMotionGeometry(bounds: CGRect(x: 0, y: 0, width: 390, height: 844),
+            topInset: 60, fraction: 0.63)
+        XCTAssertEqual(geometry.expanded.minY, 68)
+        XCTAssertEqual(geometry.compact.maxY, 844)
+        XCTAssertEqual(geometry.dimming(top: geometry.compact.minY), 1)
+        let drag = geometry.dragged(top: geometry.compact.minY + 100, reduceMotion: false)
+        XCTAssertEqual(drag.height, geometry.compact.height)
+        XCTAssertLessThan(geometry.dimming(top: drag.minY), 1)
+        XCTAssertEqual(geometry.target(top: drag.minY, velocity: 2_000, cancelled: true, origin: .compact), .compact)
+        XCTAssertEqual(geometry.target(top: drag.minY, velocity: 2_000, cancelled: false, origin: .compact), .dismissed)
+        XCTAssertEqual(geometry.target(top: geometry.expanded.minY, velocity: 0, cancelled: false, origin: .compact), .expanded)
+        XCTAssertEqual(geometry.dragged(top: -200, reduceMotion: true).minY, geometry.expanded.minY,
+            "Reduced motion must suppress overshoot")
+        XCTAssertEqual(geometry.dimming(top: geometry.compact.minY + geometry.compact.height), 0)
+    }
+
+    func testResponseGlyphBirthsPreserveNativeClustersAcrossAppendAndMarkdownRestyling() {
+        var births = ResponseGlyphBirths<Int>()
+        let initial = births.update(indices: [0, 1, 1, 4], now: 100)
+        XCTAssertEqual(initial.count, 3, "A shared native cluster must not be split into multiple fading fragments")
+        XCTAssertGreaterThan(ResponseRevealTiming.opacity(now: 100, born: initial[0]!), 0,
+            "The first glyph must have visible ink on its first frame")
+        let appended = births.update(indices: [0, 1, 1, 4, 8, 9], now: 101)
+        for index in [0, 1, 4] { XCTAssertEqual(appended[index], initial[index]) }
+        XCTAssertEqual(appended[8], 101)
+        XCTAssertEqual(births.update(indices: [0, 1, 4, 8, 9], now: 102), appended,
+            "A Markdown style change must not restart settled text")
+        let burst = births.update(indices: Array(0..<10_000), now: 103)
+        XCTAssertLessThanOrEqual(burst.values.max()!, 103.080001,
+            "A large received chunk must not become a seconds-long display queue")
+    }
+
+    func testJumpToLatestReleasesFrozenTranscriptAndUsesTheActualEndOfTheScrollRange() {
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 60, width: 390, height: 840))
+        scroll.contentSize = CGSize(width: 390, height: 1_600)
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentInset = UIEdgeInsets(top: 10, left: 0, bottom: 16, right: 0)
+        let controller = ChatScrollController()
+        controller.pauseFollowAnimation()
+        controller.attach(scroll, conversationID: UUID())
+        controller.setComposerGeometry(ChatComposerGeometry(bottomPadding: 600, topInWindow: 424))
+        var activeStates: [Bool] = []
+        controller.onInteractionChanged = { activeStates.append($0) }
+        controller.setInteractionActive(true)
+        var published = false
+        controller.publishWhenIdle(id: UUID()) { published = true }
+        XCTAssertFalse(published)
+        controller.jumpToLatest(animated: false)
+        XCTAssertTrue(controller.latestVisible, "The jump button disappears immediately after its action")
+        XCTAssertTrue(published, "The button must flush content held during a scroll interaction")
+        XCTAssertEqual(activeStates, [true, false])
+        XCTAssertEqual(scroll.contentOffset.y, 776, accuracy: 0.001,
+            "Extra reading space must not turn the explicit bottom action into a reading-anchor jump")
+    }
+
+    func testStreamingArtifactRetainsAnimationAcrossUnkeyedInsertionAndCompletion() async throws {
+        let first = #"<svg id="drawing" viewBox="0 0 300 200"><circle id="sun" data-label="太阳" cx="100" cy="100" r="20"><animate attributeName="r" values="20;25;20" dur="1s" repeatCount="indefinite"/></circle></svg>"#
+        let coordinator = ArtifactSandboxView.Coordinator()
+        let web = ArtifactSandboxView(rawHTML: first, colorScheme: .light, isStreaming: true,
+            inline: true, reduceMotion: false).makeWebView(coordinator: coordinator)
+        web.frame = CGRect(x: 0, y: 0, width: 390, height: 260)
+        defer { web.stopLoading(); web.navigationDelegate = nil }
+        func evaluate(_ expression: String) async throws -> Bool {
+            try await withCheckedThrowingContinuation { continuation in
+                web.evaluateJavaScript(expression, in: nil, in: .defaultClient) { result in
+                    switch result {
+                    case .success(let value): continuation.resume(returning: value as? Bool ?? false)
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+        func waitFor(_ expression: String) async throws {
+            for _ in 0..<100 {
+                if (try? await evaluate(expression)) == true { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            throw NSError(domain: "ArtifactRuntimeTest", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: expression])
+        }
+        try await waitFor("document.getElementById('sun') !== null")
+        _ = try await evaluate("window.originalSun = document.getElementById('sun'); window.originalDrawing = document.getElementById('drawing'); window.started = window.originalDrawing.getCurrentTime(); true")
+        try await Task.sleep(for: .milliseconds(150))
+        let growing = first.replacingOccurrences(of: "<circle", with: "\n<defs><linearGradient id='light'/></defs><circle")
+        coordinator.update(ArtifactSandboxView(rawHTML: growing, colorScheme: .light, isStreaming: true,
+            inline: true, reduceMotion: false), in: web)
+        try await waitFor("document.getElementById('light') !== null")
+        let retained = try await evaluate("document.getElementById('sun') === window.originalSun && document.getElementById('drawing') === window.originalDrawing && window.originalDrawing.getCurrentTime() > window.started")
+        XCTAssertTrue(retained, "Whitespace/defs insertion must not replace the animated node")
+        _ = try await evaluate("window.beforeCompletion = window.originalDrawing.getCurrentTime(); true")
+        coordinator.update(ArtifactSandboxView(rawHTML: growing, colorScheme: .dark, isStreaming: false,
+            inline: true, reduceMotion: false), in: web)
+        try await waitFor("document.documentElement.style.colorScheme === 'dark'")
+        try await Task.sleep(for: .milliseconds(150))
+        let completed = try await evaluate("document.getElementById('sun') === window.originalSun && window.originalDrawing.getCurrentTime() > window.beforeCompletion")
+        XCTAssertTrue(completed, "Completion must not stop the SVG timeline")
+        _ = try await evaluate("window.originalSun.dispatchEvent(new MouseEvent('click', {bubbles: true})); true")
+        try await waitFor("document.getElementById('artifact-label')?.textContent === '太阳'")
+    }
+
+    func testCompletedHTMLArtifactRunsInteractionInsideOpaqueSandbox() async throws {
+        let html = #"<button id="counter">0</button><script>let count=0; document.getElementById('counter').onclick=()=>{document.getElementById('counter').textContent=String(++count); parent.postMessage({artifactTestCount:count}, '*')}; window.addEventListener('message', e=>{if(e.data==='test-click') document.getElementById('counter').click()});</script>"#
+        let coordinator = InteractiveArtifactView.Coordinator()
+        let web = InteractiveArtifactView(rawHTML: html, colorScheme: .light).makeWebView(coordinator: coordinator)
+        web.frame = CGRect(x: 0, y: 0, width: 390, height: 260)
+        defer { web.stopLoading(); web.navigationDelegate = nil; web.uiDelegate = nil }
+        func evaluate(_ expression: String) async throws -> Bool {
+            try await withCheckedThrowingContinuation { continuation in
+                web.evaluateJavaScript(expression) { value, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: value as? Bool ?? false) }
+                }
+            }
+        }
+        var clicked = false
+        for _ in 0..<100 {
+            clicked = (try? await evaluate("(() => { if (!window.artifactTestListener) { window.artifactTestListener=true; window.addEventListener('message', e=>{if(e.data?.artifactTestCount) window.artifactTestCount=e.data.artifactTestCount}) }; const frame=document.getElementById('app'); if(frame?.srcdoc) frame.contentWindow.postMessage('test-click', '*'); return window.artifactTestCount > 0 })()")) == true
+            if clicked { break }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+        XCTAssertTrue(clicked, "Completed HTML must execute its own button handler")
+        let isolated = try await evaluate("(() => { const frame=document.getElementById('app'); try { void frame.contentWindow.document; return false } catch { return frame.getAttribute('sandbox') === 'allow-scripts' } })()")
+        XCTAssertTrue(isolated, "Runtime must not grant same-origin access to generated HTML")
     }
 
     func testAppendingMathKeepsThePreviousVisibleHeight() async {
@@ -228,6 +1067,60 @@ import PDFKit
         XCTAssertEqual(Set(documents.map(\.id)).count, 2)
         XCTAssertNotEqual(documents.first?.id, ChatDocument.documents(in: package, namespace: "record-two").first?.id)
         XCTAssertEqual(try String(contentsOf: documents[1].downloadURL(), encoding: .utf8), "# 第二份")
+    }
+
+    func testLiveAdmissionUsesOneConnectionAndReplaysOnlyAfterDisconnect() async throws {
+        for disconnect in [false, true] {
+            let command = ChatAppendCommand(conversationID: UUID(),
+                userMessage: ChatMessage(id: UUID(), role: .user, content: "hello", thinking: nil, createdAt: Date()),
+                modelID: "custom/claude-sonnet-5-5", createConversation: true, title: "Live test")
+            func frame(_ sequence: Int, _ kind: String, _ payload: [String: Any]) throws -> Data {
+                let json = try JSONSerialization.data(withJSONObject: ["jobId": command.generationID.uuidString,
+                    "seq": sequence, "kind": kind, "payload": payload])
+                return Data("id: \(sequence)\nevent: \(kind)\ndata: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+            }
+            let first = try frame(1, "text.delta", ["text": "首字"])
+            let terminal = try frame(2, "job.terminal", ["status": "completed", "result": ["content": "首字"]])
+            let headers = ["Content-Type": "text/event-stream", "X-MyChat-Job-Id": command.generationID.uuidString,
+                "X-MyChat-Job-Status": "queued", "X-MyChat-Job-Created": "1",
+                "X-MyChat-Stream-Url": "/api/v1/jobs/\(command.generationID.uuidString)/live"]
+            var responses = [(200, disconnect ? first : first + terminal, headers)]
+            if disconnect { responses.append((200, first + terminal, ["Content-Type": "text/event-stream"])) }
+            let recorder = ChatAdmissionRetryRecorder(responses: responses)
+            ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+            defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+            let client = ChatAPIClient(session: session, baseURL: URL(string: "https://mychat.invalid")!)
+            let connection = try await client.openAppendTurn(command, accessToken: "fixture-token")
+            let stream = try XCTUnwrap(connection.events)
+            var received: [Int] = []
+            for try await event in stream { received.append(event.sequence) }
+            XCTAssertEqual(received, [1, 2], "Reconnect must discard already delivered sequence 1")
+            XCTAssertEqual(recorder.requestCount, disconnect ? 2 : 1)
+            XCTAssertEqual(connection.admission.generationID, command.generationID)
+        }
+    }
+
+    func testLiveAdmissionRejectsAReceiptForAnotherGeneration() async throws {
+        let command = ChatAppendCommand(conversationID: UUID(),
+            userMessage: ChatMessage(id: UUID(), role: .user, content: "hello", thinking: nil, createdAt: Date()),
+            modelID: "custom/claude-sonnet-5-5", createConversation: true, title: "Identity test")
+        let recorder = ChatAdmissionRetryRecorder(responses: [(200, Data(), [
+            "Content-Type": "text/event-stream", "X-MyChat-Job-Id": UUID().uuidString,
+            "X-MyChat-Stream-Url": "/api/v1/jobs/other/live"])])
+        ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+        defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+        let client = ChatAPIClient(session: URLSession(configuration: configuration), baseURL: URL(string: "https://mychat.invalid")!)
+        do {
+            _ = try await client.openAppendTurn(command, accessToken: "fixture-token")
+            XCTFail("A different generation must not attach")
+        } catch ChatTransportError.mismatchedAdmission {}
+        XCTAssertEqual(recorder.requestCount, 1)
     }
 
     func testChatAdmissionAutomaticallyWaitsForPreviousGenerationAndReplaysSameTurn() async throws {
@@ -721,6 +1614,72 @@ import PDFKit
                 return XCTFail("Expected an incomplete-response error")
             }
         }
+    }
+
+    func testHeaderControlsOwnFullHitTargetAndPerformPrivacyAndNewChatActions() {
+        let model = NativeRuntimeFixture.makeModel()
+        let privacy = HeaderActionControl(label: Text("privacy")) {
+            if model.isPrivateChat { model.beginNewChat() } else { model.beginPrivateChat() }
+        }
+        privacy.frame = CGRect(x: 0, y: 0, width: 44, height: 44)
+        privacy.layoutIfNeeded()
+        for point in [CGPoint(x: 2, y: 2), CGPoint(x: 22, y: 22), CGPoint(x: 42, y: 42)] {
+            XCTAssertTrue(privacy.hitTest(point, with: nil) === privacy,
+                "Transparent glyph gaps must hit the actionable control")
+        }
+        privacy.sendActions(for: .touchUpInside)
+        XCTAssertTrue(model.isPrivateChat)
+        XCTAssertNotNil(model.activeConversationID)
+        privacy.sendActions(for: .touchUpInside)
+        XCTAssertFalse(model.isPrivateChat)
+        XCTAssertNil(model.activeConversationID)
+
+        model.beginPrivateChat()
+        model.draft = "draft"
+        let revision = model.newChatRevision
+        let newChat = HeaderActionControl(label: Text("new"), action: model.beginNewChat)
+        newChat.frame = privacy.frame
+        newChat.sendActions(for: .touchUpInside)
+        XCTAssertEqual(model.newChatRevision, revision + 1)
+        XCTAssertFalse(model.isPrivateChat)
+        XCTAssertEqual(model.draft, "")
+        XCTAssertTrue(model.messages.isEmpty)
+        XCTAssertNil(model.activeConversationID)
+    }
+
+    func testDocumentHeaderControlHitsWholeBubbleAndInvokesPresentationCallback() {
+        var opened = false
+        let modalID = UUID()
+        let button = HeaderActionControl(label: Text("document")) {
+            NativeDocumentModalActivity.set(modalID, active: true)
+            opened = true
+        }
+        defer { NativeDocumentModalActivity.set(modalID, active: false) }
+        button.frame = CGRect(x: 0, y: 0, width: 44, height: 44)
+        button.layoutIfNeeded()
+        XCTAssertTrue(button.hitTest(CGPoint(x: 22, y: 22), with: nil) === button)
+        XCTAssertTrue(button.hitTest(CGPoint(x: 3, y: 22), with: nil) === button)
+        XCTAssertFalse(opened)
+        button.sendActions(for: .touchUpInside)
+        XCTAssertTrue(opened)
+    }
+
+    func testReadingAnchorKeepsReplyAtEyeLevelAndShortContentAtTop() {
+        let viewport = CGRect(x: 0, y: 60, width: 390, height: 840)
+        let padding = ChatReadingAnchor.bottomPadding(viewport: viewport, composerTop: 760, minimum: 148)
+        XCTAssertGreaterThan(padding, 148)
+        let offset = ChatReadingAnchor.offset(contentHeight: 1_000 + padding,
+            bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 0)
+        XCTAssertEqual(1_000 - offset, 692 * 0.45, accuracy: 0.001)
+        XCTAssertEqual(ChatReadingAnchor.offset(contentHeight: 200 + padding,
+            bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 60), -60)
+    }
+
+    func testReadingAnchorDoesNotApplyKeyboardOcclusionTwice() {
+        let full = CGRect(x: 0, y: 60, width: 390, height: 840)
+        let reduced = CGRect(x: 0, y: 60, width: 390, height: 520)
+        XCTAssertEqual(ChatReadingAnchor.readingHeight(viewport: full, composerTop: 424),
+            ChatReadingAnchor.readingHeight(viewport: reduced, composerTop: 424), accuracy: 0.001)
     }
 
     func testNewChatPreservesModelAndThinkingWhileClearingDraft() async {

@@ -1,5 +1,19 @@
 import Foundation
 
+enum CodeSendEligibility {
+    static func canSubmit(draft: String, isBusy: Bool) -> Bool {
+        !isBusy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func modelIssue(_ model: ModelCatalogItem?) -> String? {
+        guard let model else { return "请选择 Code 模型" }
+        guard model.outputKind == .chat, model.endpointID != nil || model.tools else {
+            return "请选择支持文本和工具调用的 Code 模型"
+        }
+        return nil
+    }
+}
+
 enum ChatMessageRole: String, Codable, Sendable {
     case user
     case assistant
@@ -133,6 +147,7 @@ struct ChatAppendCommand: Codable, Equatable, Sendable {
     let title: String
     let projectID: UUID?
     let attachments: [ChatFileAttachment]
+    var healthContext: String? = nil
     let regeneration: ChatRegeneration?
 
     init(
@@ -271,6 +286,10 @@ struct ChatToolSearch: Codable, Equatable, Sendable {
     let images: [ChatSearchImage]?
 
     var isImageSearch: Bool { kind == "image" }
+    var isWebSearch: Bool {
+        if let kind, !["web", "image", "web_search"].contains(kind) { return false }
+        return results.contains { !$0.isHistoryReference && ["http", "https"].contains(URL(string: $0.url)?.scheme?.lowercased() ?? "") }
+    }
 }
 
 struct ChatJobSnapshot: Equatable, Sendable {
@@ -385,6 +404,8 @@ enum ChatJobEventPayload: Equatable, Sendable {
 
 struct ChatProcessEntry: Equatable, Sendable, Identifiable {
     enum Content: Equatable, Sendable {
+        case text(String)
+        case step(CodeAgentStep)
         case thinking(String)
         case reasoningSummary(String)
         case search(ChatToolSearch)
@@ -397,6 +418,18 @@ struct ChatProcessEntry: Equatable, Sendable, Identifiable {
     static func record(_ event: ChatJobEvent, into entries: inout [ChatProcessEntry]) {
         let id = "\(event.jobID.uuidString):\(event.sequence)"
         switch event.payload {
+        case let .snapshot(snapshot) where snapshot.content.isEmpty && snapshot.thinking.isEmpty:
+            entries.removeAll()
+        case let .textDelta(delta):
+            guard !delta.isEmpty else { return }
+            if let last = entries.last, case let .text(text) = last.content {
+                entries[entries.count - 1].content = .text(text + delta)
+            } else { entries.append(Self(id: id, content: .text(delta))) }
+        case let .agentStep(step):
+            if let identity = step.eventID, entries.contains(where: {
+                if case let .step(value) = $0.content { return value.eventID == identity }; return false
+            }) { return }
+            entries.append(Self(id: id, content: .step(step)))
         case let .thinkingDelta(delta):
             if let last = entries.last, case let .thinking(text) = last.content {
                 entries[entries.count - 1].content = .thinking(text + delta)
@@ -454,10 +487,13 @@ struct ChatStreamAccumulator: Equatable, Sendable {
         case let .snapshot(snapshot):
             content = snapshot.content
             thinking = snapshot.thinking
+            if snapshot.content.isEmpty && snapshot.thinking.isEmpty { reasoningSummary = "" }
+            if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) { reasoningSummary = summary }
             media = snapshot.media
         case let .terminal(snapshot):
             content = snapshot.content
             thinking = snapshot.thinking
+            if let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) { reasoningSummary = summary }
             media = snapshot.media
             terminal = snapshot
         }

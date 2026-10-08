@@ -309,7 +309,7 @@ struct WorkspaceDataClient: WorkspaceDataServing {
         accessToken: String
     ) async throws -> ArtifactRecord {
         guard !raw.isEmpty, raw.utf8.count <= 2_000_000 else {
-            throw WorkspaceDataError.invalidInput("Artifact 内容为空或过大")
+            throw WorkspaceDataError.invalidInput("可视化内容为空或过大")
         }
         let context = try await requestContext(accessToken: accessToken)
         let endpoint = try endpoint(
@@ -367,7 +367,7 @@ struct WorkspaceDataClient: WorkspaceDataServing {
             throw WorkspaceDataError.invalidInput("GitHub 仓库标识无效")
         }
         guard !title.isEmpty, title.utf16.count <= 200 else {
-            throw WorkspaceDataError.invalidInput("Code 会话标题无效")
+            throw WorkspaceDataError.invalidInput("编程会话标题无效")
         }
         return try await insertReturning(
             table: "code_sessions",
@@ -411,10 +411,10 @@ struct WorkspaceDataClient: WorkspaceDataServing {
         accessToken: String
     ) async throws -> CodeMessageRecord {
         guard role == "user" || role == "assistant" else {
-            throw WorkspaceDataError.invalidInput("Code 消息角色无效")
+            throw WorkspaceDataError.invalidInput("编程消息角色无效")
         }
         guard content.utf16.count <= 100_000 else {
-            throw WorkspaceDataError.invalidInput("Code 消息过长")
+            throw WorkspaceDataError.invalidInput("编程消息过长")
         }
         return try await insertReturning(
             table: "code_messages",

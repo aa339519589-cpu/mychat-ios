@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import CryptoKit
 import UIKit
 
 /// Deterministic, network-isolated runtime testing. Never used in Release.
@@ -62,6 +63,152 @@ enum NativeRuntimeFixture {
         AuthSession(accessToken: "isolated-runtime-test", refreshToken: "isolated-refresh",
             tokenType: "bearer", expiresAt: Date().addingTimeInterval(3600),
             user: AuthUser(id: userID, email: "runtime-audit@example.invalid", isAnonymous: false))
+    }
+}
+
+/// Opt-in network diagnostic; real credentials never leave Keychain/server
+/// storage, and only timings/status/character counts are printed or saved.
+@MainActor enum NativeLiveChatProbe {
+    static func run(appModel: AppModel? = nil) async {
+        URLProtocol.unregisterClass(NativeAuditURLProtocol.self)
+        NSLog("LIVE_NATIVE_STAGE started")
+        var metrics: [String: Any] = [:]
+        let start = ProcessInfo.processInfo.systemUptime
+        func mark(_ stage: String) { metrics[stage] = Int((ProcessInfo.processInfo.systemUptime - start) * 1000) }
+        defer {
+            if let data = try? JSONSerialization.data(withJSONObject: metrics, options: [.sortedKeys]),
+               let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                try? data.write(to: directory.appendingPathComponent("live-standalone-probe.json"), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                print("LIVE_NATIVE_RESULT " + (String(data: data, encoding: .utf8) ?? "{}"))
+                NSLog("LIVE_NATIVE_RESULT %@", String(data: data, encoding: .utf8) ?? "{}")
+            }
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = []
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 150
+        let network = URLSession(configuration: configuration)
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(150))
+            if !Task.isCancelled { network.getAllTasks { tasks in tasks.forEach { $0.cancel() } } }
+        }
+        defer { deadline.cancel(); network.getAllTasks { tasks in tasks.forEach { $0.cancel() } } }
+        do {
+            let store = KeychainAuthSessionStore()
+            guard var account = try store.load() else {
+                metrics["error"] = "No stored account"
+                return
+            }
+            if account.expires(within: 0) {
+                let auth = SupabaseAuthClient(configurationClient: MobileConfigurationClient(session: network),
+                    sessionStore: store, networkSession: network)
+                account = try await auth.refreshSession()
+            }
+            mark("authenticationReadyMs")
+            NSLog("LIVE_NATIVE_STAGE authenticated")
+            let arguments = ProcessInfo.processInfo.arguments
+            func argument(_ flag: String) -> String? {
+                guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else { return nil }
+                return arguments[index + 1]
+            }
+            let kind = argument("--live-kind") ?? ProcessInfo.processInfo.environment["MYCHAT_LIVE_PROBE_KIND"] ?? "text"
+            let model = argument("--live-model") ?? ProcessInfo.processInfo.environment["MYCHAT_LIVE_MODEL_ID"] ?? "anthropic/claude-sonnet-5.5"
+            metrics["kind"] = kind; metrics["model"] = model
+            if kind == "display", let appModel {
+                appModel.acceptAuthentication(account)
+                await appModel.reloadModels()
+                guard let selected = appModel.models.first(where: { $0.id == model }) else {
+                    metrics["error"] = "Requested real model unavailable"
+                    return
+                }
+                appModel.selectModel(selected)
+                appModel.beginNewChat()
+                appModel.draft = "请解释为什么月亮会有不同的形状，给出生活中的例子。"
+                appModel.sendDraft()
+                guard let conversation = appModel.activeConversationID else { return }
+                for _ in 0..<1_200 {
+                    try Task.checkCancellation()
+                    if appModel.messages.contains(where: { $0.role == .assistant && !$0.content.isEmpty }), !appModel.isCurrentConversationGenerating { break }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                let record = ChatGenerationDiagnostics.records.values.filter { $0.conversationID == conversation }.max { $0.monotonicStart < $1.monotonicStart }
+                metrics["generationID"] = record?.generationID.uuidString
+                metrics["stages"] = record?.milliseconds
+                metrics["characters"] = appModel.messages.last(where: { $0.role == .assistant })?.content.count
+                return
+            }
+            let prompt = ProcessInfo.processInfo.environment["MYCHAT_LIVE_PROMPT"]
+                ?? (kind == "health" ? "只列出你能看到的本次健康数据类别名称，不要复述任何个人数值、时间或健康判断。如果没有提供数据，请明确说没有。"
+                    : kind == "photo" ? "描述图片里的颜色和形状。" : kind == "web" ? "请联网查询苹果官网现在有哪些 iPhone，给出来源链接。" : "请解释为什么月亮会有不同的形状，给出一个生活中的例子。")
+            var message = ChatMessage(id: UUID(), role: .user, content: prompt, thinking: nil, createdAt: Date())
+            if kind == "photo" {
+                let picture = UIGraphicsImageRenderer(size: CGSize(width: 256, height: 256)).image { context in
+                    UIColor.white.setFill(); context.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+                    UIColor.red.setFill(); UIBezierPath(ovalIn: CGRect(x: 48, y: 48, width: 160, height: 160)).fill()
+                }
+                message.sourceImages = ["data:image/jpeg;base64," + (picture.jpegData(compressionQuality: 0.85)?.base64EncodedString() ?? "")]
+            }
+            var tools = ChatToolSelection()
+            tools.searchMode = kind == "web" ? .web : .off
+            var preparedCommand = ChatAppendCommand(conversationID: UUID(), userMessage: message,
+                modelID: model, tools: tools, createConversation: true,
+                conversationMemoryEnabled: false, title: "链路诊断 · " + kind)
+            if kind == "health" {
+                guard let context = await HealthConnector.modelContext(ownerID: account.user.id, refresh: true)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !context.isEmpty else {
+                    metrics["error"] = "No enabled, readable Health connection"; return
+                }
+                preparedCommand.healthContext = context
+                metrics["healthAudit"] = HealthConnector.readAudit[account.user.id]
+                metrics["healthContextChars"] = context.utf16.count
+                metrics["healthContextSHA256"] = SHA256.hash(data: Data(context.utf8)).map { String(format: "%02x", $0) }.joined()
+            }
+            let command = preparedCommand
+            metrics["generationID"] = command.generationID.uuidString
+            mark("requestStartedMs")
+            NSLog("LIVE_NATIVE_STAGE request %@", command.generationID.uuidString)
+            let connection = try await ChatAPIClient(session: network).openAppendTurn(command, accessToken: account.accessToken)
+            mark("admittedMs")
+            NSLog("LIVE_NATIVE_STAGE admitted %@", String(metrics["admittedMs"] as? Int ?? -1))
+            Task {
+                do {
+                    let bootstrap = try await MobileConfigurationClient().fetchConfiguration()
+                    var url = URLComponents(url: bootstrap.supabaseURL.appendingPathComponent("rest/v1/jobs"), resolvingAgainstBaseURL: false)!
+                    url.queryItems = [URLQueryItem(name: "id", value: "eq." + command.generationID.uuidString.lowercased()),
+                        URLQueryItem(name: "select", value: "id,status,progress,result,error_code,event_sequence,started_at,terminal_at")]
+                    var request = URLRequest(url: url.url!)
+                    request.setValue(bootstrap.supabaseAnonKey, forHTTPHeaderField: "apikey")
+                    request.setValue("Bearer " + account.accessToken, forHTTPHeaderField: "Authorization")
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                    let error = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                    NSLog("LIVE_NATIVE_REST status=%d code=%@ message=%@", status,
+                        error?["code"] as? String ?? "", error?["message"] as? String ?? "")
+                } catch { NSLog("LIVE_NATIVE_REST transport=%@", String((error as NSError).code)) }
+            }
+            let events = connection.events ?? JobEventStream(session: network).events(admission: connection.admission, accessToken: account.accessToken)
+            var count = 0
+            var searches = 0
+            for try await event in events {
+                if metrics["firstEventMs"] == nil { mark("firstEventMs") }
+                switch event.payload {
+                case let .textDelta(text) where !text.isEmpty:
+                    if count == 0 { mark("firstTextMs"); NSLog("LIVE_NATIVE_FIRST_TEXT %@", String(metrics["firstTextMs"] as? Int ?? -1)) }
+                    count += text.count
+                case .toolSearch: searches += 1
+                case let .terminal(terminal):
+                    mark("terminalMs")
+                    metrics["status"] = terminal.status.rawValue
+                    metrics["errorCode"] = terminal.errorCode
+                default: break
+                }
+            }
+            metrics["characters"] = count; metrics["searchEvents"] = searches
+        } catch {
+            let failure = error as NSError
+            metrics["errorDomain"] = failure.domain; metrics["errorCode"] = failure.code
+            metrics["error"] = error.localizedDescription
+        }
     }
 }
 
@@ -128,9 +275,11 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             return (200, ["supabaseUrl": "https://isolated.mychat.invalid", "supabaseAnonKey": "isolated-anon"])
         case "/api/models":
             if ProcessInfo.processInfo.arguments.contains("--ui-test-claude-models") {
-                let routes = [("anthropic/claude-fable-5", "Claude Fable 5"),
-                    ("anthropic/claude-opus-5", "Claude Opus 5"),
+                let routes = [("anthropic/claude-fable-5-1", "Claude Fable 5.1"),
+                    ("anthropic/claude-opus-5-5", "Claude Opus 5.5"),
+                    ("anthropic/claude-sonnet-5-5", "Claude Sonnet 5.5"),
                     ("anthropic/claude-sonnet-5", "Claude Sonnet 5"),
+                    ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
                     ("anthropic/claude-haiku-4.5", "Claude Haiku 4.5")]
                 let models: [[String: Any]] = routes.map { id, name in
                     ["id": id, "name": name, "provider": "Anthropic", "access": "quota", "outputKind": "chat",
@@ -164,6 +313,13 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/connectors/directory": return (200, ["entries": [["id": "sample", "name": "Sample service", "description": "An isolated directory entry", "serverUrl": "https://connector.example.invalid/mcp", "authType": "oauth"]], "nextCursor": NSNull()])
         case "/api/tts": return (503, ["error": "隔离测试：模拟语音提供方失败"])
         case "/rest/v1/conversations":
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-all-chats") {
+                return (200, (0..<10).map { index in
+                    ["id": index == 0 ? NativeRuntimeFixture.conversationID : String(format: "20000000-0000-4000-8000-%012d", index),
+                     "title": index == 0 ? "隔离测试对话" : "History fixture \(index)", "updated_at": date,
+                     "starred": false, "pinned": false, "memory_enabled": true] as [String: Any]
+                })
+            }
             return (200, deletedConversations.contains(NativeRuntimeFixture.conversationID) ? [] : [[
                 "id": NativeRuntimeFixture.conversationID, "title": "隔离测试对话", "updated_at": date,
                 "starred": false, "pinned": false, "memory_enabled": true]])
@@ -174,7 +330,10 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 return (200, [["id": "77700000-0000-4000-8000-000000000064", "role": "assistant", "content": content, "seq": 2, "created_at": date]])
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-document-reference") {
-                let reply = "<document>\ntitle: 文章 慢下来\nfilename: 文章 慢下来.md\nsummary: 撰写一篇主题自选的文章。\n\n" + NativeRuntimeFixture.referenceArticle + "\n</document>\n\n我写了一篇关于\"慢下来\"的短文,放在上面的文件里了。想换主题或风格(比如更幽默、更正式),告诉我就行。"
+                var reply = "<document>\ntitle: 文章 慢下来\nfilename: 文章 慢下来.md\nsummary: 撰写一篇主题自选的文章。\n\n" + NativeRuntimeFixture.referenceArticle + "\n</document>\n\n我写了一篇关于\"慢下来\"的短文,放在上面的文件里了。想换主题或风格(比如更幽默、更正式),告诉我就行。"
+                if ProcessInfo.processInfo.arguments.contains("--ui-test-multiple-documents") {
+                    reply += "\n\n<document>\ntitle: 阅读笔记\nfilename: notes.md\nsummary: 整理文章中的要点。\n\n# 阅读笔记\n\n每天留一点时间，把注意力放回此刻。\n</document>"
+                }
                 return (200, [
                     ["id": "40000000-0000-4000-8000-000000000063", "role": "user", "content": "随便用文件写一篇文章给我。", "seq": 1, "created_at": date],
                     ["id": "40000000-0000-4000-8000-000000000064", "role": "assistant", "content": reply, "seq": 2, "created_at": date]
@@ -255,6 +414,7 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "60000000-0000-4000-8000-000000000064", "role": "assistant", "seq": 2,
                  "content": "中文回复使用苹方。\n\nEnglish typography stays unchanged.\n\n```json\n{\"audit\":true}\n```", "created_at": date]].reversed().map { $0 })
         case "/rest/v1/projects":
+            if method == "GET", ProcessInfo.processInfo.arguments.contains("--ui-test-no-projects") { return (200, []) }
             if method == "DELETE" { deletedProjects.insert(NativeRuntimeFixture.projectID); return (200, []) }
             return (200, deletedProjects.isEmpty ? [["id": NativeRuntimeFixture.projectID, "name": "隔离测试项目", "instructions": "测试", "created_at": date]] : [])
         case "/rest/v1/artifacts":

@@ -49,6 +49,8 @@ struct MainShellView: View {
     @State private var modelPickerVisible = false
     @State private var toolsVisible = false
     @State private var settingsVisible = false
+    @State private var historyVisible = false
+    @State private var historyConversationVisible = false
     @State private var automaticDocument: ChatDocument?
     @State private var documentModalID = UUID()
     @StateObject private var canvasLayout = ChatCanvasLayout()
@@ -65,17 +67,15 @@ struct MainShellView: View {
                 blocked: settingsVisible || modelPickerVisible || toolsVisible,
                 reduceMotion: reduceMotion,
                 canvasLayout: canvasLayout,
-                navigationKey: CanvasNavigationKey(appModel: appModel),
+                navigationKey: CanvasNavigationKey(appModel: appModel, historyVisible: historyVisible,
+                    historyConversationVisible: historyConversationVisible),
                 sidebar: SidebarView(appModel: appModel, width: drawerWidth, interactionLocked: false,
-                    openSettings: openSettings, close: closeSidebar)
+                    openSettings: openSettings, openAllChats: openAllChats, close: closeSidebar)
                     .equatable().environmentObject(appModel),
-                canvas: MainCanvasView(appModel: appModel,
-                    openSidebar: openSidebar, openTools: { toolsVisible = true },
-                    openModels: { modelPickerVisible = true },
-                    openArtifact: presentArtifact)
+                canvas: canvasSurface
                     .environmentObject(appModel).environmentObject(canvasLayout),
                 composer: AnyView(FloatingComposerView(appModel: appModel,
-                    openTools: { toolsVisible = true }, openModels: { modelPickerVisible = true },
+                    openTools: { requestSheet(.tools) }, openModels: { requestSheet(.models) },
                     drawerIsOpen: { sidebarVisible }))
             )
         }
@@ -83,7 +83,7 @@ struct MainShellView: View {
         .sheet(isPresented: $settingsVisible, onDismiss: { setChatRenderSuspended(false) }) {
             MyChatSettingsView(appModel: appModel, close: closeSettings).environmentObject(appModel)
                 .presentationDetents([.large]).presentationDragIndicator(.hidden)
-                .presentationCornerRadius(40).presentationBackground(MyChatTheme.canvas)
+                .modifier(MyChatSheetSurface())
         }
         .onChange(of: appModel.pendingDocumentPreview) { _, _ in presentPendingDocument() }
         .onChange(of: settingsVisible) { _, visible in if !visible { presentPendingDocument() } }
@@ -105,32 +105,33 @@ struct MainShellView: View {
         .sheet(isPresented: $modelPickerVisible, onDismiss: {
             setChatRenderSuspended(false)
         }) {
-            ModelPickerSheet()
+            ModelPickerSheet(close: { modelPickerVisible = false })
                 .environmentObject(appModel)
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(42)
-                .presentationBackground(MyChatTheme.canvas)
+                .presentationDetents([.fraction(0.62), .large])
+                .presentationContentInteraction(.resizes)
+                .presentationDragIndicator(.hidden)
+                .modifier(StableSheetPageSizing())
+                .modifier(MyChatSheetSurface())
         }
         .sheet(isPresented: $toolsVisible, onDismiss: {
             setChatRenderSuspended(false)
         }) {
             ToolsSheet(close: { toolsVisible = false })
                 .environmentObject(appModel)
-                .presentationDetents([.fraction(0.56), .large])
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(34)
-                .presentationBackground(MyChatTheme.canvas)
+                .presentationDragIndicator(.hidden)
+                .modifier(MyChatSheetSurface())
         }
         .fullScreenCover(item: $appModel.artifactPreview, onDismiss: {
             setChatRenderSuspended(false)
         }) { artifact in
             ArtifactLibraryDetail(artifact: artifact)
                 .environmentObject(appModel)
+                .presentationBackground(.clear)
         }
     }
 
     private func presentPendingDocument() {
-        guard !settingsVisible, !sidebarVisible, !toolsVisible, !modelPickerVisible,
+        guard !settingsVisible, !sidebarVisible, !historyVisible, !toolsVisible, !modelPickerVisible,
               automaticDocument == nil, appModel.selectedDestination == .chats,
               let document = appModel.pendingDocumentPreview else { return }
         NativeDocumentModalActivity.set(documentModalID, active: true)
@@ -139,16 +140,78 @@ struct MainShellView: View {
     }
 
     private func openSidebar() {
-        dismissKeyboard()
         HapticFeedback.impact()
+        dismissKeyboard()
         sidebarVisible = true
     }
 
-    private func closeSidebar() { sidebarVisible = false }
+    private func closeSidebar() {
+        // This closure is only called for an explicit destination selection.
+        // A drag or tap on the canvas changes the drawer binding directly and
+        // preserves the mounted All Chats page beneath it.
+        historyVisible = false
+        historyConversationVisible = false
+        sidebarVisible = false
+    }
+
+    private func openAllChats() {
+        appModel.discardPrivateChat()
+        dismissKeyboard()
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            historyConversationVisible = false
+            historyVisible = true
+        }
+        sidebarVisible = false
+    }
+
+    private func openChatFromHistory() {
+        withAnimation { historyConversationVisible = true }
+    }
+
+    @ViewBuilder private var canvasSurface: some View {
+        if historyVisible {
+            NavigationStack {
+                ConversationHistorySheet(appModel: appModel,
+                    openChat: openChatFromHistory, close: openSidebar)
+                    .navigationDestination(isPresented: $historyConversationVisible) {
+                        mainCanvas.toolbar(.hidden, for: .navigationBar)
+                    }
+                    .toolbar(.hidden, for: .navigationBar)
+            }
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+        } else {
+            mainCanvas
+        }
+    }
+
+    private var mainCanvas: some View {
+        MainCanvasView(appModel: appModel,
+            openSidebar: openSidebar, openTools: { requestSheet(.tools) },
+            openModels: { requestSheet(.models) }, openArtifact: presentArtifact)
+            .background(MyChatTheme.canvas.ignoresSafeArea())
+            .ignoresSafeArea(.keyboard, edges: .bottom)
+    }
 
     private func openSettings() {
+        HapticFeedback.impact()
         dismissKeyboard()
+        setChatRenderSuspended(true)
         settingsVisible = true
+    }
+
+    private enum SheetTarget: Equatable { case models, tools }
+
+    private func requestSheet(_ target: SheetTarget) {
+        guard !settingsVisible, !modelPickerVisible, !toolsVisible,
+              automaticDocument == nil, appModel.artifactPreview == nil else { return }
+        dismissKeyboard()
+        // Suspend before presentation so a streaming layout cannot compete
+        // with the native sheet, dimming and interactive transition.
+        setChatRenderSuspended(true)
+        if target == .models { modelPickerVisible = true }
+        else { toolsVisible = true }
     }
 
     private func presentArtifact(_ artifact: ArtifactRecord) {
@@ -185,8 +248,11 @@ private struct CanvasNavigationKey: Equatable {
     let newChatRevision: Int
     let privateChat: Bool
     let transcriptIsEmpty: Bool
+    let conversationExists: Bool
+    let historyVisible: Bool
+    let historyConversationVisible: Bool
 
-    @MainActor init(appModel: AppModel) {
+    @MainActor init(appModel: AppModel, historyVisible: Bool = false, historyConversationVisible: Bool = false) {
         destination = appModel.selectedDestination
         projectID = appModel.activeProjectID
         projectName = appModel.projects.first {
@@ -196,6 +262,18 @@ private struct CanvasNavigationKey: Equatable {
         newChatRevision = appModel.newChatRevision
         privateChat = appModel.isPrivateChat
         transcriptIsEmpty = appModel.messages.isEmpty
+        conversationExists = appModel.conversations.contains { UUID(uuidString: $0.id) == appModel.activeConversationID }
+        self.historyVisible = historyVisible
+        self.historyConversationVisible = historyConversationVisible
+    }
+
+    func isWelcomePrivacyTransition(to next: Self) -> Bool {
+        destination == .chats && next.destination == .chats
+            && transcriptIsEmpty && next.transcriptIsEmpty
+            && projectID == nil && next.projectID == nil
+            && !historyVisible && !next.historyVisible
+            && !historyConversationVisible && !next.historyConversationVisible
+            && privateChat != next.privateChat
     }
 }
 
@@ -229,7 +307,36 @@ private struct MainCanvasView: View {
         if appModel.selectedDestination == .chats {
             ZStack(alignment: .top) {
                 destinationContent
-                if appModel.messages.isEmpty, activeProject == nil {
+                chatHeader
+                    .background {
+                        if !appModel.messages.isEmpty {
+                            Rectangle().fill(.regularMaterial)
+                                .mask {
+                                    LinearGradient(stops: [
+                                        .init(color: .black, location: 0),
+                                        .init(color: .black, location: 0.38),
+                                        .init(color: .clear, location: 1)
+                                    ], startPoint: .top, endPoint: .bottom)
+                                }
+                                .ignoresSafeArea(.container, edges: .top)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .zIndex(1)
+            }
+        } else {
+            VStack(spacing: 0) {
+                if appModel.selectedDestination != .artifacts {
+                    NavigationOnlyHeader(title: navigationTitle, openSidebar: openSidebar)
+                }
+                destinationContent
+            }
+        }
+    }
+
+    @ViewBuilder private var chatHeader: some View {
+                if appModel.messages.isEmpty, activeProject == nil,
+                   appModel.activeConversationID == nil || appModel.isPrivateChat {
                     EmptyChatHeader(appModel: appModel, openSidebar: openSidebar)
                 } else if appModel.isPrivateChat {
                     PrivateChatHeader(openSidebar: openSidebar, closePrivateChat: { appModel.beginNewChat() })
@@ -248,15 +355,6 @@ private struct MainCanvasView: View {
                         conversation: activeConversation
                     )
                 }
-            }
-        } else {
-            VStack(spacing: 0) {
-                if appModel.selectedDestination != .artifacts {
-                    NavigationOnlyHeader(title: navigationTitle, openSidebar: openSidebar)
-                }
-                destinationContent
-            }
-        }
     }
 
     @ViewBuilder
@@ -265,14 +363,23 @@ private struct MainCanvasView: View {
         case .chats:
             ZStack {
             if appModel.messages.isEmpty {
-                GeometryReader { proxy in
-                    EmptyChatCanvas(isPrivate: appModel.isPrivateChat, bottomOcclusion: canvasLayout.bottomOcclusion,
-                        systemBottomInset: proxy.safeAreaInsets.bottom, timing: canvasLayout.keyboardTiming)
-                }.transition(.opacity.combined(with: .scale(scale: 0.97)).combined(with: .offset(y: -8)))
+                if appModel.activeConversationID != nil && !appModel.isPrivateChat {
+                    // A history load is a chat surface; mounting Welcome here
+                    // caused a second full-page swap as its messages arrived.
+                    Color.clear
+                } else {
+                    GeometryReader { proxy in
+                        EmptyChatCanvas(isPrivate: appModel.isPrivateChat, bottomOcclusion: canvasLayout.bottomOcclusion,
+                            systemBottomInset: proxy.safeAreaInsets.bottom, canvasLayout: canvasLayout)
+                    }.transition(.opacity.combined(with: .scale(scale: 0.97)).combined(with: .offset(y: -8)))
+                }
             } else {
                 ChatConversationView(appModel: appModel)
                     .equatable()
                     .environmentObject(appModel)
+                    // Welcome/privacy can crossfade, but transcript geometry
+                    // is owned by the scroll and keyboard controllers.
+                    .transaction { $0.animation = nil }
                     .transition(.opacity.combined(with: .offset(y: 10)))
             }
             }.animation(.smooth(duration: 0.3, extraBounce: 0), value: appModel.messages.isEmpty)
@@ -309,8 +416,8 @@ private struct MainCanvasView: View {
 
     private var navigationTitle: String? {
         switch appModel.selectedDestination {
-        case .projects: return "Projects"
-        case .artifacts: return "Artifacts"
+        case .projects: return "项目"
+        case .artifacts: return "可视化"
         case .chats, .code: return nil
         }
     }
@@ -332,21 +439,30 @@ private struct MainCanvasView: View {
 }
 
 @MainActor final class ChatCanvasLayout: ObservableObject {
-    @Published private(set) var bottomOcclusion: CGFloat = 140
+    private struct Geometry: Equatable {
+        var bottomOcclusion: CGFloat = 140
+        var composerTop: CGFloat?
+    }
+    @Published private var geometry = Geometry()
+    var bottomOcclusion: CGFloat { geometry.bottomOcclusion }
+    var composerTopInWindow: CGFloat? { geometry.composerTop }
+    var presentedComposerTop: (() -> CGFloat?)?
+    // Welcome geometry participates in the very same Auto Layout pass as the
+    // keyboard-guided input. The published reservation remains for transcripts.
+    weak var composerView: UIView?
     var keyboardTiming = KeyboardTransitionTiming()
-    private var pendingOcclusion: CGFloat = 140
+    private var pendingGeometry = Geometry()
     private var scheduled = false
 
-    func setBottomOcclusion(_ height: CGFloat) {
-        pendingOcclusion = height
-        guard !scheduled, abs(bottomOcclusion - height) > 0.5 else { return }
+    func setBottomOcclusion(_ height: CGFloat, composerTop: CGFloat? = nil) {
+        if let composerTop, composerTop.isFinite { pendingGeometry.composerTop = composerTop }
+        pendingGeometry.bottomOcclusion = height
+        guard !scheduled, pendingGeometry != geometry else { return }
         scheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.scheduled = false
-            if abs(self.bottomOcclusion - self.pendingOcclusion) > 0.5 {
-                self.bottomOcclusion = self.pendingOcclusion
-            }
+            if self.geometry != self.pendingGeometry { self.geometry = self.pendingGeometry }
         }
     }
 }
@@ -391,8 +507,28 @@ private struct NativeDrawerHost<Sidebar: View, Canvas: View>: UIViewControllerRe
             controller.sidebarHost.rootView = sidebar
         }
         if controller.lastNavigationKey != navigationKey {
+            let previousNavigationKey = controller.lastNavigationKey
             controller.lastNavigationKey = navigationKey
-            controller.canvasHost.rootView = canvas
+            if previousNavigationKey?.isWelcomePrivacyTransition(to: navigationKey) == true {
+                // Keep the existing welcome representable alive and do not
+                // suppress UIKit animations: it owns the Logo ↔ privacy glyph
+                // cross-fade and scale interaction.
+                controller.canvasHost.rootView = canvas
+                controller.canvasHost.view.layoutIfNeeded()
+                controller.setOpen(isOpen)
+                return
+            }
+            // The hosting tree is separate from SwiftUI's outer transaction.
+            // Navigation swaps must not inherit a page-size spring while the
+            // keyboard and transcript perform their own native layout.
+            var navigationTransaction = Transaction()
+            navigationTransaction.disablesAnimations = true
+            UIView.performWithoutAnimation {
+                withTransaction(navigationTransaction) {
+                    controller.canvasHost.rootView = canvas
+                    controller.canvasHost.view.layoutIfNeeded()
+                }
+            }
         }
         controller.setOpen(isOpen)
     }
@@ -403,21 +539,65 @@ private struct NativeDrawerHost<Sidebar: View, Canvas: View>: UIViewControllerRe
         controller.reduceMotion = reduceMotion
         controller.canvasLayout = canvasLayout
         controller.composerVisible = navigationKey.destination == .chats
+            && (!navigationKey.historyVisible || navigationKey.historyConversationVisible)
         controller.onOpenChanged = { isOpen = $0 }
     }
 }
 
+enum DrawerPanelGeometry {
+    // Measured against the 440 pt Claude reference. This is a fixed silhouette,
+    // including at rest; the device's outer display contour finishes the edge.
+    static let cornerRadius: CGFloat = 60
+
+    static func path(in bounds: CGRect) -> CGPath {
+        UnevenRoundedRectangle(topLeadingRadius: cornerRadius,
+            bottomLeadingRadius: cornerRadius, style: .continuous).path(in: bounds).cgPath
+    }
+}
+
+private final class DrawerPanelSurface: UIView {
+    private let contour = CAShapeLayer()
+    private var renderedBounds: CGRect = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        contour.fillColor = UIColor.black.cgColor
+        layer.mask = contour
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds != renderedBounds else { return }
+        renderedBounds = bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        contour.frame = bounds
+        contour.path = DrawerPanelGeometry.path(in: bounds)
+        CATransaction.commit()
+    }
+}
+
+/// Contact and short cast shadow share the exact clipping contour. The opaque
+/// panel covers the inside half of the contact stroke; there is no white rim.
 private final class DrawerEdgeDepth: UIView {
+    private let contact = CAShapeLayer()
     private var renderedBounds: CGRect = .zero
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
+        backgroundColor = .clear
         layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.10
-        layer.shadowRadius = 12
-        layer.shadowOffset = CGSize(width: -1, height: 0)
+        layer.shadowRadius = 5.5
+        layer.shadowOffset = CGSize(width: -0.75, height: 0)
+        contact.fillColor = UIColor.clear.cgColor
+        layer.addSublayer(contact)
+        updateColors()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (edge: DrawerEdgeDepth, _: UITraitCollection) in
+            edge.updateColors()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
@@ -426,15 +606,56 @@ private final class DrawerEdgeDepth: UIView {
         super.layoutSubviews()
         guard bounds != renderedBounds else { return }
         renderedBounds = bounds
-        // Fixed shadow geometry is reused while the whole panel translates.
-        // No text rasterization, shadow-path rebuild, or layout on gesture frames.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.shadowPath = UIBezierPath(
-            roundedRect: bounds, byRoundingCorners: [.topLeft, .bottomLeft],
-            cornerRadii: CGSize(width: 42, height: 42)
-        ).cgPath
+        let path = DrawerPanelGeometry.path(in: bounds)
+        layer.shadowPath = path
+        contact.frame = bounds
+        contact.path = path
+        contact.lineWidth = 2 / max(1, traitCollection.displayScale)
         CATransaction.commit()
+    }
+
+    private func updateColors() {
+        let dark = traitCollection.userInterfaceStyle == .dark
+        layer.shadowOpacity = dark ? 0.35 : 0.10
+        contact.strokeColor = UIColor.black.withAlphaComponent(dark ? 0.28 : 0.14).cgColor
+    }
+}
+
+enum DrawerMotion {
+    enum Intent { case undecided, horizontal, vertical }
+    static func intent(_ delta: CGPoint) -> Intent {
+        let x = abs(delta.x), y = abs(delta.y)
+        if y >= 8, y * 1.8 > x { return .vertical }
+        if x >= 12, x >= y * 1.8 { return .horizontal }
+        return .undecided
+    }
+    static func shadeOpacity(progress: CGFloat) -> CGFloat {
+        0.38 * (1 - min(1, max(0, progress)))
+    }
+    static let auditsInput = ProcessInfo.processInfo.arguments.contains("--drawer-motion-audit")
+    static func draggedOffset(origin: CGFloat, translation: CGFloat, width: CGFloat) -> CGFloat {
+        let proposed = origin + translation
+        let excess = max(0, proposed - width)
+        return max(0, excess > 0 ? width + 12 * excess / (excess + 48) : proposed)
+    }
+    static func targetIsOpen(offset: CGFloat, velocity: CGFloat, width: CGFloat,
+                             cancelled: Bool, wasOpen: Bool, origin: CGFloat? = nil) -> Bool {
+        guard !cancelled, width > 0 else { return wasOpen }
+        // A deliberate short drag must work even when the finger slows down
+        // before release. Use actual travel; reserve velocity for reversals
+        // and movements too small to establish direction.
+        let travel = offset - (origin ?? (wasOpen ? width : 0))
+        let threshold = min(24, width * 0.08)
+        if !wasOpen, travel >= threshold { return velocity >= -60 }
+        if wasOpen, travel <= -threshold { return velocity > 60 }
+        return offset + velocity * 0.18 > width * 0.52
+    }
+
+    static func initialVelocity(_ velocity: CGFloat, distance: CGFloat) -> CGFloat {
+        guard abs(distance) > 0.5 else { return 0 }
+        return min(max(velocity / distance, -20), 20)
     }
 }
 
@@ -457,7 +678,8 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     var lastWidth: CGFloat = 0
     var lastNavigationKey: CanvasNavigationKey?
     var onOpenChanged: (Bool) -> Void = { _ in }
-    private let surface = UIView()
+    private let surface = DrawerPanelSurface()
+    private let sidebarShade = UIView()
     private let edgeDepth = DrawerEdgeDepth()
     private let tapShield = UIButton(type: .custom)
     private var lastDrawerVisible: Bool?
@@ -477,20 +699,22 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     private var gestureOrigin: CGFloat = 0
     private var animationOrigin: CGFloat = 0
     private var snapHapticSent = false
-    private let haptic = UIImpactFeedbackGenerator(style: .rigid)
+    #if DEBUG
+    private var panelProbeStarted = false
+    #endif
     private lazy var pan: DirectionalDrawerPanGestureRecognizer = {
         let pan = DirectionalDrawerPanGestureRecognizer(target: self, action: #selector(handlePan))
         pan.maximumNumberOfTouches = 1
-        // Keep edge-origin touches buffered until the drawer direction is
+        // Keep page touches buffered until the drawer direction is
         // known. Otherwise SwiftUI can bind a child control before the canvas
         // moves and activate the newly exposed sidebar row on release.
         pan.delaysTouchesBegan = true
         pan.delaysTouchesEnded = true
         pan.cancelsTouchesInView = true
         pan.delegate = self
-        pan.acceptsStart = { [weak self] point in
+        pan.acceptsStart = { [weak self] _ in
             guard let self, !self.blocked else { return false }
-            return self.desiredOpen || self.currentOffset > 1 || point.x <= 32
+            return true
         }
         pan.acceptsDirection = { [weak self] delta in
             guard let self else { return false }
@@ -521,13 +745,14 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
         view.addSubview(sidebarHost.view)
         sidebarHost.view.backgroundColor = UIColor(MyChatTheme.sidebar)
         sidebarHost.didMove(toParent: self)
+        sidebarShade.backgroundColor = .black
+        sidebarShade.isUserInteractionEnabled = false
+        sidebarShade.accessibilityElementsHidden = true
+        view.addSubview(sidebarShade)
         view.addSubview(edgeDepth)
         edgeDepth.alpha = 0
         view.addSubview(surface)
         surface.backgroundColor = .clear
-        surface.layer.cornerCurve = .continuous
-        surface.layer.maskedCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
-        surface.layer.borderColor = UIColor(MyChatTheme.border).resolvedColor(with: traitCollection).cgColor
         surface.clipsToBounds = true
         addChild(canvasHost)
         surface.addSubview(canvasHost.view)
@@ -541,24 +766,24 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
         surface.addSubview(composerHost.view)
         composerHost.view.backgroundColor = .clear
         composerHost.view.isOpaque = false
-        composerHost.view.clipsToBounds = true
+        composerHost.view.clipsToBounds = false
         composerHost.view.isHidden = !composerVisible
         composerHost.view.setContentHuggingPriority(.required, for: .vertical)
         composerHost.view.setContentCompressionResistancePriority(.required, for: .vertical)
         composerHost.didMove(toParent: self)
+        canvasLayout?.composerView = composerHost.view
         sidebarHost.view.accessibilityElementsHidden = true
         sidebarHost.view.isUserInteractionEnabled = false
         surface.addSubview(tapShield)
+        tapShield.backgroundColor = UIColor(MyChatTheme.canvas).withAlphaComponent(0.60)
         tapShield.isHidden = true
         tapShield.accessibilityLabel = "关闭侧边栏"
         tapShield.addTarget(self, action: #selector(closeFromTap), for: .touchUpInside)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: DrawerController, _: UITraitCollection) in
             controller.canvasHost.view.backgroundColor = UIColor(MyChatTheme.canvas)
                 .resolvedColor(with: controller.traitCollection)
-            controller.surface.layer.borderColor = UIColor(MyChatTheme.border)
-                .resolvedColor(with: controller.traitCollection).cgColor
         }
-        for child in [sidebarHost.view!, edgeDepth, surface, canvasHost.view!, composerHost.view!, tapShield] {
+        for child in [sidebarHost.view!, sidebarShade, edgeDepth, surface, canvasHost.view!, composerHost.view!, tapShield] {
             child.translatesAutoresizingMaskIntoConstraints = false
         }
         let sidebarWidth = sidebarHost.view.widthAnchor.constraint(equalToConstant: drawerWidth)
@@ -572,6 +797,10 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
             sidebarHost.view.topAnchor.constraint(equalTo: view.topAnchor),
             sidebarHost.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             sidebarWidth,
+            sidebarShade.leadingAnchor.constraint(equalTo: sidebarHost.view.leadingAnchor),
+            sidebarShade.trailingAnchor.constraint(equalTo: sidebarHost.view.trailingAnchor),
+            sidebarShade.topAnchor.constraint(equalTo: sidebarHost.view.topAnchor),
+            sidebarShade.bottomAnchor.constraint(equalTo: sidebarHost.view.bottomAnchor),
             edgeDepth.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             edgeDepth.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             edgeDepth.topAnchor.constraint(equalTo: view.topAnchor),
@@ -665,7 +894,17 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     }
 
     private func setCanvasBottomInset(_ inset: CGFloat) {
-        canvasLayout?.setBottomOcclusion(inset)
+        canvasLayout?.presentedComposerTop = { [weak self] in
+            guard let self, let composer = self.composerHost.view, let parent = composer.superview else { return nil }
+            let top = (composer.layer.presentation()?.frame ?? composer.frame).minY
+            return parent.convert(CGPoint(x: 0, y: top), to: nil).y
+        }
+        // During keyboardWillChange the input is still at its old frame.
+        // Publish the target owned by the keyboard guide, including the same
+        // clearance used in canvasBottomInset, instead of that stale frame.
+        let composerTop = view.window == nil ? nil : view.convert(
+            CGPoint(x: 0, y: view.bounds.maxY - inset + 8), to: nil).y
+        canvasLayout?.setBottomOcclusion(inset, composerTop: composerTop)
     }
 
     @objc private func keyboardFrameWillChange(_ note: Notification) {
@@ -683,6 +922,9 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        #if DEBUG
+        runPanelProbeIfRequested()
+        #endif
         if keyboardMotionAudit == nil, composerVisible, view.window != nil,
            ProcessInfo.processInfo.arguments.contains(where: { $0 == "--keyboard-layout-probe" || $0 == "--welcome-motion-probe" }) {
             keyboardMotionAudit = KeyboardMotionAudit(root: view, canvas: canvasHost.view, composer: composerHost.view)
@@ -736,16 +978,80 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     }
 
     private func applyOffset(_ offset: CGFloat) {
-        currentOffset = min(max(0, offset), drawerWidth)
-        let progress = drawerWidth > 0 ? currentOffset / drawerWidth : 0
+        currentOffset = min(max(0, offset), drawerWidth + 12)
+        let progress = drawerWidth > 0 ? min(1, currentOffset / drawerWidth) : 0
+        // The recessed sidebar comes into the light as the foreground paper
+        // moves away. Opacity shares the same pan/animator position and never
+        // intercepts touches or changes the canvas's brightness.
+        sidebarShade.alpha = DrawerMotion.shadeOpacity(progress: progress)
         surface.transform = CGAffineTransform(translationX: currentOffset, y: 0)
         edgeDepth.transform = surface.transform
-        edgeDepth.alpha = progress
-        surface.layer.cornerRadius = 42 * progress
-        surface.layer.borderWidth = 0.5 * progress
+        // Neither curvature nor edge density changes with travel. At closure
+        // the fixed edge simply exits the display rather than morphing flat.
+        edgeDepth.alpha = 1
         // No per-frame shadow rasterization or SwiftUI layout during a pan.
         tapShield.isHidden = currentOffset < 0.5
+        tapShield.alpha = progress
     }
+
+    #if DEBUG
+    // Optical regression fixture: use the production positioning path for a
+    // held drag with reversals. Actual touch recognition is covered by XCUITest.
+    // No haptics are fired; this fixture isolates the visual result.
+    private func runPanelProbeIfRequested() {
+        guard !panelProbeStarted, view.window != nil, surface.bounds.width > 0,
+              ProcessInfo.processInfo.arguments.contains("--panel-visual-probe") else { return }
+        panelProbeStarted = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self else { return }
+            self.dismissComposer()
+            self.interruptAnimation()
+            self.gesturing = true
+            self.lockInteraction(true)
+            self.applyOffset(0)
+            let initial = (self.surface.layer.mask as? CAShapeLayer)?.path
+            let phases: [(String, CGFloat, Double)] = [
+                ("slow-open", 1, 1.2), ("slow-close", 0, 1.2),
+                ("fast-open", 1, 0.18), ("fast-close", 0, 0.18),
+                ("half-open", 0.5, 0.7), ("reverse-close", 0.2, 0.5),
+                ("reverse-open", 1, 0.8), ("repeat-close-1", 0, 0.32),
+                ("repeat-open-1", 1, 0.32), ("repeat-close-2", 0, 0.32),
+                ("repeat-open-2", 1, 0.32), ("final-close", 0, 0.32)
+            ]
+            var frames: [[String: Any]] = []
+            let began = CACurrentMediaTime()
+            for (phase, fraction, duration) in phases {
+                let origin = self.currentOffset
+                let start = CACurrentMediaTime()
+                var progress: Double = 0
+                repeat {
+                    progress = min(1, (CACurrentMediaTime() - start) / duration)
+                    UIView.performWithoutAnimation {
+                        self.applyOffset(origin + (self.drawerWidth * fraction - origin) * progress)
+                    }
+                    let contour = (self.surface.layer.mask as? CAShapeLayer)?.path
+                    frames.append(["time": CACurrentMediaTime() - began, "phase": phase,
+                        "offset": self.currentOffset,
+                        "outlineUnchanged": initial != nil && contour.map { CFEqual($0, initial) } == true,
+                        "edgeMatchesOutline": contour != nil && self.edgeDepth.layer.shadowPath.map { CFEqual($0, contour) } == true,
+                        "scaleX": self.surface.transform.a, "scaleY": self.surface.transform.d,
+                        "edgeOffset": self.edgeDepth.transform.tx])
+                    try? await Task.sleep(for: .milliseconds(16))
+                } while progress < 1
+            }
+            self.gesturing = false
+            self.desiredOpen = false
+            self.onOpenChanged(false)
+            self.applyOffset(0)
+            self.lockInteraction(false)
+            if let data = try? JSONSerialization.data(withJSONObject: frames, options: [.sortedKeys]),
+               let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                try? data.write(to: folder.appendingPathComponent("panel-motion-audit.json"), options: .atomic)
+            }
+        }
+    }
+    #endif
 
     private func interruptAnimation() {
         guard let animator else { return }
@@ -813,9 +1119,10 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
         } else {
             // UIKit's spring starts at the live position and measured finger
             // velocity. Releasing a fling does not restart from rest.
+            duration = 0.32
             timing = UISpringTimingParameters(dampingRatio: 1,
-                initialVelocity: CGVector(dx: min(max(velocity / distance, -20), 20), dy: 0))
-            duration = 0.27
+                initialVelocity: CGVector(dx: min(3, max(0,
+                    DrawerMotion.initialVelocity(velocity, distance: distance))), dy: 0))
         }
         let next = UIViewPropertyAnimator(duration: duration, timingParameters: timing)
         animationOrigin = currentOffset
@@ -831,7 +1138,6 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     }
 
     @objc private func closeFromTap() {
-        HapticFeedback.impact()
         desiredOpen = false
         onOpenChanged(false)
         animate(to: false, velocity: 0)
@@ -841,6 +1147,7 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
         let translation = recognizer.translation(in: view).x
         switch recognizer.state {
         case .began:
+            if DrawerMotion.auditsInput { MyChatDebugLog.event("drawer begin offset=\(currentOffset) translation=\(translation)") }
             // Direction has been classified as horizontal. Cancel every active
             // vertical scroll pan inside the moving canvas until this same
             // touch ends; small vertical finger drift can no longer move both.
@@ -850,27 +1157,22 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
             gestureOrigin = currentOffset
             snapHapticSent = false
             dismissComposer()
-            haptic.prepare()
+            HapticFeedback.prepare()
             lockInteraction(true)
+            trackGesture(translation: translation)
         case .changed:
-            // Transform and layer properties only: no @State, layout, or
-            // scroll-to call on the frame-by-frame touch path.
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            applyOffset(gestureOrigin + translation)
-            CATransaction.commit()
-            let crossed = desiredOpen ? currentOffset < drawerWidth * 0.5 : currentOffset > drawerWidth * 0.5
-            if crossed, !snapHapticSent {
-                snapHapticSent = true
-                haptic.impactOccurred(intensity: 0.9)
-            }
+            trackGesture(translation: translation)
         case .ended, .cancelled:
+            // A fast drag can go straight from began to ended. Apply both
+            // samples; waiting for changed dropped its entire displacement.
+            if recognizer.state == .ended { trackGesture(translation: translation) }
             let velocity = recognizer.velocity(in: view).x
-            let open = recognizer.state == .cancelled ? desiredOpen
-                : currentOffset + velocity * 0.18 > drawerWidth * 0.52
+            let open = DrawerMotion.targetIsOpen(offset: currentOffset, velocity: velocity,
+                width: drawerWidth, cancelled: recognizer.state == .cancelled, wasOpen: desiredOpen, origin: gestureOrigin)
+            if DrawerMotion.auditsInput { MyChatDebugLog.event("drawer release offset=\(currentOffset) translation=\(translation) velocity=\(velocity) open=\(open)") }
             gesturing = false
             setCanvasScrollGestureLocked(false)
-            if open != desiredOpen, !snapHapticSent { haptic.impactOccurred(intensity: 0.9) }
+            if open != desiredOpen, !snapHapticSent { HapticFeedback.impact() }
             desiredOpen = open
             onOpenChanged(open)
             animate(to: open, velocity: recognizer.state == .cancelled ? 0 : velocity)
@@ -878,10 +1180,32 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
         }
     }
 
+    private func trackGesture(translation: CGFloat) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        applyOffset(DrawerMotion.draggedOffset(origin: gestureOrigin,
+            translation: translation, width: drawerWidth))
+        CATransaction.commit()
+        let crossed = desiredOpen ? currentOffset < drawerWidth * 0.5 : currentOffset > drawerWidth * 0.5
+        if crossed, !snapHapticSent {
+            snapHapticSent = true
+            HapticFeedback.impact()
+        }
+    }
+
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if DrawerMotion.auditsInput { MyChatDebugLog.event("drawer shouldBegin blocked=\(blocked) velocity=\(pan.velocity(in: view))") }
         guard !blocked else { return false }
-        let velocity = pan.velocity(in: view)
-        return abs(velocity.x) > abs(velocity.y) * 1.4
+        // UIKit asks before publishing its new translation. Use the intent
+        // already classified from the current touch, not that stale value.
+        return pan.hasHorizontalIntent
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard gestureRecognizer === pan else { return true }
+        // A horizontal swipe may start anywhere, including the header. Taps
+        // still reach their controls when direction classification fails.
+        return true
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
@@ -899,8 +1223,9 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
               !desiredOpen,
               currentOffset <= 1,
               let scrollView = otherGestureRecognizer.view as? UIScrollView,
-              scrollView.isDescendant(of: canvasHost.view) else { return false }
-        // At the drawer edge, let the direction classifier settle first. A
+              scrollView.contentSize.width <= scrollView.bounds.width + 1,
+              (scrollView.isDescendant(of: canvasHost.view) || scrollView.isDescendant(of: composerHost.view)) else { return false }
+        // Across the page, let the direction classifier settle first. A
         // horizontal pan wins; a vertical intent fails quickly and hands the
         // touch straight back to UIKit scrolling.
         return true
@@ -910,6 +1235,7 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
 // Opt-in geometry-only diagnostics. Records no pixels, text, or audio. The
 // ordinary launch path never creates a display link or touches focus for this.
 @MainActor final class KeyboardMotionAudit: NSObject {
+    static weak var companionView: UIView?
     static var phase = "startup"
     static var messageFrame: CGRect?
     static var assistantFrame: CGRect?
@@ -965,6 +1291,9 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
             "canvasBottomInset": canvas?.safeAreaInsets.bottom ?? 0,
             "keyboardTop": root.keyboardLayoutGuide.layoutFrame.minY]
         if let scroll {
+            if let companion = Self.companionView {
+                frame["companionY"] = companion.convert(companion.bounds, to: root).minY
+            }
             if lastContentHeight == nil || abs((lastContentHeight ?? 0) - scroll.contentSize.height) > 0.5 {
                 Self.lastContentChangeTime = CACurrentMediaTime()
                 lastContentHeight = scroll.contentSize.height
@@ -1040,6 +1369,7 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
 }
 
 private final class DirectionalDrawerPanGestureRecognizer: UIPanGestureRecognizer {
+    private(set) var hasHorizontalIntent = false
     var acceptsStart: ((CGPoint) -> Bool)?
     var acceptsDirection: ((CGPoint) -> Bool)?
     private var initialLocation: CGPoint?
@@ -1061,16 +1391,22 @@ private final class DirectionalDrawerPanGestureRecognizer: UIPanGestureRecognize
         }
         let point = touch.location(in: view)
         let delta = CGPoint(x: point.x - initialLocation.x, y: point.y - initialLocation.y)
+        if DrawerMotion.auditsInput { MyChatDebugLog.event("drawer move state=\(state.rawValue) delta=\(delta)") }
         // Classify once. Changing a recognized pan to .failed when the finger
         // curves vertically interrupts its live transform and release velocity.
         if state == .possible {
-            if abs(delta.y) >= 3, abs(delta.y) > abs(delta.x) * 1.2 { state = .failed; return }
-            if abs(delta.x) >= 3, acceptsDirection?(delta) == false { state = .failed; return }
+            switch DrawerMotion.intent(delta) {
+            case .vertical: state = .failed; return
+            case .undecided: return
+            case .horizontal:
+                if acceptsDirection?(delta) == false { state = .failed; return }
+                hasHorizontalIntent = true
+            }
         }
         super.touchesMoved(touches, with: event)
     }
 
-    override func reset() { initialLocation = nil; super.reset() }
+    override func reset() { initialLocation = nil; hasHorizontalIntent = false; super.reset() }
 }
 
 private struct NavigationOnlyHeader: View {
@@ -1085,20 +1421,71 @@ private struct NavigationOnlyHeader: View {
             }
 
             HStack {
-                Button(action: openSidebar) {
-                    Image(systemName: "line.3.horizontal")
-                        .font(MyChatSystemFont.appFont(size: 16, weight: .medium))
+                HeaderActionButton(action: openSidebar) {
+                    ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round))
+                        .frame(width: 16, height: 16)
                         .foregroundStyle(MyChatTheme.text)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("打开侧边栏")
+                .accessibilityIdentifier("header.sidebar")
 
                 Spacer(minLength: 0)
             }
         }
-        .padding(.horizontal, 16)
-        .frame(height: 62)
+        .padding(.horizontal, 20)
+        .frame(height: 52)
+        .offset(y: -4)
     }
+}
+
+/// The glyph's painted pixels must not define the header's touch target.
+/// A native control owns the entire 44-point frame, including glyph gaps.
+struct HeaderActionButton<Label: View>: UIViewRepresentable {
+    let action: () -> Void
+    let label: Label
+
+    init(action: @escaping () -> Void, @ViewBuilder label: () -> Label) {
+        self.action = action
+        self.label = label()
+    }
+
+    func makeUIView(context: Context) -> HeaderActionControl<Label> {
+        HeaderActionControl(label: label, action: action)
+    }
+
+    func updateUIView(_ control: HeaderActionControl<Label>, context: Context) {
+        control.action = action
+        control.labelHost.rootView = label
+    }
+}
+
+final class HeaderActionControl<Label: View>: UIButton {
+    var action: () -> Void
+    let labelHost: UIHostingController<Label>
+
+    init(label: Label, action: @escaping () -> Void) {
+        self.action = action
+        labelHost = UIHostingController(rootView: label)
+        super.init(frame: .zero)
+        labelHost.view.backgroundColor = .clear
+        labelHost.view.isUserInteractionEnabled = false
+        labelHost.view.accessibilityElementsHidden = true
+        addSubview(labelHost.view)
+        labelHost.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            labelHost.view.centerXAnchor.constraint(equalTo: centerXAnchor),
+            labelHost.view.centerYAnchor.constraint(equalTo: centerYAnchor),
+            labelHost.view.widthAnchor.constraint(equalToConstant: 24),
+            labelHost.view.heightAnchor.constraint(equalToConstant: 24),
+        ])
+        addTarget(self, action: #selector(activate), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+
+    @objc private func activate() { action() }
 }
 
 private struct EmptyChatHeader: View {
@@ -1108,27 +1495,30 @@ private struct EmptyChatHeader: View {
 
     var body: some View {
         ZStack {
-            Text("Incognito chat").font(MyChatTypography.navigation)
+            Text("隐私对话").font(MyChatTypography.navigation)
                 .opacity(appModel.isPrivateChat ? 1 : 0)
                 .scaleEffect(appModel.isPrivateChat ? 1 : 0.98)
                 .offset(y: appModel.isPrivateChat ? 0 : -4)
                 .accessibilityHidden(!appModel.isPrivateChat)
             HStack {
-                Button(action: openSidebar) {
+                HeaderActionButton(action: openSidebar) {
                     ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round))
                         .frame(width: 16, height: 16).foregroundStyle(MyChatTheme.text)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("打开侧边栏")
+                .accessibilityIdentifier("header.sidebar")
                 Spacer(minLength: 0)
-                Button {
+                HeaderActionButton {
                     HapticFeedback.impact()
                     if appModel.isPrivateChat { appModel.beginNewChat() } else { appModel.beginPrivateChat() }
                 } label: {
                     PrivacyChatGlyph(foreground: MyChatTheme.text, eyeColor: MyChatTheme.canvas, filled: appModel.isPrivateChat)
                         .frame(width: 20, height: 20)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel(appModel.isPrivateChat ? "退出隐私聊天" : "开始隐私聊天")
                 .accessibilityIdentifier("header.private-chat")
             }
@@ -1144,25 +1534,28 @@ private struct PrivateChatHeader: View {
 
     var body: some View {
         ZStack {
-            Text("Incognito chat")
+            Text("隐私对话")
                 .font(MyChatTypography.navigation)
 
             HStack {
-                Button(action: openSidebar) {
+                HeaderActionButton(action: openSidebar) {
                     ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round))
                         .frame(width: 16, height: 16)
                         .foregroundStyle(MyChatTheme.text)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("打开侧边栏")
+                .accessibilityIdentifier("header.sidebar")
 
                 Spacer(minLength: 0)
 
-                Button(action: closePrivateChat) {
+                HeaderActionButton(action: closePrivateChat) {
                     PrivacyChatGlyph(foreground: MyChatTheme.text, eyeColor: MyChatTheme.canvas)
                         .frame(width: 20, height: 20)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("退出隐私聊天")
             }
         }
@@ -1172,7 +1565,7 @@ private struct PrivateChatHeader: View {
     }
 }
 
-private struct ProjectChatHeader: View {
+struct ProjectChatHeader: View {
     let projectName: String
     let appModel: AppModel
     let conversation: ConversationRecord?
@@ -1181,55 +1574,50 @@ private struct ProjectChatHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Button(action: backToProject) {
-                Image(systemName: "chevron.left")
-                    .font(MyChatSystemFont.appFont(size: 16, weight: .medium))
+            HeaderActionButton(action: backToProject) {
+                Image(systemName: "arrow.left")
+                    .font(MyChatSystemFont.appFont(size: 18, weight: .regular))
                     .foregroundStyle(MyChatTheme.text)
             }
-            .buttonStyle(MyChatIconButtonStyle(size: 44))
+            .frame(width: 44, height: 44)
+            .modifier(MyChatFloatingSurface(shape: Circle()))
             .accessibilityLabel("返回项目")
+            .accessibilityIdentifier("header.project-back")
 
             HStack(spacing: 7) {
-                Image(systemName: "archivebox")
-                    .font(MyChatSystemFont.appFont(size: 15, weight: .medium))
+                MyChatProjectIcon(size: 19)
                 Text(projectName)
                     .font(MyChatTypography.chip)
                     .lineLimit(1)
             }
+            .accessibilityHidden(true)
             .padding(.horizontal, 13)
             .frame(height: 44)
             .modifier(MyChatFloatingSurface(shape: Capsule()))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("当前项目：\(projectName)")
+            .overlay {
+                HeaderActionButton(action: backToProject) { Color.clear }
+                    .accessibilityLabel("打开项目：\(projectName)")
+                    .accessibilityIdentifier("header.project")
+            }
 
             Spacer(minLength: 0)
             ConversationFilesButton(appModel: appModel).padding(.trailing, 2)
 
             if conversation != nil {
                 HStack(spacing: 0) {
-                    Button {
-                        HapticFeedback.impact()
-                        newProjectChat()
-                    } label: {
-                        NewChatHeaderGlyph()
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(MyChatBubblePressStyle())
+                    HeaderActionButton(action: newProjectChat) { NewChatHeaderGlyph() }
+                    .frame(width: 44, height: 44)
                     .accessibilityLabel("在项目中新建聊天")
                     .accessibilityIdentifier("header.new-project-chat")
 
                     ConversationActionMenu(appModel: appModel, conversation: conversation)
                 }
                 .padding(.horizontal, 6)
-                .modifier(MyChatFloatingSurface(shape: Capsule(), isInteractive: true))
+                .modifier(MyChatFloatingSurface(shape: Capsule()))
             } else {
-                Button {
-                    HapticFeedback.impact()
-                    newProjectChat()
-                } label: {
-                    NewChatHeaderGlyph().frame(width: 24, height: 24)
-                }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                HeaderActionButton(action: newProjectChat) { NewChatHeaderGlyph() }
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("在项目中新建聊天")
                 .accessibilityIdentifier("header.new-project-chat")
             }
@@ -1248,13 +1636,15 @@ private struct HeaderView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            Button(action: openSidebar) {
+            HeaderActionButton(action: openSidebar) {
                 ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round))
                     .frame(width: 16, height: 16)
                     .foregroundStyle(MyChatTheme.text)
             }
-            .buttonStyle(MyChatIconButtonStyle(size: 44))
+            .frame(width: 44, height: 44)
+            .modifier(MyChatFloatingSurface(shape: Circle()))
             .accessibilityLabel("打开侧边栏")
+            .accessibilityIdentifier("header.sidebar")
 
             Spacer(minLength: 0)
 
@@ -1264,23 +1654,23 @@ private struct HeaderView: View {
                 // iOS 26 merges adjacent bar buttons into one glass capsule;
                 // mirror that instead of two independent circles.
                 HStack(spacing: 0) {
-                    Button(action: beginNewChat) {
+                    HeaderActionButton(action: beginNewChat) {
                         NewChatHeaderGlyph()
-                            .frame(width: 44, height: 44)
                     }
-                    .buttonStyle(MyChatBubblePressStyle())
+                    .frame(width: 44, height: 44)
                     .accessibilityLabel("新建聊天")
                     .accessibilityIdentifier("header.new-chat")
 
                     ConversationActionMenu(appModel: appModel, conversation: conversation)
                 }
                 .padding(.horizontal, 6)
-                .modifier(MyChatFloatingSurface(shape: Capsule(), isInteractive: true))
+                .modifier(MyChatFloatingSurface(shape: Capsule()))
             } else {
-                Button { HapticFeedback.impact(); appModel.beginPrivateChat() } label: {
+                HeaderActionButton(action: { HapticFeedback.impact(); appModel.beginPrivateChat() }) {
                     PrivacyChatGlyph(foreground: MyChatTheme.text, eyeColor: MyChatTheme.canvas).frame(width: 20, height: 20)
                 }
-                .buttonStyle(MyChatIconButtonStyle(size: 44))
+                .frame(width: 44, height: 44)
+                .modifier(MyChatFloatingSurface(shape: Circle()))
                 .accessibilityLabel("开始隐私聊天")
                 .accessibilityIdentifier("header.private-chat")
             }
@@ -1300,69 +1690,68 @@ private struct ConversationActionMenu: View {
     let conversation: ConversationRecord?
     @State private var actionError: String?
 
-    var body: some View {
-        Menu {
-            Menu {
-                if appModel.projects.isEmpty {
-                    Button("No projects yet") {}
-                        .disabled(true)
-                } else {
-                    ForEach(appModel.projects) { project in
-                        Button {
-                            guard let conversation else { return }
-                            Task {
-                                do {
-                                    try await appModel.setConversationProject(conversation, project: project)
-                                } catch {
-                                    actionError = error.localizedDescription
-                                }
-                            }
-                        } label: {
-                            if conversation?.projectID?.lowercased() == project.id.lowercased() {
-                                Label(project.name, systemImage: "checkmark")
-                            } else {
-                                Text(project.name)
-                            }
-                        }
+    private var nativeMenu: UIMenu {
+        let destinations: [UIMenuElement] = appModel.projects.isEmpty
+            ? [UIAction(title: "还没有项目", attributes: .disabled) { _ in }]
+            : appModel.projects.map { project in
+                UIAction(title: project.name,
+                    state: conversation?.projectID?.lowercased() == project.id.lowercased() ? .on : .off) { _ in
+                    guard let conversation else { return }
+                    Task { @MainActor in
+                        do { try await appModel.setConversationProject(conversation, project: project) }
+                        catch { actionError = error.localizedDescription }
                     }
                 }
-            } label: {
-                Label("Add to Project", systemImage: "folder.badge.plus")
             }
-            .disabled(conversation == nil || appModel.projects.isEmpty)
-
-            Button(role: .destructive) {
-                guard let conversation else { return }
-                Task {
-                    do {
-                        try await appModel.deleteConversation(conversation)
-                    } catch {
-                        actionError = error.localizedDescription
-                    }
-                }
-            } label: {
-                Label("Delete conversation", systemImage: "trash")
+        let projectMenu = UIMenu(title: "添加到项目", image: MyChatProjectIcon.menuImage,
+            children: destinations)
+        let deletion = UIAction(title: "删除对话", image: UIImage(systemName: "trash"),
+            attributes: conversation == nil ? [.destructive, .disabled] : .destructive) { _ in
+            guard let conversation else { return }
+            Task { @MainActor in
+                do { try await appModel.deleteConversation(conversation) }
+                catch { actionError = error.localizedDescription }
             }
-            .disabled(conversation == nil)
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
-                .foregroundStyle(MyChatTheme.text)
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
         }
+        return UIMenu(children: [projectMenu, deletion])
+    }
+
+    var body: some View {
+        HeaderMenuButton(menu: nativeMenu)
+            .frame(width: 44, height: 44)
+            .accessibilityIdentifier("header.conversation-menu")
         .accessibilityLabel("更多聊天选项")
         .alert(
-            "Conversation action failed",
+            "对话操作失败",
             isPresented: Binding(
                 get: { actionError != nil },
                 set: { if !$0 { actionError = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { actionError = nil }
+            Button("好", role: .cancel) { actionError = nil }
         } message: {
             Text(PresentationText.plain(actionError ?? ""))
         }
+    }
+}
+
+// UIKit owns menu activation over the entire hit target. SwiftUI supplies
+// the glyph only, so glass and clear label pixels cannot consume the tap.
+struct HeaderMenuButton: UIViewRepresentable {
+    let menu: UIMenu
+
+    func makeUIView(context: Context) -> HeaderActionControl<AnyView> {
+        let control = HeaderActionControl(label: AnyView(
+            Image(systemName: "ellipsis")
+                .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
+                .foregroundStyle(MyChatTheme.text)), action: {})
+        control.showsMenuAsPrimaryAction = true
+        control.menu = menu
+        return control
+    }
+
+    func updateUIView(_ control: HeaderActionControl<AnyView>, context: Context) {
+        control.menu = menu
     }
 }
 
@@ -1408,12 +1797,11 @@ struct PrivacyChatGlyph: View {
 
     var body: some View {
         ZStack {
-            if filled {
-                PrivacyGhostOutline().fill(foreground).frame(width: size, height: size * 25 / 24)
-            } else {
-                PrivacyGhostOutline().stroke(foreground, style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round))
-                    .frame(width: size, height: size * 25 / 24)
-            }
+            PrivacyGhostOutline().fill(foreground).frame(width: size, height: size * 25 / 24)
+                .opacity(filled ? 1 : 0).scaleEffect(filled ? 1 : 0.92)
+            PrivacyGhostOutline().stroke(foreground, style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round))
+                .frame(width: size, height: size * 25 / 24)
+                .opacity(filled ? 0 : 1).scaleEffect(filled ? 1.04 : 1)
 
             HStack(spacing: 5 * size / 24) {
                 Circle().frame(width: 2.7 * size / 24, height: 2.7 * size / 24)
@@ -1475,25 +1863,18 @@ private struct PrivacyGhostOutline: Shape {
 }
 
 private struct EmptyChatCanvas: View {
+    @AppStorage("mychat.profile.fullName") private var fullName = ""
     let isPrivate: Bool
     let bottomOcclusion: CGFloat
     let systemBottomInset: CGFloat
-    let timing: KeyboardTransitionTiming
-    @State private var greeting = "What shall we think through?"
+    let canvasLayout: ChatCanvasLayout
+    private var greeting: String {
+        let name = fullName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "你好" : "你好，\(name)"
+    }
     var body: some View {
         WelcomeMotionView(greeting: greeting, isPrivate: isPrivate,
-            bottomOcclusion: bottomOcclusion, systemBottomInset: systemBottomInset, timing: timing)
-            .onAppear { greeting = nextGreeting() }
-    }
-    private func nextGreeting() -> String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        let choices = hour < 5 || hour >= 22
-            ? ["Hello, night owl", "Up late? What's on your mind?", "What shall we think through?"]
-            : ["What's on your mind?", "What shall we think through?", "Where shall we start?"]
-        let previous = UserDefaults.standard.string(forKey: "mychat.home.last-greeting")
-        let selected = choices.filter { $0 != previous }.randomElement() ?? choices[0]
-        UserDefaults.standard.set(selected, forKey: "mychat.home.last-greeting")
-        return selected
+            bottomOcclusion: bottomOcclusion, systemBottomInset: systemBottomInset, canvasLayout: canvasLayout)
     }
 }
 
@@ -1513,7 +1894,7 @@ private struct ProjectsLanding: View {
                 Button {
                     createProjectPresented = true
                 } label: {
-                    Label("New project", systemImage: "plus")
+                    Label("新建项目", systemImage: "plus")
                         .font(MyChatTypography.button)
                         .foregroundStyle(MyChatTheme.canvas)
                         .padding(.horizontal, 22)
@@ -1527,7 +1908,7 @@ private struct ProjectsLanding: View {
                     Image(systemName: "magnifyingglass")
                         .font(MyChatSystemFont.appFont(size: 19, weight: .medium))
                         .foregroundStyle(MyChatTheme.secondaryText)
-                    TextField("Search", text: $searchText)
+                    TextField("搜索", text: $searchText)
                         .font(MyChatTypography.cardBody)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -1544,7 +1925,7 @@ private struct ProjectsLanding: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-            await appModel.reloadWorkspaceData()
+            if appModel.projectsPhase == .idle { await appModel.reloadWorkspaceData() }
         }
         .fullScreenCover(isPresented: $createProjectPresented) {
             CreateProjectView()
@@ -1555,13 +1936,13 @@ private struct ProjectsLanding: View {
                 .environmentObject(appModel)
         }
         .alert(
-            "Couldn’t delete project",
+            "无法删除项目",
             isPresented: Binding(
                 get: { deletionError != nil || appModel.projectDeletionError != nil },
                 set: { if !$0 { deletionError = nil; appModel.clearProjectDeletionError() } }
             )
         ) {
-            Button("OK", role: .cancel) { deletionError = nil; appModel.clearProjectDeletionError() }
+            Button("好", role: .cancel) { deletionError = nil; appModel.clearProjectDeletionError() }
         } message: {
             Text(PresentationText.plain(deletionError ?? appModel.projectDeletionError ?? ""))
         }
@@ -1570,26 +1951,31 @@ private struct ProjectsLanding: View {
     @ViewBuilder
     private var projectContent: some View {
         if appModel.projects.isEmpty {
-            VStack(spacing: 18) {
-                if appModel.workspacePhase == .loading {
-                    ProgressView()
-                } else {
-                    Image(systemName: "archivebox")
-                        .font(MyChatSystemFont.appFont(size: 24, weight: .medium))
-                        .frame(width: 58, height: 58)
-                        .background(MyChatTheme.selected, in: Circle())
-                }
-                Text(PresentationText.plain(appModel.projectsError ?? "No projects yet"))
-                    .font(MyChatTypography.cardTitle)
-                Text("Create a project to keep its chats, instructions, files, and memories together.")
-                    .font(MyChatTypography.metadata)
+            VStack(spacing: 16) {
+                MyChatProjectIcon(size: 24)
                     .foregroundStyle(MyChatTheme.secondaryText)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 330)
+                    .frame(width: 48, height: 48)
+                    .background(MyChatTheme.controlSurface, in: Circle())
+                if let error = appModel.projectsError {
+                    Text("无法刷新项目").font(MyChatTypography.navigation)
+                    Text(PresentationText.plain(error)).font(MyChatTypography.metadata)
+                        .multilineTextAlignment(.center)
+                    Button("重试") { Task { await appModel.reloadWorkspaceData() } }
+                } else if appModel.projectsPhase == .loading || appModel.projectsPhase == .idle {
+                    Text("正在同步项目…").font(MyChatTypography.metadata)
+                } else {
+                    VStack(spacing: 6) {
+                        Text("还没有项目").font(MyChatTypography.navigation)
+                        Text("把相关对话和文件整理到一起。")
+                            .font(MyChatTypography.metadata).multilineTextAlignment(.center)
+                    }
+                }
             }
+            .foregroundStyle(MyChatTheme.secondaryText)
+            .frame(maxWidth: 330)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if filteredProjects.isEmpty {
-            Text("No matching projects")
+            Text("没有匹配的项目")
                 .font(MyChatTypography.cardBody)
                 .foregroundStyle(MyChatTheme.secondaryText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1626,7 +2012,7 @@ private struct ProjectsLanding: View {
                                         }
                                     }
                                 } label: {
-                                    Label("Delete project", systemImage: "trash")
+                                    Label("删除项目", systemImage: "trash")
                                 }
                             } label: {
                                 Image(systemName: "ellipsis")
@@ -1673,7 +2059,7 @@ private struct CreateProjectView: View {
             MyChatTheme.canvas.ignoresSafeArea()
             VStack(spacing: 0) {
                 ZStack {
-                    Text("Create a project")
+                    Text("创建项目")
                         .font(MyChatTypography.pageTitleUtility)
                     HStack {
                         Button {
@@ -1710,10 +2096,10 @@ private struct CreateProjectView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("What are you working on?")
+                            Text("你正在做什么？")
                                 .font(MyChatTypography.cardTitle)
                                 .foregroundStyle(MyChatTheme.secondaryText)
-                            TextField("Project name", text: $name)
+                            TextField("项目名称", text: $name)
                                 .font(MyChatTypography.cardBody)
                                 .focused($nameFocused)
                                 .padding(.horizontal, 16)
@@ -1726,10 +2112,10 @@ private struct CreateProjectView: View {
                         }
 
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("What are you trying to achieve?")
+                            Text("你想实现什么目标？")
                                 .font(MyChatTypography.cardTitle)
                                 .foregroundStyle(MyChatTheme.secondaryText)
-                            TextField("Describe your project, goals, subject, and instructions…", text: $instructions, axis: .vertical)
+                            TextField("描述项目、目标、主题和指令…", text: $instructions, axis: .vertical)
                                 .font(MyChatTypography.cardBody)
                                 .lineLimit(6...10)
                                 .padding(16)
@@ -1799,7 +2185,7 @@ private struct ProjectDetailView: View {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "info.circle")
                         .foregroundStyle(MyChatTheme.secondaryText)
-                    Text(instructions.isEmpty ? "No project instructions" : instructions)
+                    Text(instructions.isEmpty ? "没有项目指令" : instructions)
                         .font(MyChatTypography.cardBody)
                         .lineSpacing(MyChatTypography.utilityLineSpacing)
                         .foregroundStyle(instructions.isEmpty ? MyChatTheme.secondaryText : MyChatTheme.text)
@@ -1813,11 +2199,10 @@ private struct ProjectDetailView: View {
                 .padding(.top, 10)
 
                 HStack(spacing: 10) {
-                    projectActionButton("Add files", systemImage: "doc.badge.plus") {
-                        HapticFeedback.impact()
+                    projectActionButton("添加文件", systemImage: "doc.badge.plus") {
                         fileImporterPresented = true
                     }
-                    projectActionButton("Add instructions", systemImage: "text.badge.plus") {
+                    projectActionButton("添加指令", systemImage: "text.badge.plus") {
                         instructionsPresented = true
                     }
                 }
@@ -1831,9 +2216,9 @@ private struct ProjectDetailView: View {
                             .font(MyChatSystemFont.appFont(size: 22, weight: .regular))
                             .frame(width: 58, height: 58)
                             .background(MyChatTheme.selected, in: Circle())
-                        Text("No chats in this project")
+                        Text("此项目中还没有对话")
                             .font(MyChatTypography.cardTitle)
-                        Text("Start a conversation to see it here.")
+                        Text("开始对话后会显示在这里。")
                             .font(MyChatTypography.metadata)
                             .foregroundStyle(MyChatTheme.secondaryText)
                     }
@@ -1881,18 +2266,10 @@ private struct ProjectDetailView: View {
                         .padding(.horizontal, 18)
                 }
 
-                Button {
+                NewChatButton {
                     appModel.beginNewChat(in: project)
                     dismiss()
-                } label: {
-                    Label("New chat", systemImage: "plus")
-                        .font(MyChatTypography.button)
-                        .foregroundStyle(MyChatTheme.canvas)
-                        .padding(.horizontal, 22)
-                        .frame(minHeight: 50)
-                        .background(MyChatTheme.text, in: Capsule())
                 }
-                .buttonStyle(.plain)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.horizontal, 18)
                 .padding(.vertical, 14)
@@ -1926,8 +2303,8 @@ private struct ProjectDetailView: View {
 
             HStack {
                 Button { dismiss() } label: {
-                    Image(systemName: "chevron.left")
-                        .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
+                    Image(systemName: "arrow.left")
+                        .font(MyChatSystemFont.appFont(size: 18, weight: .regular))
                 }
                 .buttonStyle(MyChatIconButtonStyle())
                 .accessibilityLabel("返回")
@@ -1949,7 +2326,7 @@ private struct ProjectDetailView: View {
                         Button(role: .destructive) {
                             deleteProject()
                         } label: {
-                            Label("Delete project", systemImage: "trash")
+                            Label("删除项目", systemImage: "trash")
                         }
                     } label: {
                         Image(systemName: "ellipsis")
@@ -2044,7 +2421,7 @@ private struct ProjectInstructionsEditor: View {
     var body: some View {
         VStack(spacing: 18) {
             ZStack {
-                Text("Project instructions")
+                Text("项目指令")
                     .font(MyChatTypography.pageTitleUtility)
                 HStack {
                     Button { dismiss() } label: {
@@ -2113,17 +2490,19 @@ private struct ArtifactsLanding: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack {
-                Text("Artifacts").font(MyChatTypography.pageTitleUtility)
+                Text("可视化").font(MyChatTypography.pageTitleUtility)
                 HStack {
-                    Button(action: openSidebar) {
-                        Image(systemName: "line.3.horizontal")
-                            .font(MyChatSystemFont.appFont(size: 16, weight: .medium))
+                    HeaderActionButton(action: openSidebar) {
+                        ChatMenuGlyph().stroke(style: StrokeStyle(lineWidth: 1.35, lineCap: .round))
+                            .frame(width: 16, height: 16).foregroundStyle(MyChatTheme.text)
                     }
-                    .buttonStyle(MyChatIconButtonStyle())
+                    .frame(width: 44, height: 44)
+                    .modifier(MyChatFloatingSurface(shape: Circle()))
                     .accessibilityLabel("打开侧边栏")
+                    .accessibilityIdentifier("header.sidebar")
                     Spacer()
                     Menu {
-                        Picker("Filter artifacts", selection: $selectedFilter) {
+                        Picker("筛选可视化内容", selection: $selectedFilter) {
                             ForEach(ArtifactFilter.allCases) { filter in
                                 Text(filter.rawValue).tag(filter)
                             }
@@ -2134,11 +2513,12 @@ private struct ArtifactsLanding: View {
                             .foregroundStyle(selectedFilter == .all ? MyChatTheme.text : MyChatTheme.thinking)
                     }
                     .buttonStyle(MyChatIconButtonStyle())
-                    .accessibilityLabel("Filter artifacts")
+                    .accessibilityLabel("筛选可视化内容")
                 }
             }
-            .padding(.horizontal, 18)
-            .frame(height: 62)
+            .padding(.horizontal, 20)
+            .frame(height: 52)
+            .offset(y: -4)
 
             if filteredArtifacts.isEmpty {
                 Spacer()
@@ -2151,11 +2531,11 @@ private struct ArtifactsLanding: View {
                             .frame(width: 48, height: 48)
                             .background(MyChatTheme.selected, in: Circle())
                     }
-                    Text(searchText.isEmpty ? "No artifacts yet" : "No matching artifacts")
+                    Text(searchText.isEmpty ? "还没有可视化内容" : "没有匹配的可视化内容")
                         .font(MyChatTypography.navigation)
                     Text(searchText.isEmpty
-                        ? (appModel.artifactsError ?? "Artifacts created in MyChat will appear here.")
-                        : "Try a different search or filter.")
+                        ? (appModel.artifactsError ?? "在 MyChat 中创建的可视化内容会显示在这里。")
+                        : "请尝试其他搜索词或筛选条件。")
                         .font(MyChatTypography.metadata)
                         .foregroundStyle(MyChatTheme.secondaryText)
                         .multilineTextAlignment(.center)
@@ -2167,42 +2547,8 @@ private struct ArtifactsLanding: View {
                 ScrollView {
                     LazyVStack(spacing: 10) {
                         ForEach(filteredArtifacts) { artifact in
-                            Button {
-                                openArtifact(artifact)
-                            } label: {
-                                HStack(spacing: 14) {
-                                    Image(systemName: artifact.raw.localizedCaseInsensitiveContains("<code")
-                                        ? "chevron.left.forwardslash.chevron.right"
-                                        : "doc.richtext")
-                                        .font(MyChatSystemFont.appFont(size: 18, weight: .medium))
-                                        .frame(width: 42, height: 42)
-                                        .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 12))
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(artifact.title.isEmpty ? "Untitled artifact" : artifact.title)
-                                            .font(MyChatTypography.cardTitle)
-                                            .lineSpacing(MyChatTypography.utilityLineSpacing)
-                                            .lineLimit(1)
-                                        Text(artifact.projectID == nil ? "Artifact" : "Project artifact")
-                                            .font(MyChatTypography.caption)
-                                            .lineSpacing(MyChatTypography.captionLineSpacing)
-                                            .foregroundStyle(MyChatTheme.secondaryText)
-                                    }
-                                    Spacer(minLength: 8)
-                                    Image(systemName: "chevron.right")
-                                        .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
-                                        .foregroundStyle(MyChatTheme.secondaryText)
-                                }
-                                .padding(.vertical, 12)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("artifact-record-\(artifact.id)")
+                            ArtifactLibraryCard(artifact: artifact) { openArtifact(artifact) }
 
-                            if artifact.id != filteredArtifacts.last?.id {
-                                Divider()
-                                    .padding(.leading, 56)
-                            }
                         }
                     }
                     .padding(.horizontal, 20)
@@ -2217,7 +2563,7 @@ private struct ArtifactsLanding: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                TextField("Search", text: $searchText)
+                TextField("搜索", text: $searchText)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }
@@ -2247,18 +2593,17 @@ private struct ArtifactsLanding: View {
             switch selectedFilter {
             case .all: return true
             case .documents:
-                return !artifact.raw.localizedCaseInsensitiveContains("<code")
+                return ChatArtifactParser.parse(artifact.raw).blocks.contains { $0.kind == .document }
             case .code:
-                return artifact.raw.localizedCaseInsensitiveContains("<code")
-                    || artifact.raw.localizedCaseInsensitiveContains("<pre")
+                return ChatArtifactParser.parse(artifact.raw).blocks.contains { $0.kind != .document }
             }
         }
     }
 
     private enum ArtifactFilter: String, CaseIterable, Identifiable {
-        case all = "All"
-        case documents = "Docs"
-        case code = "Code"
+        case all = "全部"
+        case documents = "文档"
+        case code = "可视化"
 
         var id: String { rawValue }
     }
@@ -2273,31 +2618,33 @@ private struct ArtifactLibraryDetail: View {
     @State private var errorMessage: String?
     @State private var documents: [ChatDocument]?
     @State private var blocks: [ChatArtifactBlock] = []
+    @State private var returnOffset: CGFloat = 0
+    @State private var returning = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        GeometryReader { viewport in
         ZStack {
             MyChatTheme.canvas.ignoresSafeArea()
             VStack(spacing: 0) {
                 ZStack {
-                    Text(artifact.title.isEmpty ? "Artifact" : artifact.title)
+                    Text(artifact.title.isEmpty ? "可视化内容" : artifact.title)
                         .font(MyChatSystemFont.appFont(size: 19, weight: .semibold))
                         .lineLimit(1)
                     HStack {
-                        Button { dismiss() } label: {
-                            Image(systemName: "chevron.left")
-                                .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                                .frame(width: 44, height: 44)
+                        Button { finishReturn(width: viewport.size.width) } label: {
+                            Image(systemName: "arrow.left")
+                                .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(MyChatIconButtonStyle())
                         .accessibilityLabel("退出作品预览")
                         .accessibilityIdentifier("artifact-preview-close")
                         Spacer()
                         Button { deleteConfirmation = true } label: {
                             Image(systemName: "trash")
-                                .font(MyChatSystemFont.appFont(size: 17, weight: .medium))
-                                .frame(width: 44, height: 44)
+                                .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(MyChatIconButtonStyle())
                         .accessibilityLabel("删除作品")
                     }
                 }
@@ -2323,7 +2670,7 @@ private struct ArtifactLibraryDetail: View {
                             }.padding(16)
                         }
                     } else {
-                        ArtifactSandboxView(rawHTML: documents.first?.content ?? artifact.raw, colorScheme: colorScheme)
+                        InteractiveArtifactView(rawHTML: documents.first?.content ?? artifact.raw, colorScheme: colorScheme)
                     }
                 } else {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2337,6 +2684,27 @@ private struct ArtifactLibraryDetail: View {
                 }
             }
         }
+        .overlay(alignment: .leading) {
+            Color.clear
+                .frame(width: 22)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 12)
+                    .onChanged { value in
+                        guard !returning, value.translation.width > abs(value.translation.height) else { return }
+                        returnOffset = max(0, value.translation.width)
+                    }
+                    .onEnded { value in
+                        guard !returning else { return }
+                        if returnOffset > viewport.size.width * 0.28 ||
+                            (returnOffset > 45 && value.predictedEndTranslation.width > viewport.size.width * 0.55) {
+                            finishReturn(width: viewport.size.width)
+                        } else {
+                            withAnimation(.smooth(duration: 0.25)) { returnOffset = 0 }
+                        }
+                    })
+                .accessibilityHidden(true)
+        }
+        .offset(x: returnOffset)
         .foregroundStyle(MyChatTheme.text)
         .task(id: artifact.raw) {
             let presentation = await Task.detached(priority: .userInitiated) {
@@ -2347,17 +2715,30 @@ private struct ArtifactLibraryDetail: View {
             blocks = presentation.0
             documents = presentation.1
         }
-        .confirmationDialog("Delete this artifact?", isPresented: $deleteConfirmation) {
-            Button("Delete", role: .destructive) {
+        .confirmationDialog("删除这个可视化内容？", isPresented: $deleteConfirmation) {
+            Button("删除", role: .destructive) {
                 Task {
                     do {
                         try await appModel.deleteArtifact(artifact)
-                        dismiss()
+                        finishReturn(width: viewport.size.width)
                     } catch {
                         errorMessage = error.localizedDescription
                     }
                 }
             }
+        }
+        }
+    }
+
+    private func finishReturn(width: CGFloat) {
+        guard !returning else { return }
+        returning = true
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.28), completionCriteria: .logicallyComplete) {
+            returnOffset = width
+        } completion: {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { dismiss() }
         }
     }
 }
@@ -2370,7 +2751,7 @@ private struct CodeLanding: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Code")
+            Text("编程")
                 .font(MyChatTypography.pageTitleEditorial)
                 .lineSpacing(MyChatTypography.editorialTitleLineSpacing)
                 .padding(.horizontal, 20)
@@ -2387,7 +2768,7 @@ private struct CodeLanding: View {
                             .frame(width: 62, height: 62)
                             .background(MyChatTheme.selected, in: Circle())
                     }
-                    Text(PresentationText.plain(appModel.codeError ?? "Code sessions will show up here"))
+                    Text(PresentationText.plain(appModel.codeError ?? "编程会话会显示在这里"))
                         .font(MyChatTypography.cardBody)
                         .lineSpacing(MyChatTypography.utilityLineSpacing)
                         .foregroundStyle(MyChatTheme.secondaryText)
@@ -2442,7 +2823,7 @@ private struct CodeLanding: View {
                                             }
                                         }
                                     } label: {
-                                        Label("Delete session", systemImage: "trash")
+                                        Label("删除会话", systemImage: "trash")
                                     }
                                 } label: {
                                     Image(systemName: "ellipsis")
@@ -2450,7 +2831,7 @@ private struct CodeLanding: View {
                                         .frame(width: 48, height: 66)
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("Code 会话操作")
+                                .accessibilityLabel("编程会话操作")
                             }
                             .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
@@ -2464,7 +2845,7 @@ private struct CodeLanding: View {
             Button {
                 newSessionPresented = true
             } label: {
-                Text("New session")
+                Text("新建会话")
                     .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
                     .foregroundStyle(MyChatTheme.canvas)
                     .frame(maxWidth: .infinity, minHeight: 54)
@@ -2488,13 +2869,13 @@ private struct CodeLanding: View {
                 .environmentObject(appModel)
         }
         .alert(
-            "Couldn’t delete Code session",
+            "无法删除编程会话",
             isPresented: Binding(
                 get: { deletionError != nil },
                 set: { if !$0 { deletionError = nil } }
             )
         ) {
-            Button("OK", role: .cancel) { deletionError = nil }
+            Button("好", role: .cancel) { deletionError = nil }
         } message: {
             Text(PresentationText.plain(deletionError ?? ""))
         }
@@ -2508,6 +2889,8 @@ private struct CodeSessionDetailView: View {
     let initialTurn: CodeTurnStart?
     @State private var messages: [CodeMessageRecord] = []
     @State private var isLoading = true
+    @State private var isAdmitting = false
+    @State private var pendingUserID: String?
     @State private var errorMessage: String?
     @State private var draft = ""
     @State private var activeAdmission: CodeAdmission?
@@ -2528,6 +2911,15 @@ private struct CodeSessionDetailView: View {
     init(session: CodeSessionRecord, initialTurn: CodeTurnStart? = nil) {
         self.session = session
         self.initialTurn = initialTurn
+        if let initialTurn {
+            let responseID = initialTurn.admission.responseID ?? initialTurn.admission.taskID
+            _messages = State(initialValue: [initialTurn.userMessage,
+                CodeMessageRecord(id: responseID.uuidString.lowercased(), sessionID: session.id,
+                    role: "assistant", content: "", metadata: nil, createdAt: nil)])
+            _isLoading = State(initialValue: false)
+            _activeAdmission = State(initialValue: initialTurn.admission)
+            _streamedResponseID = State(initialValue: responseID)
+        }
     }
 
     var body: some View {
@@ -2546,11 +2938,11 @@ private struct CodeSessionDetailView: View {
                     }
                     HStack {
                         Button { dismiss() } label: {
-                            Image(systemName: "chevron.left")
-                                .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
+                            Image(systemName: "arrow.left")
+                                .font(MyChatSystemFont.appFont(size: 18, weight: .regular))
                                 .frame(width: 44, height: 44)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(MyChatIconButtonStyle())
                         Spacer()
                         if let activeAdmission {
                             Button {
@@ -2560,7 +2952,7 @@ private struct CodeSessionDetailView: View {
                                     .font(MyChatSystemFont.appFont(size: 14, weight: .bold))
                                     .frame(width: 44, height: 44)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(MyChatIconButtonStyle())
                             .accessibilityLabel("停止 Code 任务")
                         }
                         Menu {
@@ -2574,16 +2966,16 @@ private struct CodeSessionDetailView: View {
                                     }
                                 }
                             } label: {
-                                Label("Delete session", systemImage: "trash")
+                                Label("删除会话", systemImage: "trash")
                             }
                         } label: {
                             Image(systemName: "ellipsis")
                                 .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
                                 .frame(width: 44, height: 44)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(activeAdmission != nil)
-                        .accessibilityLabel("Code 会话操作")
+                        .buttonStyle(MyChatIconButtonStyle())
+                        .disabled(activeAdmission != nil || isAdmitting)
+                        .accessibilityLabel("编程会话操作")
                     }
                 }
                 .padding(.horizontal, 16)
@@ -2597,7 +2989,7 @@ private struct CodeSessionDetailView: View {
                         Text(PresentationText.plain(errorMessage))
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .multilineTextAlignment(.center)
-                        Button("Retry") { Task { await load() } }
+                        Button("重试") { Task { await load() } }
                     }
                     .padding(24)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2609,11 +3001,19 @@ private struct CodeSessionDetailView: View {
                                     role: message.role,
                                     content: content(for: message)
                                 )
+                                .environment(\.responseIsStreaming,
+                                    activeAdmission != nil && message.id.lowercased() == streamedResponseID?.uuidString.lowercased())
+                            }
+
+                            if isAdmitting || activeAdmission != nil {
+                                DotThinkingView(isGenerating: true)
+                                    .frame(width: 48, height: 48)
+                                    .accessibilityLabel("编程任务正在处理")
                             }
 
                             if !steps.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Label("Agent activity", systemImage: "terminal")
+                                    Label("智能体活动", systemImage: "terminal")
                                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
                                         .foregroundStyle(MyChatTheme.secondaryText)
                                     ForEach(Array(steps.enumerated()), id: \.offset) { _, step in
@@ -2638,7 +3038,7 @@ private struct CodeSessionDetailView: View {
 
                             if !plans.isEmpty {
                                 VStack(alignment: .leading, spacing: 10) {
-                                    Text("Planned changes")
+                                    Text("计划中的更改")
                                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
                                         .foregroundStyle(MyChatTheme.secondaryText)
                                     ForEach(plans) { action in
@@ -2665,7 +3065,7 @@ private struct CodeSessionDetailView: View {
                                     Task { await requestPublish() }
                                 } label: {
                                     Label(
-                                        isProvisionalRepository ? "Create repository" : "Publish pull request",
+                                        isProvisionalRepository ? "创建仓库" : "发布拉取请求",
                                         systemImage: "arrow.up.right.square"
                                     )
                                     .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
@@ -2694,9 +3094,9 @@ private struct CodeSessionDetailView: View {
                     .buttonStyle(.plain)
                     .padding(.leading, 6)
                     .padding(.bottom, 5)
-                    .accessibilityLabel("Open Code actions")
+                    .accessibilityLabel("打开编程操作")
 
-                    TextField("Message MyChat Code", text: $draft, axis: .vertical)
+                    TextField("向 MyChat 编程发送消息", text: $draft, axis: .vertical)
                         .lineLimit(1...5)
                         .focused($composerFocused)
                         .padding(.horizontal, 15)
@@ -2728,11 +3128,14 @@ private struct CodeSessionDetailView: View {
         }
         .foregroundStyle(MyChatTheme.text)
         .task {
-            await load()
-            guard !consumedInitialTurn, let initialTurn else { return }
-            consumedInitialTurn = true
-            prepare(initialTurn)
-            await consume(initialTurn.admission)
+            if !consumedInitialTurn, let initialTurn {
+                consumedInitialTurn = true
+                prepare(initialTurn)
+                isLoading = false
+                await consume(initialTurn.admission)
+            } else {
+                await load()
+            }
         }
         .sheet(item: $commandDestination) { destination in
             commandSheet(destination)
@@ -2762,8 +3165,14 @@ private struct CodeSessionDetailView: View {
     private func load() async {
         isLoading = messages.isEmpty
         do {
-            messages = try await appModel.codeMessages(for: session)
-            errorMessage = nil
+            let persisted = try await appModel.codeMessages(for: session)
+            // A refresh must not erase an admitted or still-submitting turn.
+            let persistedIDs = Set(persisted.map(\.id))
+            let live = messages.filter {
+                !persistedIDs.contains($0.id) &&
+                ($0.id == pendingUserID || $0.id.lowercased() == streamedResponseID?.uuidString.lowercased())
+            }
+            messages = persisted + live
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -2771,10 +3180,10 @@ private struct CodeSessionDetailView: View {
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && activeAdmission == nil
-            && !isApplying
-            && appModel.selectedModelCanRunCode
+        CodeSendEligibility.canSubmit(
+            draft: draft,
+            isBusy: activeAdmission != nil || isAdmitting || isApplying
+        )
     }
 
     private var isProvisionalRepository: Bool {
@@ -2821,18 +3230,33 @@ private struct CodeSessionDetailView: View {
 
     private func send() async {
         guard canSend else { return }
+        if let issue = CodeSendEligibility.modelIssue(appModel.selectedModel) {
+            errorMessage = issue
+            commandDestination = .model
+            return
+        }
         let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let localID = "pending-" + UUID().uuidString
+        pendingUserID = localID
+        isAdmitting = true
         draft = ""
+        composerFocused = false
         errorMessage = nil
+        withAnimation(.smooth(duration: 0.32)) {
+            messages.append(CodeMessageRecord(id: localID, sessionID: session.id,
+                role: "user", content: prompt, metadata: nil, createdAt: nil))
+        }
         do {
             let start = try await appModel.startCodeTurn(in: session, prompt: prompt)
             prepare(start)
-            await load()
+            isAdmitting = false
             await consume(start.admission)
         } catch {
+            isAdmitting = false
+            messages.removeAll { $0.id == localID }
+            pendingUserID = nil
             errorMessage = error.localizedDescription
             if draft.isEmpty { draft = prompt }
-            await load()
         }
     }
 
@@ -2896,7 +3320,7 @@ private struct CodeSessionDetailView: View {
             let repository = isProvisionalRepository ? nil : session.repository
             let record = try await appModel.createCodeSession(
                 repository: repository,
-                title: "New session"
+                title: "新建会话"
             )
             presentedSession = record
         } catch {
@@ -2913,19 +3337,28 @@ private struct CodeSessionDetailView: View {
 
     private func prepare(_ start: CodeTurnStart) {
         activeAdmission = start.admission
-        streamedResponseID = start.admission.responseID
+        streamedResponseID = start.admission.responseID ?? start.admission.taskID
         streamedContent = ""
         steps = []
         memoryChanges = []
         plans = []
         receipt = nil
         lastTaskID = start.admission.taskID
-        if !messages.contains(where: { $0.id == start.userMessage.id }) {
+        if let pendingUserID, let index = messages.firstIndex(where: { $0.id == pendingUserID }) {
+            messages[index] = start.userMessage
+        } else if !messages.contains(where: { $0.id == start.userMessage.id }) {
             messages.append(start.userMessage)
+        }
+        pendingUserID = nil
+        let responseID = (start.admission.responseID ?? start.admission.taskID).uuidString.lowercased()
+        if !messages.contains(where: { $0.id.lowercased() == responseID }) {
+            messages.append(CodeMessageRecord(id: responseID, sessionID: session.id,
+                role: "assistant", content: "", metadata: nil, createdAt: nil))
         }
     }
 
     private func consume(_ admission: CodeAdmission) async {
+        var terminalError: String?
         do {
             let events = try await appModel.codeEvents(for: admission)
             eventLoop: for try await event in events {
@@ -2942,16 +3375,23 @@ private struct CodeSessionDetailView: View {
                 case let .agentPlan(plan):
                     if !plans.contains(where: { samePlan($0, plan) }) { plans.append(plan) }
                 case let .terminal(terminal):
-                    streamedContent = terminal.content
+                    if !terminal.content.isEmpty { streamedContent = terminal.content }
                     receipt = terminal.codeReceipt
+                    if terminal.status == .failed {
+                        terminalError = terminal.errorCode ?? "编程任务失败，请重试"
+                    }
                     break eventLoop
                 case .thinkingDelta, .reasoningSummaryDelta, .toolSearch, .toolActivity, .modelOutputCompleted, .connectorApp:
                     break
                 }
             }
-            errorMessage = nil
+            errorMessage = terminalError
         } catch {
             errorMessage = error.localizedDescription
+        }
+        if let id = streamedResponseID,
+           let index = messages.firstIndex(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
+            messages[index].content = streamedContent
         }
         activeAdmission = nil
         await load()
@@ -3010,7 +3450,7 @@ private struct CodeSessionDetailView: View {
         CodeApplyCommand(
             repository: isProvisionalRepository ? nil : session.repository,
             actions: isProvisionalRepository ? plans : [],
-            message: "Publish MyChat Code changes",
+            message: "发布 MyChat 编程更改",
             taskID: taskID,
             mode: isProvisionalRepository ? .directPush : .workspacePullRequest,
             confirmationID: confirmation?.confirmationID,
@@ -3041,8 +3481,7 @@ private struct CodeConversationMessage: View {
         if role == "user" {
             HStack {
                 Spacer(minLength: 54)
-                Text(content)
-                    .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
+                MarkdownBody(content, fillsWidth: false, typography: .user)
                     .textSelection(.enabled)
                     .padding(.horizontal, 15)
                     .padding(.vertical, 11)
@@ -3053,9 +3492,7 @@ private struct CodeConversationMessage: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
-            Text(content)
-                .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
-                .lineSpacing(4)
+            MarkdownBody(content, typography: .response)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -3091,7 +3528,7 @@ private struct CodeCommandSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Code commands", close: close)
+            SheetHeader(title: "编程指令", close: close)
             VStack(alignment: .leading, spacing: 5) {
                 Text(repository)
                     .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
@@ -3145,12 +3582,12 @@ private struct CodeEffortSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Thinking depth", close: close)
+            SheetHeader(title: "思考强度", close: close)
             if appModel.availableReasoningEfforts.isEmpty {
                 ContentUnavailableView(
-                    "No thinking depth",
+                    "无法调整思考强度",
                     systemImage: "brain.head.profile",
-                    description: Text("The selected model does not expose adjustable reasoning levels.")
+                    description: Text("所选模型不提供可调整的思考强度。")
                 )
                 .frame(maxHeight: .infinity)
             } else {
@@ -3206,7 +3643,7 @@ private struct CodeMemorySheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Repository memory", close: close)
+            SheetHeader(title: "仓库记忆", close: close)
             Text(repository)
                 .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                 .foregroundStyle(MyChatTheme.secondaryText)
@@ -3220,14 +3657,13 @@ private struct CodeMemorySheet: View {
                     if memories == nil {
                         ProgressView().padding(.top, 32)
                     } else if memories?.isEmpty == true {
-                        Text("No repository memories yet")
+                        Text("还没有仓库记忆")
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(.top, 28)
                     } else {
                         ForEach(memories ?? []) { memory in
                             HStack(alignment: .top, spacing: 10) {
-                                Text(memory.content)
-                                    .font(MyChatSystemFont.appFont(size: 16, weight: .regular))
+                                MarkdownBody(memory.content, typography: .response)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Button(role: .destructive) {
                                     Task { await delete(memory) }
@@ -3236,7 +3672,7 @@ private struct CodeMemorySheet: View {
                                         .frame(width: 40, height: 40)
                                 }
                                 .buttonStyle(.plain)
-                                .accessibilityLabel("Delete memory")
+                                .accessibilityLabel("删除记忆")
                             }
                             .padding(14)
                             .background(
@@ -3260,7 +3696,7 @@ private struct CodeMemorySheet: View {
             }
 
             HStack(spacing: 10) {
-                TextField("Add memory", text: $draft, axis: .vertical)
+                TextField("添加记忆", text: $draft, axis: .vertical)
                     .lineLimit(1...3)
                     .padding(.horizontal, 14)
                     .frame(minHeight: 46)
@@ -3341,13 +3777,13 @@ private struct CodeContextSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Context", close: close)
+            SheetHeader(title: "上下文", close: close)
             VStack(spacing: 18) {
                 metric("Messages", value: "\(messages.count)")
-                metric("Estimated tokens", value: "\(estimatedTokens.formatted()) / \(limit.formatted())")
+                metric("预计令牌数", value: "\(estimatedTokens.formatted()) / \(limit.formatted())")
                 ProgressView(value: Double(min(estimatedTokens, limit)), total: Double(limit))
                     .tint(MyChatTheme.brand)
-                Text("Estimated from the current Code conversation")
+                Text("根据当前编程对话估算")
                     .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                     .foregroundStyle(MyChatTheme.secondaryText)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -3390,11 +3826,11 @@ private struct CodeResumeSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Resume", close: close)
+            SheetHeader(title: "恢复会话", close: close)
             ScrollView {
                 LazyVStack(spacing: 8) {
                     if matchingSessions.isEmpty {
-                        Text("No previous sessions in this repository")
+                        Text("此仓库中没有之前的会话")
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(.top, 30)
                     } else {
@@ -3450,7 +3886,7 @@ private struct CodeTasksSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Agent tasks", close: close)
+            SheetHeader(title: "智能体任务", close: close)
             ScrollView {
                 LazyVStack(spacing: 8) {
                     if tasks == nil {
@@ -3460,7 +3896,7 @@ private struct CodeTasksSheet: View {
                             .foregroundStyle(Color.red)
                             .padding(.top, 24)
                     } else if tasks?.isEmpty == true {
-                        Text("No Agent tasks in this repository")
+                        Text("此仓库中没有智能体任务")
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(.top, 30)
                     } else {
@@ -3532,6 +3968,7 @@ private struct CodeNewSessionView: View {
     @State private var selectedRepository: GitHubRepositoryRecord?
     @State private var createNewRepository = false
     @State private var isStarting = false
+    @State private var pendingPrompt: String?
     @State private var errorMessage: String?
     @State private var startedSession: CodeSessionStart?
 
@@ -3545,43 +3982,56 @@ private struct CodeNewSessionView: View {
         } else {
             ZStack {
             MyChatTheme.canvas.ignoresSafeArea()
-            CodeSparkleField()
-                .allowsHitTesting(false)
+            if pendingPrompt == nil {
+                CodeSparkleField().allowsHitTesting(false)
+            }
             VStack(spacing: 0) {
                 ZStack {
-                    Text("New session")
-                        .font(MyChatSystemFont.appFont(size: 29, design: .default, weight: .semibold))
+                    Text("新建会话")
+                        .font(MyChatSystemFont.appFont(size: 18, design: .default, weight: .semibold))
                     HStack {
                         Button {
                             dismiss()
                         } label: {
-                            Label("Code", systemImage: "chevron.left")
-                                .font(MyChatSystemFont.appFont(for: .body, weight: .regular))
-                                .frame(minWidth: 44, minHeight: 44)
+                            Image(systemName: "arrow.left")
+                                .font(MyChatSystemFont.appFont(size: 18, weight: .regular))
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(MyChatIconButtonStyle())
+                        .accessibilityLabel("返回 Code")
                         Spacer()
                     }
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 60)
 
-                Spacer()
-
-                VStack(spacing: 0) {
-                    Text("let’s git together and code")
-                        .font(MyChatSystemFont.appFont(size: 19, design: .monospaced, weight: .regular))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
+                if let pendingPrompt {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            CodeConversationMessage(role: "user", content: pendingPrompt)
+                            DotThinkingView(isGenerating: true).frame(width: 48, height: 48)
+                        }.padding(16)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.offset(y: 24).combined(with: .opacity))
+                } else {
+                    Spacer()
+                    VStack(spacing: 18) {
+                        DotThinkingView(isGenerating: false)
+                            .frame(width: 58, height: 58)
+                        Text("一起用 Git 编程")
+                            .font(MyChatSystemFont.appFont(size: 19, design: .monospaced, weight: .regular))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
+                    Spacer()
                 }
 
-                Spacer()
-
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("Code anything…", text: $draft, axis: .vertical)
+                    TextField("描述你想编写的内容…", text: $draft, axis: .vertical)
                         .font(MyChatSystemFont.appFont(size: 20, weight: .regular))
                         .lineLimit(1...5)
                         .focused($composerFocused)
+                        .disabled(isStarting)
                         .padding(.horizontal, 18)
                         .padding(.top, 18)
 
@@ -3590,7 +4040,8 @@ private struct CodeNewSessionView: View {
                             repositoryPickerVisible = true
                         } label: {
                             Text(repositoryLabel)
-                                .font(MyChatSystemFont.appFont(for: .subheadline, weight: .medium))
+                                .font(MyChatTypography.metadata)
+                                .lineLimit(1)
                                 .padding(.horizontal, 13)
                                 .frame(minHeight: 36)
                                 .background(MyChatTheme.selected, in: Capsule())
@@ -3603,7 +4054,7 @@ private struct CodeNewSessionView: View {
                             HStack(spacing: 6) {
                                 Image(systemName: "cpu")
                                     .font(MyChatSystemFont.appFont(size: 13, weight: .semibold))
-                                Text(appModel.selectedModel?.name ?? "选择模型")
+                                Text(appModel.selectedModel?.chatDisplayName ?? "选择模型")
                                     .font(MyChatSystemFont.appFont(for: .subheadline, weight: .medium))
                                     .lineLimit(1)
                                     .truncationMode(.middle)
@@ -3617,30 +4068,28 @@ private struct CodeNewSessionView: View {
 
                         Spacer()
 
-                        Image(systemName: "icloud")
-                            .font(MyChatSystemFont.appFont(for: .title3, weight: .regular))
-                            .frame(width: 44, height: 44)
-
                         Button {
                             Task { await startSession() }
                         } label: {
                             if isStarting {
                                 ProgressView()
-                                    .tint(MyChatTheme.onBrand)
-                                    .frame(width: 46, height: 46)
-                                    .background(MyChatTheme.brand, in: Circle())
+                                    .tint(MyChatTheme.sendActionForeground)
+                                    .frame(width: 36, height: 36)
+                                    .background(MyChatTheme.sendActionSurface, in: Circle())
                             } else {
                                 Image(systemName: "arrow.up")
-                                    .font(MyChatSystemFont.appFont(for: .title3, weight: .semibold))
-                                    .foregroundStyle(MyChatTheme.onBrand)
-                                    .frame(width: 46, height: 46)
-                                    .background(MyChatTheme.brand, in: Circle())
+                                    .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
+                                    .foregroundStyle(MyChatTheme.sendActionForeground)
+                                    .frame(width: 36, height: 36)
+                                    .background(MyChatTheme.sendActionSurface, in: Circle())
                             }
                         }
                         .buttonStyle(.plain)
                         .disabled(!canStart)
                         .opacity(canStart ? 1 : 0.45)
-                        .accessibilityHint("选择仓库或新建仓库后发送")
+                        .accessibilityHint("发送 Code 任务；仓库可以稍后选择")
+                        .accessibilityLabel("发送编程任务")
+                        .accessibilityIdentifier("code.send")
                     }
                     .padding(.horizontal, 10)
                     .padding(.bottom, 9)
@@ -3664,11 +4113,7 @@ private struct CodeNewSessionView: View {
             }
         }
         .foregroundStyle(MyChatTheme.text)
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                composerFocused = true
-            }
-        }
+
         .sheet(isPresented: $repositoryPickerVisible) {
             CodeRepositoryPickerView { repository in
                 selectedRepository = repository
@@ -3691,28 +4136,41 @@ private struct CodeNewSessionView: View {
     }
 
     private var repositoryLabel: String {
-        if createNewRepository { return "New repository" }
-        return selectedRepository?.fullName ?? "Choose repository"
+        if createNewRepository { return "新仓库" }
+        return selectedRepository?.fullName ?? "选择仓库"
     }
 
     private var canStart: Bool {
-        !isStarting
-            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && (selectedRepository != nil || createNewRepository)
-            && appModel.selectedModelCanRunCode
+        CodeSendEligibility.canSubmit(draft: draft, isBusy: isStarting)
     }
 
     private func startSession() async {
         guard canStart else { return }
+        if let issue = CodeSendEligibility.modelIssue(appModel.selectedModel) {
+            errorMessage = issue
+            modelPickerVisible = true
+            return
+        }
+        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         isStarting = true
         errorMessage = nil
+        composerFocused = false
+        withAnimation(.smooth(duration: 0.38)) {
+            pendingPrompt = prompt
+            draft = ""
+        }
         do {
-            startedSession = try await appModel.startCodeSession(
+            let started = try await appModel.startCodeSession(
                 repository: createNewRepository ? nil : selectedRepository?.fullName,
-                prompt: draft
+                prompt: prompt
             )
+            withAnimation(.smooth(duration: 0.38)) { startedSession = started }
         } catch {
             errorMessage = error.localizedDescription
+            withAnimation(.smooth(duration: 0.28)) {
+                pendingPrompt = nil
+                draft = prompt
+            }
         }
         isStarting = false
     }
@@ -3755,12 +4213,12 @@ private struct CodeRepositoryPickerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Choose repository", close: { dismiss() })
+            SheetHeader(title: "选择仓库", close: { dismiss() })
 
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(MyChatTheme.secondaryText)
-                TextField("Search repositories", text: $searchText)
+                TextField("搜索仓库", text: $searchText)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             }
@@ -3777,9 +4235,9 @@ private struct CodeRepositoryPickerView: View {
                         .frame(width: 38, height: 38)
                         .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 11))
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Create a new repository")
+                        Text("创建新仓库")
                             .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
-                        Text("MyChat Code will prepare the files first")
+                        Text("MyChat 编程会先准备文件")
                             .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                             .foregroundStyle(MyChatTheme.secondaryText)
                     }
@@ -3802,9 +4260,9 @@ private struct CodeRepositoryPickerView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "link.badge.plus")
                         .font(MyChatSystemFont.appFont(size: 24, weight: .medium))
-                    Text("GitHub is not 个已连接")
+                    Text("GitHub 尚未连接")
                         .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                    Text(PresentationText.plain(errorMessage ?? "Connect GitHub in MyChat Web, then refresh this page."))
+                    Text(PresentationText.plain(errorMessage ?? "请先在 MyChat 网页版连接 GitHub，然后刷新此页面。"))
                         .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
                         .foregroundStyle(MyChatTheme.secondaryText)
                         .multilineTextAlignment(.center)
@@ -3815,13 +4273,13 @@ private struct CodeRepositoryPickerView: View {
                             ProgressView()
                                 .frame(minWidth: 120)
                         } else {
-                            Text("Connect GitHub")
+                            Text("连接 GitHub")
                                 .frame(minWidth: 120)
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isConnecting)
-                    Button("Refresh") { Task { await load() } }
+                    Button("刷新") { Task { await load() } }
                         .buttonStyle(.bordered)
                 }
                 .padding(28)
@@ -3830,7 +4288,7 @@ private struct CodeRepositoryPickerView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "folder")
                         .font(MyChatSystemFont.appFont(size: 24, weight: .medium))
-                    Text(searchText.isEmpty ? "No repositories yet" : "No matching repositories")
+                    Text(searchText.isEmpty ? "还没有仓库" : "没有匹配的仓库")
                         .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4028,7 +4486,7 @@ private struct CodeConfirmationSheet: View {
 
             if !request.risk.files.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Files")
+                    Text("文件")
                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
                         .foregroundStyle(MyChatTheme.secondaryText)
                     ForEach(request.risk.files.prefix(12), id: \.self) { file in
@@ -4042,7 +4500,7 @@ private struct CodeConfirmationSheet: View {
             Button(action: confirm) {
                 Group {
                     if isApplying { ProgressView().tint(MyChatTheme.canvas) }
-                    else { Text("Confirm and publish") }
+                    else { Text("确认并发布") }
                 }
                 .font(MyChatSystemFont.appFont(size: 17, weight: .semibold))
                 .frame(maxWidth: .infinity, minHeight: 52)
@@ -4063,7 +4521,7 @@ private struct CodeReceiptView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("Published", systemImage: "checkmark.circle.fill")
+            Label("已发布", systemImage: "checkmark.circle.fill")
                 .font(MyChatSystemFont.appFont(size: 17, weight: .semibold))
                 .foregroundStyle(Color.green)
             if let repository = receipt.repository {
@@ -4071,13 +4529,13 @@ private struct CodeReceiptView: View {
                     .font(MyChatSystemFont.appFont(size: 15, design: .monospaced, weight: .regular))
             }
             if let repositoryURL = receipt.repositoryURL {
-                Link("Open repository", destination: repositoryURL)
+                Link("打开仓库", destination: repositoryURL)
             }
             if let pullRequestURL = receipt.pullRequestURL {
-                Link("Open pull request", destination: pullRequestURL)
+                Link("打开拉取请求", destination: pullRequestURL)
             }
             if let pagesURL = receipt.pagesURL {
-                Link("Open website", destination: pagesURL)
+                Link("打开网站", destination: pagesURL)
             }
         }
         .padding(14)
@@ -4089,19 +4547,22 @@ private struct CodeReceiptView: View {
 private struct ModelPickerSheet: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
+    var close: (() -> Void)? = nil
+    private func closeSheet() { if let close { close() } else { dismiss() } }
     let codeOnly: Bool
 
-    init(codeOnly: Bool = false) {
+    init(codeOnly: Bool = false, close: (() -> Void)? = nil) {
         self.codeOnly = codeOnly
+        self.close = close
     }
 
     @ViewBuilder var body: some View {
-        if codeOnly { legacyBody } else { ChatModelSelectionSheet() }
+        if codeOnly { legacyBody } else { ChatModelSelectionSheet(close: close) }
     }
 
     private var legacyBody: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "Select model", close: { dismiss() })
+            SheetHeader(title: "选择模型", close: { dismiss() })
             Group {
                 if !appModel.models.isEmpty {
                     modelCatalogList
@@ -4217,20 +4678,31 @@ private struct ModelPickerSheet: View {
 }
 
 
+private struct StableSheetPageSizing: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) { content.presentationSizing(.page) }
+        else { content }
+    }
+}
+
+private struct ModelSheetScrollSurface: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) { content.scrollEdgeEffectHidden(true, for: .all) }
+        else { content }
+    }
+}
+
 private struct ChatModelSelectionSheet: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var close: (() -> Void)? = nil
+    private func closeSheet() { if let close { close() } else { dismiss() } }
     @State private var path: [Page] = []
-    @State private var detent: PresentationDetent = .fraction(0.63)
     private enum Page: Hashable { case models, more, effort }
     private let selectionColor = Color(red: 95.0 / 255, green: 157.0 / 255, blue: 221.0 / 255)
     private var primary: [ModelCatalogItem] {
-        let candidates = appModel.models.filter { $0.outputKind == .chat && $0.endpointID == nil }
-        return ["fable", "opus", "sonnet", "haiku"].compactMap { family in
-            candidates.filter { ($0.name + " " + $0.id).lowercased().contains(family) }
-                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedDescending }.first
-        }
+        ModelCatalogItem.primaryChatModels(appModel.models, selectedID: appModel.selectedModelID)
     }
     private var others: [ModelCatalogItem] {
         let ids = Set(primary.map(\.id))
@@ -4239,69 +4711,89 @@ private struct ChatModelSelectionSheet: View {
     }
     var body: some View {
         NavigationStack(path: $path) {
-            pageBody(.models)
-                .navigationDestination(for: Page.self) { page in pageBody(page) }
+            pageSurface(.models)
+                .navigationDestination(for: Page.self) { page in
+                    pageSurface(page)
+                }
         }
-        .presentationDetents([.fraction(0.56), .fraction(0.63), .large], selection: $detent)
-        .onChange(of: path) { _, pages in
-            withAnimation(reduceMotion ? nil : .smooth(duration: 0.32)) {
-                detent = pages.isEmpty ? .fraction(0.63) : .fraction(0.56)
-            }
-        }
+        .tint(MyChatTheme.text)
+        .ignoresSafeArea(.container, edges: .bottom)
     }
-    private func pageBody(_ page: Page) -> some View {
+    private func pageSurface(_ page: Page) -> some View {
         VStack(spacing: 0) {
+            Capsule().fill(MyChatTheme.secondaryText.opacity(0.32))
+                .frame(width: 56, height: 4).padding(.top, 6).padding(.bottom, 6)
+                .accessibilityHidden(true)
             ZStack {
-                Text(page == .effort ? "Effort" : page == .more ? "More models" : "Select model")
+                Text(page == .effort ? "思考强度" : page == .more ? "更多模型" : "选择模型")
                     .font(MyChatTypography.pageTitleUtility)
+                    .contentTransition(.interpolate)
                 HStack {
-                    Button {
-                        HapticFeedback.impact()
-                        if page == .models { dismiss() } else { path.removeLast() }
+                    HeaderActionButton {
+                        if page == .models { closeSheet() } else { navigate(to: .models) }
                     } label: {
                         Image(systemName: page == .models ? "xmark" : "chevron.left")
-                    }.buttonStyle(MyChatIconButtonStyle(size: 42)).accessibilityLabel(page == .models ? "关闭" : "Back")
+                            .contentTransition(.symbolEffect(.replace))
+                    }.frame(width: 42, height: 42)
+                        .modifier(MyChatFloatingSurface(shape: Circle()))
+                        .accessibilityLabel(page == .models ? "关闭" : "返回")
                     Spacer()
                 }
-            }.padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 24)
+            }.padding(.horizontal, 18).padding(.top, 6).padding(.bottom, 22)
             ScrollView {
+                pageContent(page)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .scrollIndicators(.hidden)
+            .modifier(ModelSheetScrollSurface())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(MyChatTheme.canvas)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+    private func pageContent(_ page: Page) -> some View {
                 VStack(alignment: .leading, spacing: 16) {
                     if page == .effort { effortRows }
                     else if page == .more {
                         let custom = others.filter { $0.endpointID != nil }
                         if !custom.isEmpty {
-                            Text("Custom models").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 18)
-                            modelRows(custom)
+                            Text("自定义模型").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 18)
+                            modelRows(custom, raised: false)
                         }
                         let builtIn = others.filter { $0.endpointID == nil }
-                        if !builtIn.isEmpty { modelRows(builtIn) }
-                        if others.isEmpty { Text("No more models").foregroundStyle(MyChatTheme.secondaryText).padding(18) }
+                        if !builtIn.isEmpty { modelRows(builtIn, raised: false) }
+                        if others.isEmpty { Text("没有更多模型").foregroundStyle(MyChatTheme.secondaryText).padding(18) }
                     } else {
                         if !primary.isEmpty { modelRows(primary) }
                         if appModel.models.isEmpty {
                             if appModel.catalogPhase == .loading { ProgressView().frame(maxWidth: .infinity).padding(30) }
-                            else { Button("Retry") { Task { await appModel.reloadModels() } }.padding(18) }
+                            else { Button("重试") { Task { await appModel.reloadModels() } }.padding(18) }
                         }
                         if appModel.selectedModelSupportsReasoning {
-                            Button { HapticFeedback.impact(); path.append(.effort) } label: {
-                                NativeSettingsRow(title: "Effort", icon: "", detail: appModel.reasoningEnabled ? effortLabel(appModel.reasoningEffort) : "Off")
+                            Button { navigate(to: .effort) } label: {
+                                NativeSettingsRow(title: "思考强度", icon: "", detail: appModel.reasoningEnabled ? effortLabel(appModel.reasoningEffort) : "关闭")
                             }.buttonStyle(ModelSelectionPressStyle()).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
                                 .accessibilityIdentifier("model.effort")
                         }
-                        Button { HapticFeedback.impact(); path.append(.more) } label: {
-                            NativeSettingsRow(title: "More models", icon: "")
+                        Button { navigate(to: .more) } label: {
+                            NativeSettingsRow(title: "更多模型", icon: "")
                         }.buttonStyle(ModelSelectionPressStyle()).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
                             .accessibilityIdentifier("model.more")
                     }
-                }.padding(.horizontal, 26).padding(.bottom, 28)
-            }.scrollIndicators(.hidden)
-        }.foregroundStyle(MyChatTheme.text).background(MyChatTheme.canvas)
-            .toolbar(.hidden, for: .navigationBar)
+                }
+                .padding(.horizontal, 18)
+                .padding(.bottom, 34)
+                .foregroundStyle(MyChatTheme.text)
     }
-    private func modelRows(_ models: [ModelCatalogItem]) -> some View {
+    private func navigate(to destination: Page) {
+        if destination == .models { path.removeAll() }
+        else if path.last != destination { path.append(destination) }
+    }
+    private func modelRows(_ models: [ModelCatalogItem], raised: Bool = true) -> some View {
         VStack(spacing: 0) {
             ForEach(models) { model in
-                Button { HapticFeedback.impact(); appModel.selectModel(model); dismiss() } label: {
+                Button { appModel.selectModel(model); closeSheet() } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(model.chatDisplayName).font(MyChatTypography.navigation)
@@ -4309,21 +4801,25 @@ private struct ChatModelSelectionSheet: View {
                         }
                         Spacer()
                         if model.id == appModel.selectedModelID { Image(systemName: "checkmark").foregroundStyle(selectionColor).font(.system(size: 20, weight: .medium)) }
-                    }.frame(minHeight: 68).contentShape(Rectangle())
+                    }.frame(minHeight: raised ? 70 : 62).contentShape(Rectangle())
                 }.buttonStyle(ModelSelectionPressStyle()).disabled(!model.isSelectable).opacity(model.isSelectable ? 1 : 0.5)
-                if model.id != models.last?.id { Divider() }
+                if raised && model.id != models.last?.id { Divider() }
             }
-        }.padding(.horizontal, 18).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+        }
+        .padding(.horizontal, 18)
+        .background {
+            if raised { RoundedRectangle(cornerRadius: 22).fill(MyChatTheme.raised) }
+        }
     }
     private func description(_ model: ModelCatalogItem) -> String {
         let name = (model.name + model.id).lowercased()
-        if name.contains("fable") { return "For your toughest challenges" }
-        if name.contains("opus") { return "For complex work and everyday tasks" }
-        if name.contains("sonnet") { return "Most efficient for simpler tasks" }
-        if name.contains("haiku") { return "Fastest for quick answers" }
+        if name.contains("fable") { return "应对您最艰巨的挑战" }
+        if name.contains("opus") { return "适用于复杂工作与日常任务" }
+        if name.contains("sonnet") { return "处理简单任务效率最高" }
+        if name.contains("haiku") { return "快速解答的最佳选择" }
         return model.provider
     }
-    private func effortLabel(_ value: String) -> String { value == "xhigh" ? "Extra" : appModel.reasoningEffortLabel(value) }
+    private func effortLabel(_ value: String) -> String { appModel.reasoningEffortLabel(value) }
     private var orderedEfforts: [String] {
         let order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         return (appModel.selectedModel?.reasoningEfforts ?? []).filter { $0 != "none" }
@@ -4334,7 +4830,6 @@ private struct ChatModelSelectionSheet: View {
             VStack(spacing: 0) {
                 ForEach(orderedEfforts, id: \.self) { value in
                     Button {
-                        HapticFeedback.impact()
                         withAnimation(reduceMotion ? nil : .smooth(duration: 0.22)) {
                             if value == "none" { appModel.setReasoningEnabled(false) } else { appModel.setReasoningEffort(value) }
                         }
@@ -4342,7 +4837,7 @@ private struct ChatModelSelectionSheet: View {
                         HStack(spacing: 7) {
                             Text(effortLabel(value)).font(MyChatTypography.navigation)
                             if value == "medium" || (!orderedEfforts.contains("medium") && value == appModel.selectedModel?.defaultReasoningEffort) {
-                                Text("Recommended").font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
+                                Text("推荐").font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
                                     .padding(.horizontal, 7).padding(.vertical, 3).background(MyChatTheme.selected, in: Capsule())
                             }
                             Spacer()
@@ -4355,7 +4850,7 @@ private struct ChatModelSelectionSheet: View {
                     if value != orderedEfforts.last { Divider() }
                 }
             }.padding(.horizontal, 18).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
-            Text("Higher effort takes longer.").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.horizontal, 18)
+            Text("思考强度越高，回复所需时间越长。").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText).padding(.horizontal, 18)
         }
     }
 }
@@ -4365,8 +4860,7 @@ private struct ModelSelectionPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .opacity(configuration.isPressed ? 0.72 : 1)
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1)
-            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -4409,7 +4903,7 @@ private struct ModelRow: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 7) {
-                    Text(model.name)
+                    Text(model.chatDisplayName)
                         .font(MyChatTypography.navigation)
                         .lineSpacing(MyChatTypography.utilityLineSpacing)
                         .lineLimit(1)
@@ -4445,7 +4939,7 @@ private struct ModelRow: View {
         .contentShape(Rectangle())
         .opacity(model.isSelectable ? 1 : 0.58)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(model.name)，\(model.provider)")
+        .accessibilityLabel("\(model.chatDisplayName)，\(model.provider)")
         .accessibilityValue(selected ? "已选择" : model.isSelectable ? "" : "不可用")
     }
 
@@ -4664,7 +5158,7 @@ private struct ThinkingDepthRow: View {
             Image(systemName: "brain.head.profile")
                 .font(MyChatSystemFont.appFont(size: 19, weight: .regular))
                 .frame(width: 28)
-            Text("Thinking depth")
+            Text("思考强度")
                 .font(MyChatTypography.navigation)
                 .lineSpacing(MyChatTypography.utilityLineSpacing)
             Spacer()
@@ -4682,7 +5176,7 @@ private struct ThinkingDepthRow: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                Text(appModel.reasoningEnabled ? appModel.selectedReasoningEffortLabel : "Off")
+                Text(appModel.reasoningEnabled ? appModel.selectedReasoningEffortLabel : "关闭")
                     .font(MyChatTypography.metadata)
                     .lineSpacing(MyChatTypography.metadataLineSpacing)
                     .foregroundStyle(MyChatTheme.secondaryText)
@@ -4700,8 +5194,8 @@ private struct ThinkingDepthRow: View {
         .frame(minHeight: 50)
         .disabled(disabled)
         .opacity(disabled ? 0.48 : 1)
-        .accessibilityLabel("Thinking depth")
-        .accessibilityValue(appModel.reasoningEnabled ? appModel.selectedReasoningEffortLabel : "Off")
+        .accessibilityLabel("思考强度")
+        .accessibilityValue(appModel.reasoningEnabled ? appModel.selectedReasoningEffortLabel : "关闭")
     }
 }
 
@@ -4710,46 +5204,27 @@ private struct ToolsSheet: View {
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var fileImporterVisible = false
     @State private var cameraVisible = false
+    @State private var createProjectVisible = false
+    @State private var projectQuery = ""
     @State private var isPreparingAttachment = false
     @State private var attachmentError: String?
+    @State private var path: [Page] = []
+    @State private var selectedDetent: PresentationDetent = .fraction(0.56)
+    private enum Page: Hashable { case projects, connectors }
     let close: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                Text("Add to Chat").font(MyChatTypography.pageTitleUtility)
-                HStack {
-                    Button(action: close) { Image(systemName: "xmark").font(MyChatSystemFont.appFont(size: 17, weight: .regular)) }
-                        .buttonStyle(MyChatIconButtonStyle()).accessibilityLabel("关闭")
-                    Spacer()
-                    PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 4, matching: .images) {
-                        Text("Photos").font(MyChatTypography.navigation).foregroundStyle(MyChatTheme.text)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 12)
-            RecentPhotoStrip(camera: openCamera, selected: { data, name in await importCameraImage(data, name: name) })
-                .padding(.bottom, 14)
-
-            NavigationStack {
-                ScrollView {
-                    VStack(spacing: 16) {
-                        VStack(spacing: 0) {
-                            Button { fileImporterVisible = true } label: { NativeSettingsRow(title: "Add files", icon: "doc.badge.arrow.up") }
-                                .buttonStyle(.plain).accessibilityLabel("添加文件")
-                            Divider().padding(.leading, 50)
-                            NavigationLink { projectChoices } label: {
-                                NativeSettingsRow(title: "Add to project", icon: "archivebox", detail: appModel.projects.first { $0.id.lowercased() == appModel.activeProjectID?.uuidString.lowercased() }?.name ?? "None")
-                            }.buttonStyle(.plain).disabled(appModel.isPrivateChat)
-                        }.background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
-                        NavigationLink { connectorToolControls.padding(20).navigationTitle("Connectors").navigationBarTitleDisplayMode(.inline).background(MyChatTheme.canvas) } label: {
-                            NativeSettingsRow(title: "Connectors", icon: "square.grid.2x2")
-                        }.buttonStyle(.plain).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
-                    }.padding(.horizontal, 26).padding(.top, 8).padding(.bottom, 32)
-                }.scrollIndicators(.hidden).background(MyChatTheme.canvas)
-            }.tint(MyChatTheme.text)
+        NavigationStack(path: $path) {
+            pageSurface(nil)
+                .navigationDestination(for: Page.self) { page in pageSurface(page) }
         }
+        .tint(MyChatTheme.text)
+        .ignoresSafeArea(.container, edges: .bottom)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(MyChatTheme.canvas)
+        .modifier(StableSheetPageSizing())
+        .presentationDetents([.fraction(0.56), .large], selection: $selectedDetent)
+        .presentationContentInteraction(.resizes)
         .overlay {
             if isPreparingAttachment {
                 ZStack {
@@ -4780,6 +5255,9 @@ private struct ToolsSheet: View {
             }
             .ignoresSafeArea()
         }
+        .fullScreenCover(isPresented: $createProjectVisible) {
+            CreateProjectView().environmentObject(appModel)
+        }
         .foregroundStyle(MyChatTheme.text)
         .background(MyChatTheme.canvas)
         .onChange(of: appModel.attachmentError) { _, error in attachmentError = error }
@@ -4788,13 +5266,99 @@ private struct ToolsSheet: View {
         } message: { Text(attachmentError ?? "") }
     }
 
+    private func pageSurface(_ page: Page?) -> some View {
+        VStack(spacing: 0) {
+            Capsule().fill(MyChatTheme.secondaryText.opacity(0.32))
+                .frame(width: 56, height: 4).padding(.top, 6).padding(.bottom, 6)
+                .accessibilityHidden(true)
+            ZStack {
+                Text(page == .projects ? "添加到项目" : page == .connectors ? "连接器" : "添加到聊天")
+                    .font(MyChatTypography.pageTitleUtility)
+                HStack {
+                    HeaderActionButton { if page == nil { close() } else { path.removeAll() } } label: {
+                        Image(systemName: page == nil ? "xmark" : "chevron.left")
+                            .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
+                    }.frame(width: 42, height: 42)
+                        .modifier(MyChatFloatingSurface(shape: Circle()))
+                        .accessibilityLabel(page == nil ? "关闭" : "返回")
+                    Spacer()
+                    if page == nil {
+                        PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 4, matching: .images) {
+                            Text("照片").font(MyChatTypography.navigation).foregroundStyle(MyChatTheme.text)
+                        }.buttonStyle(.plain)
+                    } else if page == .projects {
+                        HeaderActionButton { createProjectVisible = true } label: {
+                            Image(systemName: "plus").font(MyChatSystemFont.appFont(size: 19, weight: .regular))
+                        }
+                        .frame(width: 42, height: 42)
+                        .modifier(MyChatFloatingSurface(shape: Circle()))
+                        .accessibilityLabel("新建项目")
+                        .accessibilityIdentifier("tools.projects.create")
+                    }
+                }
+            }
+            .padding(.horizontal, 18).padding(.top, 6).padding(.bottom, 22)
+            Group {
+                if page == .projects { projectChoices }
+                else if page == .connectors { ScrollView { connectorToolControls.padding(20) } }
+                else { attachmentChoices }
+            }
+            .scrollIndicators(.hidden)
+            .modifier(ModelSheetScrollSurface())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(MyChatTheme.canvas)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var attachmentChoices: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                RecentPhotoStrip(camera: openCamera, selected: { data, name in await importCameraImage(data, name: name) })
+                    .padding(.horizontal, -18)
+                VStack(spacing: 0) {
+                    Button { fileImporterVisible = true } label: { attachmentRow("添加文件", icon: "doc.badge.arrow.up", disclosure: false) }
+                        .buttonStyle(.plain).accessibilityLabel("添加文件")
+                    Divider().padding(.leading, 50).padding(.trailing, 18)
+                    NavigationLink(value: Page.projects) {
+                        attachmentRow("添加到项目", icon: "archivebox", detail: appModel.projects.first { $0.id.lowercased() == appModel.activeProjectID?.uuidString.lowercased() }?.name)
+                    }.buttonStyle(.plain).disabled(appModel.isPrivateChat)
+                        .accessibilityIdentifier("tools.projects.row")
+                }.background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+                NavigationLink(value: Page.connectors) {
+                    attachmentRow("连接器", icon: "square.grid.2x2")
+                }.buttonStyle(.plain).background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+            }.padding(.horizontal, 18).padding(.bottom, 32)
+        }
+    }
+
+    private func attachmentRow(_ title: String, icon: String, detail: String? = nil,
+                               disclosure: Bool = true) -> some View {
+        HStack(spacing: 12) {
+            Group {
+                if icon == "archivebox" { MyChatProjectIcon(size: 20) }
+                else { Image(systemName: icon).font(.system(size: 18, weight: .regular)) }
+            }.frame(width: 20).foregroundStyle(MyChatTheme.sidebarSecondary)
+            Text(title).font(MyChatTypography.navigation)
+            Spacer(minLength: 8)
+            if let detail { Text(detail).font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText) }
+            if disclosure {
+                Image(systemName: "chevron.right").font(.system(size: 15, weight: .light))
+                    .foregroundStyle(MyChatTheme.secondaryText)
+            }
+        }
+        .padding(.horizontal, 20).frame(height: 52).contentShape(Rectangle())
+    }
+
     @ViewBuilder
     private var connectorToolControls: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("本次对话的连接器")
-                .font(MyChatTypography.cardTitle)
-                .frame(minHeight: 42, alignment: .leading)
-
+            if !appModel.isPrivateChat {
+                DefaultConnectorsView(ownerID: appModel.authSession?.user.id ?? "")
+                    .id(appModel.authSession?.user.id)
+                    .padding(.bottom, 20)
+            }
             if appModel.isPrivateChat {
                 Label("私密对话不使用连接器", systemImage: "eye.slash")
                     .font(MyChatTypography.metadata)
@@ -4811,11 +5375,7 @@ private struct ToolsSheet: View {
                 .font(MyChatTypography.metadata)
                 .frame(minHeight: 52, alignment: .leading)
             } else if appModel.connectors.isEmpty {
-                Text("No connectors")
-                    .font(MyChatTypography.metadata)
-                    .foregroundStyle(MyChatTheme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(minHeight: 52, alignment: .leading)
+                EmptyView()
             } else {
                 Picker(
                     "工具调用方式",
@@ -4831,12 +5391,6 @@ private struct ToolsSheet: View {
                 .pickerStyle(.segmented)
                 .accessibilityLabel("连接器工具调用方式")
 
-                Text("Tool access")
-                    .font(MyChatTypography.metadata)
-                    .foregroundStyle(MyChatTheme.secondaryText)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.vertical, 5)
-
                 ForEach(appModel.connectors) { connector in
                     ConnectorToolToggleRow(
                         connector: connector,
@@ -4847,24 +5401,60 @@ private struct ToolsSheet: View {
                         disabled: !connector.enabled
                     )
                 }
-                Text("These choices apply to this conversation.")
-                    .font(MyChatTypography.metadata)
-                    .foregroundStyle(MyChatTheme.secondaryText)
-                    .padding(.vertical, 8)
             }
         }
     }
 
     private var projectChoices: some View {
-        ScrollView {
-            VStack(spacing: 0) {
-                Button { chooseProject(nil) } label: { NativeSettingsRow(title: "None", icon: "") }.buttonStyle(.plain)
-                ForEach(appModel.projects) { project in
-                    Divider().padding(.leading, 18)
-                    Button { chooseProject(project) } label: { NativeSettingsRow(title: project.name, icon: "archivebox") }.buttonStyle(.plain)
+        VStack(spacing: 0) {
+            if filteredProjects.isEmpty {
+                VStack(spacing: 18) {
+                    MyChatProjectIcon(size: 22)
+                        .foregroundStyle(MyChatTheme.secondaryText)
+                        .frame(width: 48, height: 48)
+                        .background(MyChatTheme.controlSurface, in: Circle())
+                        .accessibilityHidden(true)
+                    VStack(spacing: 6) {
+                        Text(appModel.projects.isEmpty ? "暂无项目" : "未找到项目")
+                            .font(MyChatTypography.navigation)
+                        if appModel.projects.isEmpty {
+                            Text("请先创建项目，然后将此对话移入其中。")
+                                .font(MyChatTypography.metadata)
+                        }
+                    }.foregroundStyle(MyChatTheme.secondaryText).multilineTextAlignment(.center)
                 }
-            }.background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22)).padding(20)
-        }.background(MyChatTheme.canvas).navigationTitle("Add to project").navigationBarTitleDisplayMode(.inline)
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(Array(filteredProjects.enumerated()), id: \.element.id) { index, project in
+                            if index > 0 { Divider().padding(.leading, 50).padding(.trailing, 18) }
+                            Button { chooseProject(project) } label: {
+                                attachmentRow(project.name, icon: "archivebox")
+                            }.buttonStyle(.plain)
+                        }
+                    }
+                    .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .padding(.horizontal, 18).padding(.top, 8)
+                }
+            }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").font(.system(size: 18, weight: .regular))
+                TextField("搜索", text: $projectQuery)
+                    .font(MyChatTypography.navigation)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityIdentifier("tools.projects.search")
+            }
+            .padding(.horizontal, 16).frame(height: 48)
+            .modifier(MyChatFloatingSurface(shape: Capsule()))
+            .padding(.horizontal, 26).padding(.top, 16).padding(.bottom, 28)
+        }
+        .background(MyChatTheme.canvas)
+    }
+    private var filteredProjects: [ProjectRecord] {
+        let query = projectQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        return appModel.projects.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
     }
     private func chooseProject(_ project: ProjectRecord?) {
         Task {

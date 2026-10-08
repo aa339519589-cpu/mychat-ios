@@ -9,6 +9,7 @@ struct ComposerView: View {
     @State private var focused = false
     @State private var isSidebarPresented = false
     @State private var keyboardVisible = false
+    @StateObject private var editor = ComposerEditorSession()
     let openTools: () -> Void
     let openModels: () -> Void
     var drawerIsOpen: () -> Bool = { false }
@@ -24,11 +25,11 @@ struct ComposerView: View {
             if appModel.editingMessageID != nil {
                 HStack(spacing: 10) {
                     Image(systemName: "square.and.pencil").font(MyChatSystemFont.appFont(size: 17))
-                    Text("Editing message").font(MyChatSystemFont.appFont(size: 13))
+                    Text("正在编辑消息").font(MyChatSystemFont.appFont(size: 13))
                     Spacer()
                     Button { HapticFeedback.impact(); appModel.cancelMessageEdit() } label: {
                         Image(systemName: "xmark").font(MyChatSystemFont.appFont(size: 14)).frame(width: 36, height: 36)
-                    }.buttonStyle(.plain).accessibilityLabel("Cancel editing")
+                    }.buttonStyle(.plain).accessibilityLabel("取消编辑")
                 }
                 .foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 15)
                 .frame(height: 48).background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 18))
@@ -51,7 +52,7 @@ struct ComposerView: View {
                 .frame(height: 66)
             }
 
-            ComposerTextInput(text: $appModel.draft, focused: $focused,
+            ComposerTextInput(text: $appModel.draft, focused: $focused, editor: editor,
                               placeholder: composerPlaceholder) {
                 if appModel.canSendCurrentDraft {
                     sendDraftAndDismissKeyboard()
@@ -59,8 +60,6 @@ struct ComposerView: View {
             }
             .padding(.horizontal, 13)
             .padding(.top, 14)
-            .accessibilityLabel("消息")
-            .accessibilityIdentifier("composer.input")
 
             if let error = appModel.attachmentError {
                 Text(PresentationText.plain(error))
@@ -115,9 +114,10 @@ struct ComposerView: View {
             updateKeyboardPresence($0)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidHideNotification)) { _ in
-            // Input-method dismiss keys can hide the keyboard before UIKit
-            // resigns the editor. Never reassert that old focus on a redraw.
-            if !keyboardVisible { dismissComposer() }
+            // Hardware keyboards can hide the software keyboard while this
+            // editor still owns focus. Keyboard visibility must never resign
+            // the editor; native delegate events and explicit dismissal own it.
+            keyboardVisible = false
         }
         .onChange(of: ComposerNavigationState(appModel: appModel)) { old, new in
             // Privacy changes reuse the same editor and current keyboard state.
@@ -129,6 +129,7 @@ struct ComposerView: View {
                 requestInitialFocus()
             }
         }
+        .animation(.smooth(duration: 0.28), value: appModel.pendingAttachments.map(\.id))
         .onChange(of: appModel.editingMessageID) { _, id in
             if id != nil { initialFocusTask?.cancel(); initialFocusTask = nil; focused = true }
         }
@@ -159,7 +160,8 @@ struct ComposerView: View {
                 .compactMap({ $0 as? UIWindowScene })
                 .flatMap(\.windows).first(where: \.isKeyWindow) else { return }
         let overlap = window.bounds.intersection(window.convert(frame, from: window.screen.coordinateSpace))
-        let visible = !overlap.isNull && overlap.height > 100
+        let visible = !overlap.isNull && overlap.height > window.safeAreaInsets.bottom + 1
+            && overlap.maxY >= window.bounds.maxY - 1
         // Publish only keyboard presence transitions. Native keyboard layout
         // still owns all vertical avoidance; no frame/height is stored here.
         if keyboardVisible != visible {
@@ -170,7 +172,6 @@ struct ComposerView: View {
     private var standardControls: some View {
         HStack(spacing: 8) {
                 Button {
-                HapticFeedback.impact()
                 openTools()
             } label: {
                     Image(systemName: "plus")
@@ -182,7 +183,6 @@ struct ComposerView: View {
             .accessibilityLabel("添加内容和工具")
 
             Button {
-                HapticFeedback.impact()
                 openModels()
             } label: {
                 HStack(spacing: 5) {
@@ -229,14 +229,29 @@ struct ComposerView: View {
                 .accessibilityIdentifier("composer.waveform")
 
             Button(action: acceptDictation) {
-                Image(systemName: "checkmark")
-                    .font(MyChatSystemFont.appFont(size: 17, weight: .semibold))
-                    .foregroundStyle(MyChatTheme.canvas)
+                Image(systemName: "stop.fill")
+                    .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
+                    .foregroundStyle(MyChatTheme.text)
                     .frame(width: 36, height: 36)
-                    .background(MyChatTheme.text, in: Circle())
+                    .background(MyChatTheme.controlSurface, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("完成语音输入")
+            .accessibilityLabel("暂停语音输入，检查草稿")
+
+            Button {
+                dictation.stop()
+                sendDraftAndDismissKeyboard()
+            } label: {
+                Image(systemName: "arrow.up")
+                    .font(MyChatSystemFont.appFont(size: 17))
+                    .foregroundStyle(MyChatTheme.sendActionForeground)
+                    .frame(width: 36, height: 36)
+                    .background(MyChatTheme.sendActionSurface, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!appModel.canSendCurrentDraft)
+            .opacity(appModel.canSendCurrentDraft ? 1 : 0.45)
+            .accessibilityLabel("发送语音草稿")
         }
         .padding(.horizontal, 8)
         .padding(.top, 16)
@@ -276,7 +291,7 @@ struct ComposerView: View {
         } else {
             Button(action: toggleDictation) {
                 Image(systemName: "mic")
-                    .font(MyChatSystemFont.appFont(size: 18, weight: .medium))
+                    .font(MyChatSystemFont.appFont(size: 18, weight: .regular))
                     .foregroundStyle(MyChatTheme.text)
             }
             .buttonStyle(ComposerControlStyle())
@@ -301,12 +316,18 @@ struct ComposerView: View {
         }
 
         dictationError = nil
+        editor.commitPendingText()
         let existingDraft = appModel.draft
+        let context = ComposerNavigationState(appModel: appModel)
+        let accountID = appModel.authSession?.user.id
         draftBeforeDictation = existingDraft
         focused = false
+        initialFocusTask?.cancel()
+        editor.endEditing()
         dictation.start(
             onTranscript: { transcript in
-                guard !transcript.isEmpty else { return }
+                guard !transcript.isEmpty, ComposerNavigationState(appModel: appModel) == context,
+                      appModel.authSession?.user.id == accountID else { return }
                 let separator = existingDraft.isEmpty || existingDraft.last?.isWhitespace == true ? "" : " "
                 appModel.draft = existingDraft + separator + transcript
             },
@@ -323,15 +344,10 @@ struct ComposerView: View {
         withAnimation(.easeOut(duration: 0.16)) {
             dictation.stop()
         }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(140))
-            appModel.draft = draftBeforeDictation
-            dictationError = nil
-            isCancellingDictation = false
-            withAnimation(.easeOut(duration: 0.16)) {
-                focused = true
-            }
-        }
+        appModel.draft = draftBeforeDictation
+        dictationError = nil
+        isCancellingDictation = false
+        focused = true
     }
 
     private func acceptDictation() {
@@ -344,18 +360,20 @@ struct ComposerView: View {
     }
 
     private func sendDraftAndDismissKeyboard() {
+        editor.commitPendingText()
         guard appModel.canSendCurrentDraft else { return }
         HapticFeedback.impact()
         // Apply the optimistic message insertion and focus change in the same
         // run-loop turn so SwiftUI and UIKit begin their movement together.
         appModel.sendDraft()
-        focused = false
+        dismissComposer()
     }
 
     private func dismissComposer() {
         initialFocusTask?.cancel()
         initialFocusTask = nil
         focused = false
+        editor.endEditing()
         dictation.stop()
     }
 
@@ -483,7 +501,7 @@ struct ComposerView: View {
     }
 
     private var composerPlaceholder: String {
-        appModel.messages.isEmpty ? "Chat with MyChat" : "Reply to MyChat"
+        appModel.messages.isEmpty ? "与 MyChat 对话" : "回复 MyChat"
     }
 
     private var modelNameLabel: String {
@@ -788,7 +806,7 @@ candidates.append("en-US")
         }
         let rms = sqrt(sum / Float(count))
         let decibels = 20 * log10(max(rms, 0.000_01))
-        return CGFloat(min(max((decibels + 50) / 50, 0), 1))
+        return CGFloat(pow(min(max((decibels + 52) / 32, 0), 1), 0.55))
     }
 }
 
@@ -812,7 +830,7 @@ private struct DictationWaveformSurface: UIViewRepresentable {
     }
     static func dismantleUIView(_ view: NativeDictationWaveSurface, coordinator: ()) { view.stop() }
 }
-private final class NativeDictationWaveSurface: UIView {
+final class NativeDictationWaveSurface: UIView {
     var level: CGFloat = 0
     var reducedMotion = false
     private let waveform = CAShapeLayer()
@@ -820,30 +838,38 @@ private final class NativeDictationWaveSurface: UIView {
     private var previousTime: CFTimeInterval?
     private var offset: CGFloat = 0
     private var sampleIndex = 0
-    private var samples: [CGFloat] = (0..<120).map { 0.08 + 0.05 * CGFloat(sin(Double($0) * 0.7)) }
+    private var samples: [CGFloat] = Array(repeating: 0, count: 120)
+    private var observers: [NSObjectProtocol] = []
+    private lazy var displayTarget = WaveformDisplayTarget(self)
     override init(frame: CGRect) {
         super.init(frame: frame); backgroundColor = .clear; clipsToBounds = true
         layer.addSublayer(waveform)
+        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.didBecomeActiveNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                self?.updatePlayback()
+            })
+        }
     }
+    deinit { displayLink?.invalidate(); observers.forEach(NotificationCenter.default.removeObserver) }
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
     override func layoutSubviews() { super.layoutSubviews(); waveform.frame = bounds; draw() }
     override func didMoveToWindow() { super.didMoveToWindow(); updatePlayback() }
     func updatePlayback() {
-        if window != nil && !reducedMotion {
+        if window != nil && !reducedMotion && UIApplication.shared.applicationState == .active {
             guard displayLink == nil else { return }
-            let link = CADisplayLink(target: self, selector: #selector(tick))
+            let link = CADisplayLink(target: displayTarget, selector: #selector(WaveformDisplayTarget.tick(_:)))
             link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
             displayLink = link; link.add(to: .main, forMode: .common)
         } else { stop(); draw() }
     }
-    @objc private func tick(_ link: CADisplayLink) {
+    fileprivate func tick(_ link: CADisplayLink) {
         let elapsed = min(0.05, max(0, link.timestamp - (previousTime ?? link.timestamp - link.duration)))
         previousTime = link.timestamp
         offset += CGFloat(elapsed) * 70
         while offset >= 5 {
-            offset -= 5; sampleIndex += 1
-            samples.removeFirst()
-            samples.append(max(0.06, min(1, level)) + 0.025 * CGFloat(sin(Double(sampleIndex) * 0.7)))
+            offset -= 5
+            samples[sampleIndex] = min(max(level, 0), 1)
+            sampleIndex = (sampleIndex + 1) % samples.count
         }
         draw()
     }
@@ -852,7 +878,8 @@ private final class NativeDictationWaveSurface: UIView {
         let count = min(samples.count, Int(ceil(bounds.width / 5)) + 2)
         let path = UIBezierPath()
         for index in 0..<count {
-            let height = min(bounds.height - 4, 3 + max(0, samples[samples.count - count + index]) * 28)
+            let sample = reducedMotion ? level : samples[(sampleIndex + samples.count - count + index) % samples.count]
+            let height = min(bounds.height - 4, 3 + max(0, sample) * 36)
             path.append(UIBezierPath(roundedRect: CGRect(x: CGFloat(index) * 5 - offset, y: (bounds.height - height) / 2,
                 width: 2.4, height: height), cornerRadius: 1.2))
         }
@@ -862,6 +889,12 @@ private final class NativeDictationWaveSurface: UIView {
         CATransaction.commit()
     }
     func stop() { displayLink?.invalidate(); displayLink = nil; previousTime = nil }
+}
+
+private final class WaveformDisplayTarget: NSObject {
+    weak var view: NativeDictationWaveSurface?
+    init(_ view: NativeDictationWaveSurface) { self.view = view }
+    @objc func tick(_ link: CADisplayLink) { view?.tick(link) }
 }
 
 private struct PendingAttachmentChip: View {
@@ -960,9 +993,17 @@ private struct ComposerNavigationState: Equatable {
 
 // UIKit owns editing, marked text, selection and scrolling. SwiftUI only asks
 // for the bounded content height; the keyboard never supplies an editor height.
-private struct ComposerTextInput: UIViewRepresentable {
+@MainActor final class ComposerEditorSession: ObservableObject {
+    weak var textView: UITextView?
+    var commit: (() -> Void)?
+    func commitPendingText() { textView?.unmarkText(); commit?() }
+    func endEditing() { textView?.resignFirstResponder() }
+}
+
+struct ComposerTextInput: UIViewRepresentable {
     @Binding var text: String
     @Binding var focused: Bool
+    let editor: ComposerEditorSession
     let placeholder: String
     let submit: () -> Void
 
@@ -979,6 +1020,15 @@ private struct ComposerTextInput: UIViewRepresentable {
         view.showsVerticalScrollIndicator = false
         view.returnKeyType = .send
         view.delegate = context.coordinator
+        editor.textView = view
+        editor.commit = { [weak coordinator = context.coordinator, weak view] in
+            guard let view else { return }
+            coordinator?.commitText(view)
+        }
+        view.didEnterWindow = { [weak coordinator = context.coordinator, weak view] in
+            guard let view else { return }
+            coordinator?.applyPendingFocus(to: view)
+        }
         view.accessibilityLabel = "消息"
         view.accessibilityIdentifier = "composer.input"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1000,11 +1050,7 @@ private struct ComposerTextInput: UIViewRepresentable {
             view.selectedRange = NSRange(location: (text as NSString).length, length: 0)
         }
         view.placeholder.isHidden = !view.text.isEmpty
-        if focused, !view.isFirstResponder, view.window != nil {
-            view.becomeFirstResponder()
-        } else if !focused, view.isFirstResponder, !context.coordinator.focusPublicationPending {
-            view.resignFirstResponder()
-        }
+        context.coordinator.requestFocus(focused, in: view)
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: ComposerTextView, context: Context) -> CGSize? {
@@ -1024,12 +1070,43 @@ private struct ComposerTextInput: UIViewRepresentable {
         var focusPublicationPending = false
         private var editRevision = 0
         private var lastModelText = ""
+        private var lastPublishedText: String?
+        private var consumedFocus = false
+        private var pendingFocus = false
+        private var focusRevision = 0
+        func requestFocus(_ focused: Bool, in view: UITextView) {
+            guard focused != consumedFocus else { return }
+            if !focused, focusPublicationPending { return }
+            consumedFocus = focused
+            pendingFocus = focused
+            focusRevision += 1
+            if focused { applyPendingFocus(to: view) }
+            else { view.resignFirstResponder() }
+        }
+        func applyPendingFocus(to view: UITextView) {
+            guard pendingFocus, view.window != nil else { return }
+            pendingFocus = false
+            if !view.isFirstResponder { view.becomeFirstResponder() }
+        }
+        func commitText(_ view: UITextView) {
+            editRevision += 1
+            pendingEdit = nil
+            lastPublishedText = view.text ?? ""
+            parent.text = view.text ?? ""
+        }
         func acceptModelText(_ text: String) {
             guard text != lastModelText else { return }
             lastModelText = text
-            if let pendingEdit, pendingEdit != text { self.pendingEdit = nil; editRevision += 1 }
+            // Acknowledging our previous keystroke must not discard a newer
+            // native edit which has not yet reached the SwiftUI binding.
+            if text != lastPublishedText, let pendingEdit, pendingEdit != text {
+                self.pendingEdit = nil; editRevision += 1
+            }
         }
-        init(_ parent: ComposerTextInput) { self.parent = parent }
+        init(_ parent: ComposerTextInput) {
+            self.parent = parent
+            self.lastModelText = parent.text
+        }
 
         func textViewDidChange(_ view: UITextView) {
             let value = view.text ?? ""
@@ -1044,26 +1121,36 @@ private struct ComposerTextInput: UIViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.editRevision == revision else { return }
                 self.pendingEdit = nil
+                self.lastPublishedText = value
                 self.parent.text = value
             }
         }
 
         func textViewDidBeginEditing(_ view: UITextView) {
+            consumedFocus = true
+            pendingFocus = false
+            focusRevision += 1
+            let revision = focusRevision
             focusPublicationPending = true
             DispatchQueue.main.async { [weak self, weak view] in
                 guard let self else { return }
                 defer { self.focusPublicationPending = false }
-                guard view?.isFirstResponder == true else { return }
+                guard self.focusRevision == revision, view?.isFirstResponder == true else { return }
                 if !self.parent.focused { self.parent.focused = true }
             }
         }
 
         func textViewDidEndEditing(_ view: UITextView) {
+            // Keep the last true command consumed until SwiftUI acknowledges
+            // the native dismissal. A stream/layout redraw cannot refocus it.
+            pendingFocus = false
+            focusRevision += 1
+            let revision = focusRevision
             focusPublicationPending = false
             if !parent.focused { return }
             // UIKit can resign for a sheet or interactive keyboard dismissal.
             DispatchQueue.main.async { [weak self, weak view] in
-                guard let self, view?.isFirstResponder != true else { return }
+                guard let self, self.focusRevision == revision, view?.isFirstResponder != true else { return }
                 self.parent.focused = false
             }
         }
@@ -1072,6 +1159,7 @@ private struct ComposerTextInput: UIViewRepresentable {
             if text == "\n", view.markedTextRange == nil {
                 editRevision += 1
                 pendingEdit = nil
+                lastPublishedText = view.text ?? ""
                 parent.text = view.text
                 parent.submit()
                 return false
@@ -1081,8 +1169,10 @@ private struct ComposerTextInput: UIViewRepresentable {
     }
 }
 
-private final class ComposerTextView: UITextView {
+final class ComposerTextView: UITextView {
     let placeholder = UILabel()
+    var didEnterWindow: (() -> Void)?
+    override func didMoveToWindow() { super.didMoveToWindow(); if window != nil { didEnterWindow?() } }
     override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         placeholder.isUserInteractionEnabled = false
@@ -1123,7 +1213,6 @@ private struct SystemComposerSurface: ViewModifier {
             content
                 .background { shape.fill(MyChatTheme.composer) }
                 .clipShape(shape)
-                .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : 0.07), radius: 7, y: 3)
         } else {
             content
                 .background {
@@ -1131,7 +1220,6 @@ private struct SystemComposerSurface: ViewModifier {
                         .overlay { shape.fill(Color(UIColor.secondarySystemFill).opacity(0.4)) }
                 }
                 .clipShape(shape)
-                .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : 0.07), radius: 7, y: 3)
         }
     }
 }

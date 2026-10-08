@@ -92,11 +92,11 @@ struct RecentPhotoStrip: View {
                 LazyHStack(spacing: 8) {
                     Button(action: camera) {
                         VStack(spacing: 8) {
-                            Image(systemName: "camera").font(MyChatSystemFont.appFont(size: 22, weight: .regular))
-                            Text("Camera").font(MyChatTypography.navigation)
+                            Image(systemName: "camera").font(MyChatSystemFont.appFont(size: 18, weight: .regular))
+                            Text("相机").font(MyChatTypography.navigation)
                         }
-                            .frame(width: 96, height: 96)
-                            .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 16))
+                            .frame(width: 100, height: 100)
+                            .background(MyChatTheme.controlSurface, in: RoundedRectangle(cornerRadius: 24))
                     }
                     .buttonStyle(MyChatBubblePressStyle(glassSurface: false))
                     .accessibilityLabel("拍照")
@@ -111,9 +111,9 @@ struct RecentPhotoStrip: View {
                             }
                         } label: {
                             RecentPhotoThumbnail(asset: asset)
-                                .frame(width: 96, height: 96)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                                .contentShape(RoundedRectangle(cornerRadius: 16))
+                                .frame(width: 100, height: 100)
+                                .clipShape(RoundedRectangle(cornerRadius: 24))
+                                .contentShape(RoundedRectangle(cornerRadius: 24))
                                 .accessibilityHidden(true)
                                 .overlay {
                                     if importingID == asset.localIdentifier {
@@ -129,9 +129,9 @@ struct RecentPhotoStrip: View {
                 .padding(.horizontal, 16)
             }
             .scrollIndicators(.hidden)
-            .frame(height: 96)
+            .frame(height: 100)
             if library.status == .limited {
-                Button("Manage photo access") { library.manageLimitedAccess() }
+                Button("管理照片访问权限") { library.manageLimitedAccess() }
                     .font(MyChatTypography.caption)
                     .foregroundStyle(MyChatTheme.secondaryText)
                     .padding(.horizontal, 20)
@@ -155,7 +155,7 @@ struct RecentPhotoStrip: View {
                 Text(permissionTitle).font(MyChatSystemFont.appFont(size: 16, weight: .medium))
                 Text(permissionSubtitle).font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
                 if library.status == .notDetermined || library.status == .denied {
-                    Text(library.status == .denied ? "Open settings" : "Allow photo access")
+                    Text(library.status == .denied ? "打开设置" : "允许访问照片")
                         .font(MyChatTypography.caption).foregroundStyle(MyChatTheme.text)
                         .padding(.horizontal, 10).padding(.vertical, 5)
                         .background(MyChatTheme.raised, in: Capsule())
@@ -170,13 +170,13 @@ struct RecentPhotoStrip: View {
     }
     private var permissionTitle: String {
         switch library.status {
-        case .notDetermined: "See your recent photos"
-        case .denied, .restricted: "Photo access is off"
-        default: "No recent photos"
+        case .notDetermined: "查看最近照片"
+        case .denied, .restricted: "照片访问已关闭"
+        default: "没有最近照片"
         }
     }
     private var permissionSubtitle: String {
-        library.status == .notDetermined ? "Allow access to add photos directly from here." : "You can still choose photos with the Photos button above."
+        library.status == .notDetermined ? "允许访问后即可从这里直接添加照片。" : "你仍可使用上方的“照片”按钮选择图片。"
     }
 }
 

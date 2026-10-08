@@ -37,6 +37,8 @@ struct ChatConversationView: View, Equatable {
                     toolActivities: updates.snapshot.toolActivities[message.id] ?? [],
                     connectorApps: updates.snapshot.connectorApps[message.id] ?? [],
                     appModel: appModel,
+                    showsResponseCompanion: message.id == updates.snapshot.messages.last(where: { $0.role == .assistant })?.id,
+                    companionSuspended: sourceMessageID != nil,
                     accessToken: updates.snapshot.accessToken,
                     canRegenerate: message.role == .assistant && !updates.snapshot.isGenerating
                         && updates.snapshot.canRegenerate,
@@ -48,9 +50,6 @@ struct ChatConversationView: View, Equatable {
                     canEditUserMessage: updates.snapshot.canEditMessages
                 )
                 .equatable()
-                if message.role == .assistant, message.id == updates.snapshot.messages.last(where: { $0.role == .assistant })?.id {
-                    AssistantResponseFooter(appModel: appModel, messageID: message.id, isSuspended: sourceMessageID != nil)
-                }
             }
             .background {
                 if ProcessInfo.processInfo.arguments.contains("--keyboard-layout-probe"),
@@ -80,6 +79,8 @@ struct ChatConversationView: View, Equatable {
 
     var body: some View {
         GeometryReader { viewport in
+        let readingPadding = ChatReadingAnchor.bottomPadding(viewport: viewport.frame(in: .global),
+            composerTop: canvasLayout.composerTopInWindow, minimum: canvasLayout.bottomOcclusion)
         ScrollView {
             transcriptStack
             // Keep every row at the scroll viewport width, then inset the
@@ -88,13 +89,13 @@ struct ChatConversationView: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
             .padding(.top, 74)
-            // Reserve the actual composer/keyboard inset in the CONTENT,
-            // not in the drawing viewport: the input floats over the chat.
-            .padding(.bottom, canvasLayout.bottomOcclusion)
-            .background {
+            .background(alignment: .bottomLeading) {
                 NativeChatScrollObserver(controller: scrollController, conversationID: updates.snapshot.conversationID)
                     .frame(width: 0, height: 0)
             }
+            // Keep real scrollable breathing room below the reading anchor;
+            // the floating input must not pull a completed reply to the bottom.
+            .padding(.bottom, readingPadding)
         }
         .containerRelativeFrame(.horizontal)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -120,11 +121,16 @@ struct ChatConversationView: View, Equatable {
         .environment(\.chatScrollController, scrollController)
         .onAppear {
             scrollController.resumeFollowAnimation()
+            scrollController.presentedComposerTop = { [weak canvasLayout] in canvasLayout?.presentedComposerTop?() }
             scrollController.onInteractionChanged = { updates.setInteracting($0) }
             scrollController.setGenerationActive(updates.snapshot.isGenerating)
         }
         .onChange(of: updates.snapshot.isGenerating) { _, active in
             scrollController.setGenerationActive(active)
+        }
+        .onChange(of: ChatComposerGeometry(bottomPadding: readingPadding,
+            topInWindow: canvasLayout.composerTopInWindow), initial: true) { _, geometry in
+            scrollController.setComposerGeometry(geometry)
         }
         .onReceive(NotificationCenter.default.publisher(for: .myChatDrawerInteractionChanged)) { note in
             scrollController.setDrawerInteractionActive(note.object as? Bool ?? false)
@@ -139,9 +145,12 @@ struct ChatConversationView: View, Equatable {
             scrollController.pauseFollowAnimation()
             updates.setInteracting(false)
         }
-        .overlay(alignment: .bottom) {
+        .overlay(alignment: .topLeading) {
             LatestMessageButton(controller: scrollController)
-                .padding(.bottom, canvasLayout.bottomOcclusion)
+                .position(x: viewport.size.width / 2,
+                    y: max(22, min(viewport.size.height - 22, (canvasLayout.composerTopInWindow.map { $0 - viewport.frame(in: .global).minY }
+                        ?? viewport.size.height - canvasLayout.bottomOcclusion) - 30)))
+                .animation(canvasLayout.keyboardTiming.animation, value: canvasLayout.composerTopInWindow)
         }
         .sheet(isPresented: Binding(
             get: { sourceMessageID != nil },
@@ -149,7 +158,7 @@ struct ChatConversationView: View, Equatable {
         )) {
             if let messageID = sourceMessageID {
                 SourcesSheet(
-                    searches: updates.snapshot.searches[messageID] ?? [],
+                    searches: (updates.snapshot.searches[messageID] ?? []).filter(\.isWebSearch),
                     openHistorySource: openHistoryConversation
                 )
                     .presentationDetents([.medium, .large])
@@ -206,6 +215,8 @@ private struct TranscriptSnapshot {
     @Published private(set) var snapshot: TranscriptSnapshot
     private let model: AppModel
     private var subscription: AnyCancellable?
+    private var leadingTextSubscription: AnyCancellable?
+    private var leadingProcessSubscription: AnyCancellable?
     private var interacting = false
     private var modalVisible = false
     private var scheduled = false
@@ -214,6 +225,29 @@ private struct TranscriptSnapshot {
     init(_ model: AppModel) {
         self.model = model
         snapshot = TranscriptSnapshot(model)
+        leadingTextSubscription = model.$messages.dropFirst().sink { [weak self] messages in
+            guard let self, !self.interacting, !self.modalVisible,
+                  let last = messages.last, last.role == .assistant, !last.content.isEmpty,
+                  self.snapshot.messages.first(where: { $0.id == last.id })?.content.isEmpty != false else { return }
+            // Use the publisher's new value in this same actor turn: @Published
+            // fires before the stored array changes. First ink need not wait
+            // for an additional main-queue hop.
+            var next = TranscriptSnapshot(model)
+            next.messages = messages
+            self.snapshot = next
+        }
+        leadingProcessSubscription = model.$processEntriesByMessageID.dropFirst().sink { [weak self] entries in
+            guard let self, !self.interacting, !self.modalVisible,
+                  let id = model.messages.last(where: { $0.role == .assistant })?.id else { return }
+            let firstText = entries[id]?.contains { if case .text = $0.content { return true }; return false } == true
+                && self.snapshot.processEntries[id]?.contains { if case .text = $0.content { return true }; return false } != true
+            let firstSummary = entries[id]?.contains { if case .reasoningSummary = $0.content { return true }; return false } == true
+                && self.snapshot.processEntries[id]?.contains { if case .reasoningSummary = $0.content { return true }; return false } != true
+            guard firstText || firstSummary else { return }
+            var next = TranscriptSnapshot(model)
+            next.processEntries = entries
+            self.snapshot = next
+        }
         let changes: [AnyPublisher<Void, Never>] = [
             model.$messages.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$editingMessageID.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
@@ -276,6 +310,7 @@ private struct TranscriptSnapshot {
 private struct AssistantResponseFooter: View {
     @StateObject private var presentation: AssistantFooterPresentation
     let isSuspended: Bool
+    @Environment(\.chatScrollController) private var scrollController
 
     init(appModel: AppModel, messageID: UUID, isSuspended: Bool) {
         _presentation = StateObject(wrappedValue: AssistantFooterPresentation(appModel, messageID: messageID))
@@ -284,20 +319,31 @@ private struct AssistantResponseFooter: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            DotThinkingView(isGenerating: presentation.isGenerating, isSuspended: isSuspended)
+            StableDotCompanion(isGenerating: presentation.isGenerating, isSuspended: isSuspended,
+                controller: scrollController)
                 .frame(width: 48, height: 48)
             Spacer(minLength: 0)
-            if presentation.showsDisclaimer {
-                Text("MyChat can make mistakes.")
-                .font(MyChatSystemFont.appFont(for: .footnote, weight: .regular))
-                .lineSpacing(3)
-                .multilineTextAlignment(.trailing)
-                .foregroundStyle(MyChatTheme.secondaryText)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            }
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 8)
+    }
+}
+
+// Artwork and internal motion are unchanged; only placement is compensated
+// while newly wrapped text and the transcript scroll catch up with each other.
+private struct StableDotCompanion: UIViewRepresentable {
+    let isGenerating: Bool
+    let isSuspended: Bool
+    let controller: ChatScrollController?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeUIView(context: Context) -> DotAnimationSurface { DotAnimationSurface() }
+    func updateUIView(_ view: DotAnimationSurface, context: Context) {
+        view.configure(isGenerating: isGenerating, reduceMotion: reduceMotion, isSuspended: isSuspended)
+        controller?.registerCompanion(view)
+        KeyboardMotionAudit.companionView = view
+    }
+    static func dismantleUIView(_ view: DotAnimationSurface, coordinator: ()) {
+        view.stop(); view.transform = .identity
     }
 }
 
@@ -350,16 +396,14 @@ private struct LatestMessageButton: View {
     @ObservedObject var controller: ChatScrollController
     var body: some View {
         if !controller.latestVisible {
-            Button { controller.jumpToLatest() } label: {
+            HeaderActionButton(action: { controller.jumpToLatest() }) {
                 Image(systemName: "arrow.down")
                     .font(MyChatSystemFont.appFont(size: 18, weight: .medium))
-                    .frame(width: 40, height: 40)
-                    .background(MyChatTheme.raised, in: Circle())
-                    .overlay { Circle().stroke(MyChatTheme.border, lineWidth: 0.8) }
             }
-            .buttonStyle(.plain)
-            .padding(.bottom, 10)
+            .frame(width: 44, height: 44)
+            .modifier(MyChatFloatingSurface(shape: Circle()))
             .accessibilityLabel("跳到最新消息")
+            .accessibilityIdentifier("chat.jump-to-latest")
         }
     }
 }
@@ -374,12 +418,49 @@ private extension EnvironmentValues {
     }
 }
 
-@MainActor private final class ChatScrollController: NSObject, ObservableObject {
+struct ChatComposerGeometry: Equatable {
+    let bottomPadding: CGFloat
+    let topInWindow: CGFloat?
+}
+
+/// The transcript reserves keyboard space in its content. Its real last row
+/// must end above the input exactly once, even if a navigation controller also
+/// changes the scroll viewport or installs a keyboard content inset.
+enum ChatBottomAnchor {
+    static func offset(contentHeight: CGFloat, bottomPadding: CGFloat,
+                       viewport: CGRect, composerTop: CGFloat, topInset: CGFloat) -> CGFloat {
+        let bodyBottom = max(0, contentHeight - max(0, bottomPadding))
+        let visibleBottom = min(viewport.maxY, max(viewport.minY, composerTop - 8))
+        return max(-topInset, bodyBottom - (visibleBottom - viewport.minY))
+    }
+}
+
+/// Follow the end of the reply at eye level, with scrollable space below it.
+/// Short transcripts keep their natural top position rather than being pulled up.
+enum ChatReadingAnchor {
+    static func readingHeight(viewport: CGRect, composerTop: CGFloat?) -> CGFloat {
+        let visibleBottom = min(viewport.maxY, composerTop.map { max(viewport.minY, $0 - 8) } ?? viewport.maxY)
+        return max(0, visibleBottom - viewport.minY) * 0.45
+    }
+
+    static func bottomPadding(viewport: CGRect, composerTop: CGFloat?, minimum: CGFloat) -> CGFloat {
+        max(minimum, viewport.height - readingHeight(viewport: viewport, composerTop: composerTop))
+    }
+
+    static func offset(contentHeight: CGFloat, bottomPadding: CGFloat,
+                       viewport: CGRect, composerTop: CGFloat?, topInset: CGFloat) -> CGFloat {
+        let bodyBottom = max(0, contentHeight - max(0, bottomPadding))
+        return max(-topInset, bodyBottom - readingHeight(viewport: viewport, composerTop: composerTop))
+    }
+}
+
+@MainActor final class ChatScrollController: NSObject, ObservableObject {
     @Published private(set) var latestVisible = true
     private weak var scrollView: UIScrollView?
     private var observations: [NSKeyValueObservation] = []
     private var conversationID: UUID?
     private var followingLatest = true
+    private var explicitBottomFollow = false
     private var generationActive = false
     private var interactionActive = false
     private var drawerInteractionActive = false
@@ -390,6 +471,11 @@ private extension EnvironmentValues {
     private var followPaused = false
     private var initialPositionPending = true
     private var idleFollowResponseTime: Double = 0.1
+    private var composerGeometry = ChatComposerGeometry(bottomPadding: 0, topInWindow: nil)
+    private var laidOutBodyBottom: CGFloat?
+    private var keyboardMotionUntil: CFTimeInterval = 0
+    var presentedComposerTop: (() -> CGFloat?)?
+    private let companions = NSHashTable<UIView>.weakObjects()
     var onInteractionChanged: (Bool) -> Void = { _ in }
     private var deferredPublications: [UUID: () -> Void] = [:]
     private var legacyIdleTask: Task<Void, Never>?
@@ -404,6 +490,26 @@ private extension EnvironmentValues {
     @objc private func keyboardGeometryWillChange(_ note: Notification) {
         let duration = KeyboardTransitionTiming(note).duration
         idleFollowResponseTime = max(0.06, min(0.18, duration / 3))
+        keyboardMotionUntil = CACurrentMediaTime() + duration + 0.05
+        startSmoothFollow()
+    }
+
+    func registerCompanion(_ view: UIView) {
+        companions.add(view)
+        updateCompanions()
+    }
+
+    private func updateCompanions() {
+        let correction = generationActive && followingLatest && !nativeInteractionActive
+            ? -(followOffset - (scrollView?.contentOffset.y ?? 0)) : 0
+        for view in companions.allObjects { view.transform = CGAffineTransform(translationX: 0, y: correction) }
+    }
+
+    func setLaidOutBodyBottom(_ bottom: CGFloat) {
+        guard bottom.isFinite, bottom >= 0, laidOutBodyBottom != bottom else { return }
+        laidOutBodyBottom = bottom
+        updateCompanions()
+        contentGeometryChanged()
     }
 
     func publishWhenIdle(id: UUID, _ action: @escaping () -> Void) {
@@ -436,16 +542,20 @@ private extension EnvironmentValues {
                 }
             ]
             DispatchQueue.main.async { [weak self, weak scrollView] in
-                guard let self, let scrollView else { return }
+                guard let self, scrollView != nil else { return }
                 self.logScrollGeometry("attach")
             }
             followingLatest = generationActive ? isNearBottom : true
             scheduleFollow()
         }
         if self.conversationID != conversationID {
+            laidOutBodyBottom = nil
+            stopSmoothFollow()
+            scrollView.setContentOffset(scrollView.contentOffset, animated: false)
             initialPositionPending = true
+            explicitBottomFollow = false
             self.conversationID = conversationID
-            followingLatest = generationActive ? isNearBottom : true
+            followingLatest = true
             setInteractionActive(false)
             scheduleFollow()
         }
@@ -462,16 +572,24 @@ private extension EnvironmentValues {
         publishVisibility()
     }
 
+    func setComposerGeometry(_ geometry: ChatComposerGeometry) {
+        guard geometry != composerGeometry else { return }
+        composerGeometry = geometry
+        resumeFollowIfNeeded()
+    }
+
     func setInteractionActive(_ active: Bool) {
         guard interactionActive != active else { return }
         interactionActive = active
         onInteractionChanged(active || drawerInteractionActive)
         if active {
             followingLatest = false
+            explicitBottomFollow = false
             stopSmoothFollow()
         }
         else {
-            followingLatest = isNearBottom
+            // Releasing a drag preserves the chosen reading position. Only
+            // the explicit latest-message action resumes automatic following.
             DispatchQueue.main.async { [weak self] in
                 self?.flushDeferredPublications()
                 self?.publishVisibility()
@@ -521,8 +639,24 @@ private extension EnvironmentValues {
         return scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
     }
 
-    private var bottomOffset: CGFloat {
+    private var readingOffset: CGFloat {
         guard let scrollView else { return 0 }
+        let composerTop = scrollView.window == nil ? nil
+            : (presentedComposerTop?() ?? composerGeometry.topInWindow).flatMap { $0.isFinite ? $0 : nil }
+        let viewport = scrollView.window.map { scrollView.convert(scrollView.bounds, to: $0) }
+            ?? CGRect(origin: .zero, size: scrollView.bounds.size)
+        // Measure the body without padding in its own layout transaction;
+        // mixing a new reservation with an old contentSize made targets jump.
+        return ChatReadingAnchor.offset(contentHeight: laidOutBodyBottom ?? scrollView.contentSize.height,
+            bottomPadding: laidOutBodyBottom == nil ? composerGeometry.bottomPadding : 0,
+            viewport: viewport,
+            composerTop: composerTop, topInset: scrollView.adjustedContentInset.top)
+    }
+
+    private var followOffset: CGFloat {
+        guard explicitBottomFollow, let scrollView else { return readingOffset }
+        // Explicit bottom means the complete, currently laid-out scroll range,
+        // including the extra reading space and adjusted content insets.
         return max(-scrollView.adjustedContentInset.top,
             scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
     }
@@ -537,10 +671,11 @@ private extension EnvironmentValues {
 
     private var isNearBottom: Bool {
         guard let scrollView else { return true }
-        return bottomOffset - scrollView.contentOffset.y < 48
+        return readingOffset - scrollView.contentOffset.y < 48
     }
 
     private func offsetChanged() {
+        updateCompanions()
         if nativeInteractionActive {
             followingLatest = false
             stopSmoothFollow()
@@ -553,13 +688,13 @@ private extension EnvironmentValues {
     }
 
     private func publishVisibility() {
-        guard !(followingLatest && (generationActive || followDisplayLink != nil)) else { return }
-        guard latestVisible != isNearBottom, !visibilityScheduled else { return }
+        let visible = followingLatest || isNearBottom
+        guard latestVisible != visible, !visibilityScheduled else { return }
         visibilityScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.visibilityScheduled = false
-            let visible = self.isNearBottom
+            let visible = self.followingLatest || self.isNearBottom
             // Crossing this boundary is the only scroll-position publication.
             // Scrolling never invalidates the message tree on every frame.
             if self.latestVisible != visible { self.latestVisible = visible }
@@ -577,7 +712,7 @@ private extension EnvironmentValues {
 
     private func scheduleFollow() {
         guard !followPaused else { return }
-        if generationActive {
+        if generationActive && !initialPositionPending {
             startSmoothFollow()
             return
         }
@@ -589,12 +724,12 @@ private extension EnvironmentValues {
             // Check UIKit again at execution time. A touch may have started
             // after the layout callback scheduled this block.
             guard self.followingLatest, !self.followPaused, !self.nativeInteractionActive,
-                  let scrollView = self.scrollView else { return }
-            guard !self.generationActive else {
+                  let scrollView = self.scrollView, scrollView.window != nil else { return }
+            guard !self.generationActive || self.initialPositionPending else {
                 self.startSmoothFollow()
                 return
             }
-            let bottom = self.bottomOffset
+            let bottom = self.followOffset
             self.logScrollGeometry("scheduleFollow bottom=\(bottom)")
             if abs(scrollView.contentOffset.y - bottom) > 0.5 {
                 if self.initialPositionPending || UIAccessibility.isReduceMotionEnabled {
@@ -613,8 +748,9 @@ private extension EnvironmentValues {
     }
 
     private func startSmoothFollow() {
-        guard followDisplayLink == nil, followingLatest, !followPaused, !nativeInteractionActive,
-              let scrollView, abs(bottomOffset - scrollView.contentOffset.y) > 0.5 else { return }
+        guard !initialPositionPending, followDisplayLink == nil, followingLatest, !followPaused, !nativeInteractionActive,
+              let scrollView, scrollView.window != nil,
+              abs(followOffset - scrollView.contentOffset.y) > 0.5 || CACurrentMediaTime() < keyboardMotionUntil else { return }
         let displayLink = CADisplayLink(target: self, selector: #selector(advanceSmoothFollow(_:)))
         if #available(iOS 15.0, *) {
             displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
@@ -625,13 +761,14 @@ private extension EnvironmentValues {
     }
 
     @objc private func advanceSmoothFollow(_ displayLink: CADisplayLink) {
-        guard followingLatest, !nativeInteractionActive, let scrollView else {
+        guard followingLatest, !nativeInteractionActive, let scrollView, scrollView.window != nil else {
             stopSmoothFollow()
             return
         }
 
-        let remaining = bottomOffset - scrollView.contentOffset.y
-        guard abs(remaining) > 0.5 else {
+        let remaining = followOffset - scrollView.contentOffset.y
+        let keyboardMoving = displayLink.timestamp < keyboardMotionUntil
+        guard abs(remaining) > 0.5 || keyboardMoving else {
             logScrollGeometry("smoothFollowSettled")
             stopSmoothFollow()
             publishVisibility()
@@ -641,9 +778,12 @@ private extension EnvironmentValues {
         let elapsed = min(max(displayLink.timestamp - (previousFollowTimestamp ?? displayLink.timestamp - displayLink.duration),
                               1.0 / 120.0), 1.0 / 30.0)
         previousFollowTimestamp = displayLink.timestamp
-        let progress = 1 - exp(-elapsed / (generationActive ? 0.06 : idleFollowResponseTime))
+        // UIKit already animates the keyboard: sample that presentation,
+        // rather than easing toward its animated position a second time.
+        let progress = keyboardMoving ? 1 : 1 - exp(-elapsed / (generationActive ? 0.06 : idleFollowResponseTime))
         let nextOffset = scrollView.contentOffset.y + remaining * progress
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: nextOffset), animated: false)
+        updateCompanions()
         publishVisibility()
     }
 
@@ -663,12 +803,23 @@ private extension EnvironmentValues {
         resumeFollowIfNeeded()
     }
 
-    func jumpToLatest() {
+    func jumpToLatest(animated: Bool = true) {
         guard let scrollView else { return }
         stopSmoothFollow()
+        scrollView.setContentOffset(scrollView.contentOffset, animated: false)
+        // End the same interaction transaction used by scrolling. Directly
+        // flipping the flag left the transcript frozen with stale geometry.
+        setInteractionActive(false)
+        flushDeferredPublications()
+        scrollView.layoutIfNeeded()
         followingLatest = true
-        interactionActive = false
-        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: bottomOffset), animated: true)
+        explicitBottomFollow = true
+        // Hide as soon as the explicit action is accepted. Stream following
+        // keeps it hidden until the user deliberately scrolls away again.
+        if !latestVisible { latestVisible = true }
+        let bottom = followOffset
+        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: bottom),
+            animated: animated && !UIAccessibility.isReduceMotionEnabled)
         publishVisibility()
     }
 }
@@ -681,24 +832,30 @@ private struct NativeChatScrollObserver: UIViewRepresentable {
         let marker = ScrollMarker()
         marker.isUserInteractionEnabled = false
         marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID) }
+        marker.bodyBottom = { [weak controller] bottom in controller?.setLaidOutBodyBottom(bottom) }
         marker.onLayout = { [weak controller] in controller?.logScrollGeometry("marker-layout") }
         return marker
     }
     func updateUIView(_ marker: ScrollMarker, context: Context) {
         marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID) }
+        marker.bodyBottom = { [weak controller] bottom in controller?.setLaidOutBodyBottom(bottom) }
         marker.onLayout = { [weak controller] in controller?.logScrollGeometry("marker-layout") }
         marker.findScrollView()
     }
 
     final class ScrollMarker: UIView {
+        var bodyBottom: (CGFloat) -> Void = { _ in }
         var attach: (UIScrollView) -> Void = { _ in }
         var onLayout: () -> Void = {}
         override func didMoveToWindow() { super.didMoveToWindow(); findScrollView() }
         override func layoutSubviews() { super.layoutSubviews(); findScrollView(); onLayout() }
         func findScrollView() {
+            guard window != nil else { return }
             var ancestor = superview
             while let view = ancestor {
-                if let scroll = view as? UIScrollView { attach(scroll); return }
+                if let scroll = view as? UIScrollView {
+                    attach(scroll); bodyBottom(convert(.zero, to: scroll).y); return
+                }
                 ancestor = view.superview
             }
         }
@@ -725,6 +882,8 @@ private struct MessageBlock: View, Equatable {
     let toolActivities: [ChatToolActivity]
     let connectorApps: [ChatConnectorAppEvent]
     let appModel: AppModel
+    let showsResponseCompanion: Bool
+    let companionSuspended: Bool
     let accessToken: String?
     let canRegenerate: Bool
     let removesLaterMessages: Bool
@@ -738,6 +897,7 @@ private struct MessageBlock: View, Equatable {
     @State private var copyResetTask: Task<Void, Never>?
     @State private var speechState: SpeechPlaybackState = .idle
     @State private var speechError: String?
+    @State private var hasThoughtEntry = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -747,6 +907,8 @@ private struct MessageBlock: View, Equatable {
             && lhs.memoryChanges == rhs.memoryChanges
             && lhs.toolActivities == rhs.toolActivities
             && lhs.connectorApps == rhs.connectorApps
+            && lhs.showsResponseCompanion == rhs.showsResponseCompanion
+            && lhs.companionSuspended == rhs.companionSuspended
             && lhs.accessToken == rhs.accessToken
             && lhs.canRegenerate == rhs.canRegenerate
             && lhs.removesLaterMessages == rhs.removesLaterMessages
@@ -759,15 +921,23 @@ private struct MessageBlock: View, Equatable {
             UserMessageRow(message: message, isEditing: isEditingUserMessage, canEdit: canEditUserMessage,
                 edit: { appModel.beginEditingMessage(message) })
         case .assistant:
+            VStack(alignment: .leading, spacing: 3) {
             VStack(alignment: .leading, spacing: 10) {
-                if isGenerating, !processEntries.isEmpty {
+                if showsProcessTimeline {
                     ForEach(processEntries) { entry in
                         switch entry.content {
+                        case let .text(text):
+                            AssistantMessageBody(text, isStreaming: isGenerating && entry.id == processEntries.last?.id,
+                                messageID: message.id, completedReply: message.completedReplyIsVisible,
+                                searches: searches, segmentID: entry.id)
+                        case let .step(step):
+                            AssistantProgressRow(label: step.label, summary: nil)
                         case .thinking:
                             // Provider reasoning is private and must never be rendered as chat copy.
                             EmptyView()
-                        case .reasoningSummary:
-                            EmptyView()
+                        case let .reasoningSummary(summary):
+                            AssistantProgressRow(label: summary.split(whereSeparator: \.isNewline).first.map(String.init) ?? "思考摘要",
+                                summary: summary)
                         case .search(_):
                             EmptyView()
                         case let .tool(activity):
@@ -777,14 +947,14 @@ private struct MessageBlock: View, Equatable {
                         }
                     }
                 }
-                if (!memoryChanges.isEmpty || !toolActivities.isEmpty), !isGenerating || processEntries.isEmpty {
+                if !showsProcessTimeline, (!memoryChanges.isEmpty || !toolActivities.isEmpty) {
                     AssistantActivityTrace(
                         memoryChanges: memoryChanges,
                         toolActivities: toolActivities
                     )
                 }
 
-                if !message.content.isEmpty {
+                if !showsProcessTimeline, !message.content.isEmpty {
                     AssistantMessageBody(
                         message.content,
                         isStreaming: isGenerating,
@@ -842,7 +1012,12 @@ private struct MessageBlock: View, Equatable {
                     .foregroundStyle(MyChatTheme.secondaryText)
                 }
             }
+                if showsResponseCompanion, !hasThoughtEntry {
+                    AssistantResponseFooter(appModel: appModel, messageID: message.id, isSuspended: companionSuspended)
+                }
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .onPreferenceChange(ThoughtEntryPresenceKey.self) { hasThoughtEntry = $0 }
             .onDisappear { copyResetTask?.cancel() }
             .onAppear { speechState = SpeechPlaybackController.shared.state(for: message.id) }
             .onReceive(NotificationCenter.default.publisher(for: .myChatSpeechPlaybackDidChange)) { note in
@@ -871,6 +1046,18 @@ private struct MessageBlock: View, Equatable {
                 Text("会保留这条问题和之前的消息，替换这条回复及之后的对话。")
             }
         }
+    }
+
+    private var showsProcessTimeline: Bool {
+        guard !processEntries.isEmpty else { return false }
+        let text = processEntries.compactMap { entry -> String? in
+            if case let .text(value) = entry.content { return value }; return nil
+        }.joined()
+        if isGenerating || message.localGenerationState == .streaming
+            || message.localGenerationState == .completedPendingPersistence {
+            return text.hasPrefix(message.content) || message.content.hasPrefix(text)
+        }
+        return !text.isEmpty && text == message.content
     }
 
     private var copyButton: some View {
@@ -936,7 +1123,7 @@ private struct MessageBlock: View, Equatable {
 
     private var sourceResults: [ChatSearchResult] {
         var seen = Set<String>()
-        return searches.flatMap(\.results).filter { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && seen.insert($0.url).inserted }
+        return searches.filter(\.isWebSearch).flatMap(\.results).filter { !$0.isHistoryReference && ["http", "https"].contains(URL(string: $0.url)?.scheme?.lowercased() ?? "") && seen.insert($0.url).inserted }
     }
 
     private func messageAction(
@@ -1232,12 +1419,12 @@ private final class ConnectorAppHostModel: NSObject, ObservableObject, WKNavigat
         sendToApp([
             "jsonrpc": "2.0",
             "id": foundationValue(pendingCall.requestID),
-            "error": ["code": -32000, "message": "User declined the connector action"],
+            "error": ["code": -32000, "message": "用户拒绝了连接器操作"],
         ])
         sendToApp([
             "jsonrpc": "2.0",
             "method": "ui/notifications/tool-cancelled",
-            "params": ["reason": "User declined the connector action"],
+            "params": ["reason": "用户拒绝了连接器操作"],
         ])
     }
 
@@ -1351,7 +1538,7 @@ private final class ConnectorAppHostModel: NSObject, ObservableObject, WKNavigat
                   let arguments = jsonObject(rawArguments),
                   let encoded = try? JSONEncoder().encode(arguments),
                   encoded.count <= 160 * 1024 else {
-                sendRPCError(id, code: -32602, message: "Invalid connector tool request")
+                sendRPCError(id, code: -32602, message: "连接器工具请求无效")
                 return
             }
             pendingCall = PendingConnectorAppCall(requestID: id, toolName: toolName, arguments: arguments)
@@ -1363,7 +1550,7 @@ private final class ConnectorAppHostModel: NSObject, ObservableObject, WKNavigat
             break
 
         default:
-            if let id { sendRPCError(id, code: -32601, message: "Method not supported by MyChat") }
+            if let id { sendRPCError(id, code: -32601, message: "MyChat 不支持此方法") }
         }
     }
 
@@ -1537,6 +1724,34 @@ private final class WeakConnectorAppMessageHandler: NSObject, WKScriptMessageHan
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.frameInfo.isMainFrame else { return }
         host?.receive(message.body)
+    }
+}
+
+private struct AssistantProgressRow: View {
+    let label: String
+    let summary: String?
+    @State private var expanded = false
+    var body: some View {
+        Button { if summary != nil { expanded = true } } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.arrow.circlepath").font(MyChatSystemFont.appFont(size: 15))
+                Text(label).font(MyChatTypography.appStatus).lineLimit(1)
+                if summary != nil { Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 12)) }
+            }
+            .foregroundStyle(MyChatTheme.secondaryText)
+            .frame(minHeight: 36, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(summary == nil)
+        .accessibilityIdentifier(summary == nil ? "chat.progress.step" : "chat.progress.summary")
+        .sheet(isPresented: $expanded) {
+            VStack(spacing: 0) {
+                ChatSheetHeader(title: "思考摘要")
+                ScrollView { MarkdownBody(summary ?? "", typography: .response).padding(20) }
+            }
+            .background(MyChatTheme.canvas)
+            .presentationDetents([.medium, .large]).presentationCornerRadius(34)
+        }
     }
 }
 
@@ -1807,27 +2022,35 @@ private struct UserMessageRow: View {
     let canEdit: Bool
     let edit: () -> Void
     @State private var selectingText = false
+    @State private var cardFrame: CGRect = .zero
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
         HStack(alignment: .top, spacing: 0) {
             Spacer(minLength: 0)
             UserMessageCard(message: message)
-                .frame(maxWidth: 360, alignment: .trailing)
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
+                    cardFrame = frame
+                }
                 .contextMenu {
                     Section {
-                        Button("Copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.content }
-                        Button("Select text", systemImage: "text.line.first.and.arrowtriangle.forward") { selectingText = true }
-                        Button("Edit", systemImage: "square.and.pencil", action: edit).disabled(!canEdit)
+                        Button("复制", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.content }
+                        Button("选择文本", systemImage: "text.cursor") { selectingText = true }
+                        Button("编辑", systemImage: "pencil", action: edit).disabled(!canEdit)
                     } header: { Text(message.createdAt.formatted(.dateTime.hour().minute())) }
+                } preview: {
+                    UserMessageCard(message: message)
+                        .frame(width: max(44, min(360, cardFrame.width)), alignment: .trailing)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: 360, alignment: .trailing)
         }
         // The transcript supplies the viewport's finite width. Expand this
         // row to that width first, then let the spacer anchor every user
         // payload (text, files, and images) to the same trailing edge.
         .frame(maxWidth: .infinity, alignment: .trailing)
         if isEditing {
-            Text("Editing this message will restart the conversation from this point.")
+            Text("编辑这条消息后，对话将从这里重新开始。")
                 .font(MyChatSystemFont.appFont(size: 13)).foregroundStyle(MyChatTheme.secondaryText)
                 .multilineTextAlignment(.trailing).frame(maxWidth: 340, alignment: .trailing)
         }
@@ -1840,7 +2063,7 @@ private struct MessageTextSelectionSheet: View {
     let text: String
     var body: some View {
         VStack(spacing: 0) {
-            ChatSheetHeader(title: "Select text")
+            ChatSheetHeader(title: "选择文本")
             SelectableMessageText(text: text).padding(.horizontal, 16)
         }.background(MyChatTheme.canvas).presentationDetents([.large]).presentationCornerRadius(42)
     }
@@ -2054,6 +2277,11 @@ private extension UIImage {
     }
 }
 
+private struct ThoughtEntryPresenceKey: PreferenceKey {
+    static var defaultValue: Bool { false }
+    static func reduce(value: inout Bool, nextValue: () -> Bool) { value = value || nextValue() }
+}
+
 private struct AssistantMessageBody: View {
     private let source: String
     private let isStreaming: Bool
@@ -2061,6 +2289,7 @@ private struct AssistantMessageBody: View {
     private let completedReply: Bool
     private let reasoningSummary: String?
     private let cacheKey: String
+    private let responseMessageID: UUID?
     private let searches: [ChatToolSearch]
     @Environment(\.chatScrollController) private var scrollController
     @StateObject private var renderer: MessageRenderModel
@@ -2074,7 +2303,8 @@ private struct AssistantMessageBody: View {
         thinking: Bool = false,
         completedReply: Bool = true,
         reasoningSummary: String? = nil,
-        searches: [ChatToolSearch] = []
+        searches: [ChatToolSearch] = [],
+        segmentID: String? = nil
     ) {
         let clean = thinking ? PresentationText.rich(source) : source
         self.source = clean
@@ -2084,22 +2314,32 @@ private struct AssistantMessageBody: View {
         self.reasoningSummary = reasoningSummary
         self.searches = searches
         let key = ChatPresentationCache.key(messageID: messageID, source: clean, thinking: thinking)
+            + (segmentID.map { ":" + $0 } ?? "")
         cacheKey = key
+        responseMessageID = messageID
         _renderer = StateObject(wrappedValue: MessageRenderModel(key: key, source: clean, isStreaming: isStreaming))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            ForEach(presentedBlocks.enumerated().map { MessageBlockSlot(index: $0.offset, block: $0.element) }) { slot in
-                if case let .artifact(artifact) = slot.block {
-                    artifactContent(artifact)
-                } else {
-                    MessageMarkdownBlockView(block: slot.block, searches: searches, thinking: isThinking).equatable()
+                if let document = firstDocument {
+                    DocumentThoughtRow(summary: document.summary, reasoningSummary: reasoningSummary, isGenerating: isStreaming)
+                } else if let reasoningSummary, !reasoningSummary.isEmpty {
+                    DocumentThoughtRow(summary: nil, reasoningSummary: reasoningSummary, isGenerating: isStreaming)
                 }
-            }
-
+                ForEach(presentedBlocks.enumerated().map { MessageBlockSlot(index: $0.offset, block: $0.element) }) { slot in
+                    if case let .artifact(artifact) = slot.block {
+                        artifactContent(artifact)
+                    } else {
+                        MessageMarkdownBlockView(block: slot.block, searches: searches, thinking: isThinking).equatable()
+                    }
+                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .preference(key: ThoughtEntryPresenceKey.self,
+            value: firstDocument != nil || reasoningSummary?.isEmpty == false)
+        .environment(\.responseIsStreaming, isStreaming)
+        .environment(\.responseMessageID, responseMessageID)
         .task(id: MessageRenderInput(source: source, isStreaming: isStreaming)) {
             await renderer.update(key: cacheKey, source: source, isStreaming: isStreaming, scrollController: scrollController)
         }
@@ -2121,50 +2361,19 @@ private struct AssistantMessageBody: View {
         }
     }
 
+    private var firstDocument: ChatDocument? {
+        for block in presentedBlocks {
+            if case let .artifact(artifact) = block, artifact.kind == .document,
+               let document = ChatDocument.from(artifact) { return document }
+        }
+        return nil
+    }
+
     @ViewBuilder private func artifactContent(_ artifact: ChatArtifactBlock) -> some View {
                 if artifact.kind == .document, let document = ChatDocument.from(artifact) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        DocumentThoughtRow(summary: document.summary, reasoningSummary: reasoningSummary, isGenerating: isStreaming)
-                        if !isStreaming && completedReply && artifact.isComplete { GeneratedDocumentCard(document: document) }
-                    }
-                } else if artifact.kind == .artifact {
-                    Button {
-                        setRenderSuspended("artifact", active: true)
-                        selectedArtifact = artifact
-                    } label: {
-                        HStack(spacing: 13) {
-                            Image(systemName: artifactSymbol(artifact.kind))
-                                .font(MyChatSystemFont.appFont(size: 19, weight: .medium))
-                                .frame(width: 42, height: 42)
-                                .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 12))
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(PresentationText.plain(ChatArtifactParser.title(for: artifact)))
-                                    .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
-                                    .foregroundStyle(MyChatTheme.text)
-                                    .lineLimit(1)
-                                Text(artifact.isComplete ? artifact.kind.displayName : "Rendering…")
-                                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                                    .foregroundStyle(MyChatTheme.secondaryText)
-                            }
-                            Spacer(minLength: 8)
-                            if artifact.isComplete {
-                                Image(systemName: "chevron.right")
-                                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
-                                    .foregroundStyle(MyChatTheme.secondaryText)
-                            } else {
-                                ProgressView().controlSize(.small)
-                            }
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: MyChatTheme.chatCardRadius, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: MyChatTheme.chatCardRadius, style: .continuous)
-                                .stroke(MyChatTheme.border, lineWidth: 0.7)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!artifact.isComplete)
+                    if !isStreaming && completedReply && artifact.isComplete { GeneratedDocumentCard(document: document) }
+                } else if artifact.kind == .artifact, let document = ChatDocument.from(artifact) {
+                    GeneratedDocumentCard(document: document, complete: artifact.isComplete)
                 } else {
                     InlineArtifactBlockView(artifact: artifact)
                 }
@@ -2221,6 +2430,12 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
 
     func update(key: String, source: String, isStreaming: Bool, scrollController: ChatScrollController?) async {
         requestedRevision += 1
+        if !isSuspended, document.blocks.isEmpty, !source.isEmpty, source.utf8.count <= 1_024 {
+            document = ChatPresentationCache.document(key: key, source: source, streaming: isStreaming)
+            submittedRevision = requestedRevision
+            publishedRevision = requestedRevision
+            return
+        }
         latestRequest = RenderRequest(key: key, source: source, isStreaming: isStreaming)
         self.scrollController = scrollController
         scheduleRender()
@@ -2244,7 +2459,7 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
 
     private func renderLatestRequests() async {
         while !Task.isCancelled, !isSuspended, requestedRevision > submittedRevision {
-            if latestRequest?.isStreaming == true {
+            if latestRequest?.isStreaming == true && publishedRevision > 0 && !document.blocks.isEmpty {
                 do { try await Task.sleep(for: .milliseconds(50)) }
                 catch { return }
             }
@@ -2285,6 +2500,9 @@ private struct MessageRenderInput: Hashable { let source: String; let isStreamin
 }
 
 struct InlineArtifactBlockView: View {
+    @State private var canvasHeight: CGFloat = 160
+    @State private var layoutPublicationID = UUID()
+    @Environment(\.chatScrollController) private var scrollController
     @Environment(\.colorScheme) private var colorScheme
     let artifact: ChatArtifactBlock
 
@@ -2295,10 +2513,10 @@ struct InlineArtifactBlockView: View {
                     rawHTML: artifact.raw,
                     colorScheme: colorScheme,
                     isStreaming: !artifact.isComplete,
-                    inline: true
+                    inline: true,
+                    contentHeight: updateCanvasHeight
                 )
-                .aspectRatio(svgAspectRatio, contentMode: .fit)
-                .frame(minHeight: 160, maxHeight: 620)
+                .frame(height: canvasHeight)
             } else if artifact.isComplete {
                 switch artifact.kind {
                 case .inlineArtifact:
@@ -2319,7 +2537,7 @@ struct InlineArtifactBlockView: View {
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text("Rendering \(artifact.kind.displayName.lowercased())…")
+                    Text("正在渲染\(artifact.kind.displayName)…")
                         .font(MyChatSystemFont.appFont(size: 15, weight: .regular))
                         .foregroundStyle(MyChatTheme.secondaryText)
                 }
@@ -2328,7 +2546,13 @@ struct InlineArtifactBlockView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .clipped()
+    }
+
+    private func updateCanvasHeight(_ height: CGFloat) {
+        let next = max(160, height)
+        let publish = { if abs(canvasHeight - next) > 0.5 { canvasHeight = next } }
+        if let scrollController { scrollController.publishWhenIdle(id: layoutPublicationID, publish) }
+        else { publish() }
     }
 
     private var svgAspectRatio: CGFloat {
@@ -2363,7 +2587,7 @@ private struct ArtifactBlockDetail: View {
                 case .document:
                     if let document = ChatDocument.from(artifact) { DocumentTextContent(document: document) }
                 case .artifact, .inlineArtifact:
-                    ArtifactSandboxView(rawHTML: artifact.raw, colorScheme: colorScheme)
+                    InteractiveArtifactView(rawHTML: artifact.raw, colorScheme: colorScheme)
                 case .vega:
                     VegaLiteArtifactView(raw: artifact.raw)
                 case .mermaid:
@@ -2396,7 +2620,7 @@ struct MessageMarkdownBlockView: View, Equatable {
         case let .paragraph(text):
             MarkdownBody(text, typography: thinking ? .thought : .response, lineSpacingOverride: paragraphLineSpacing)
         case let .heading(level, text):
-            Text(inlineMarkdown(text))
+            ResponseHeadingText(text: inlineMarkdown(text))
                 .font(headingFont(level))
                 .lineSpacing(headingLineSpacing(level))
                 .fixedSize(horizontal: false, vertical: true)
@@ -2564,7 +2788,7 @@ private struct HistorySearchResultCard: View {
                 HStack(spacing: 7) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(MyChatSystemFont.appFont(size: 12, weight: .medium))
-                    Text("Past chat")
+                    Text("历史对话")
                         .font(MyChatTypography.caption)
                     Spacer()
                     Image(systemName: "arrow.up.right")
@@ -2572,7 +2796,7 @@ private struct HistorySearchResultCard: View {
                 }
                 .foregroundStyle(MyChatTheme.secondaryText)
 
-                Text(PresentationText.plain(result.title.isEmpty ? "Untitled chat" : result.title))
+                Text(PresentationText.plain(result.title.isEmpty ? "未命名对话" : result.title))
                     .font(MyChatTypography.cardTitle)
                     .foregroundStyle(MyChatTheme.text)
                     .lineLimit(2)
@@ -2596,7 +2820,7 @@ private struct HistorySearchResultCard: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Open past conversation: \(result.title)")
+        .accessibilityLabel("打开历史对话：\(result.title)")
     }
 }
 
@@ -2903,7 +3127,7 @@ private struct CopyableMessageCodeBlock: View {
             Divider().opacity(0.45)
 
             ScrollView(.horizontal) {
-                Text(CodeSyntaxPresentation.highlight(text))
+                ResponseHeadingText(text: CodeSyntaxPresentation.highlight(text))
                     .font(MyChatTypography.code)
                     .lineSpacing(MyChatTypography.codeLineSpacing)
                     .textSelection(.enabled)
@@ -2922,7 +3146,7 @@ private struct CopyableMessageCodeBlock: View {
         .onDisappear { resetTask?.cancel() }
         .sheet(isPresented: $expanded) {
             VStack(spacing: 0) {
-                ChatSheetHeader(title: language.map { "\($0.capitalized) code" } ?? "Code")
+                ChatSheetHeader(title: language.map { "\($0.capitalized) 代码" } ?? "代码")
                 ScrollView([.horizontal, .vertical]) {
                     Text(CodeSyntaxPresentation.highlight(text))
                         .font(MyChatTypography.code)
@@ -3018,7 +3242,7 @@ private struct FormulaPendingView: View {
         HStack(spacing: 9) {
             ProgressView()
                 .controlSize(.small)
-            Text("Rendering formula")
+            Text("正在渲染公式")
                 .font(MyChatTypography.metadata)
                 .lineSpacing(MyChatTypography.metadataLineSpacing)
         }
@@ -3391,7 +3615,7 @@ struct LaTeXMathWebView: UIViewRepresentable {
     }
 }
 
-private struct MarkdownBody: View {
+struct MarkdownBody: View {
     enum Typography {
         case response
         case thought
@@ -3506,20 +3730,7 @@ private struct MarkdownBody: View {
                                 fallbackLineSpacing: bodyLineSpacing)
                 .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
         } else {
-            Group {
-                if #available(iOS 18.0, *), let codeText {
-                    ZStack(alignment: .topLeading) {
-                        codeText
-                            .textSelection(.disabled)
-                            .textRenderer(InlineCodeTextRenderer())
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                        Text(text)
-                    }
-                } else {
-                    Text(text)
-                }
-            }
+            responseText
                 .font(typography.font)
                 .tracking(MyChatTypography.responseTracking)
                 .lineSpacing(bodyLineSpacing)
@@ -3535,6 +3746,249 @@ private struct MarkdownBody: View {
         }
     }
 
+    @ViewBuilder private var responseText: some View {
+        if #available(iOS 18.0, *), !typography.isUserMessage {
+            StreamingResponseText(text: text, codeText: codeText)
+        } else { Text(text) }
+    }
+}
+
+private struct ResponseHeadingText: View {
+    let text: AttributedString
+    var body: some View {
+        if #available(iOS 18.0, *) { StreamingResponseText(text: text) }
+        else { Text(text) }
+    }
+}
+
+private struct ResponseIsStreamingKey: EnvironmentKey {
+    static let defaultValue = false
+}
+extension EnvironmentValues {
+    var responseIsStreaming: Bool {
+        get { self[ResponseIsStreamingKey.self] }
+        set { self[ResponseIsStreamingKey.self] = newValue }
+    }
+}
+
+enum ResponseRevealTiming {
+    static func step(added: Int) -> TimeInterval {
+        added > 1 ? min(0.012, 0.08 / Double(added - 1)) : 0
+    }
+
+    static func opacity(now: TimeInterval, born: TimeInterval) -> Double {
+        guard now >= born else { return 0 }
+        return 0.10 + 0.90 * progress(now: now, born: born)
+    }
+
+    static func progress(now: TimeInterval, born: TimeInterval) -> Double {
+        guard now >= born else { return 0 }
+        let linear = min(1, max(0, (now - born) / 0.24))
+        return 1 - pow(1 - linear, 3)
+    }
+
+    static func rise(now: TimeInterval, born: TimeInterval) -> CGFloat {
+        2.4 * CGFloat(1 - progress(now: now, born: born))
+    }
+
+    static func blur(now: TimeInterval, born: TimeInterval) -> CGFloat {
+        0.85 * CGFloat(1 - progress(now: now, born: born))
+    }
+}
+
+// Births belong to native glyph indices, not byte offsets or chopped Text
+// fragments. Shaping, ligatures, kerning and Markdown attributes remain intact.
+struct ResponseGlyphBirths<Index: Hashable & Comparable> {
+    private(set) var values: [Index: TimeInterval] = [:]
+
+    mutating func update(indices: [Index], now: TimeInterval) -> [Index: TimeInterval] {
+        let fresh = Set(indices).filter { values[$0] == nil }.sorted()
+        let step = ResponseRevealTiming.step(added: fresh.count)
+        for (order, index) in fresh.enumerated() {
+            values[index] = now + Double(order) * step
+        }
+        return values
+    }
+}
+
+@available(iOS 18.0, *)
+private final class ResponseRevealLedger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var glyphs = ResponseGlyphBirths<Text.Layout.CharacterIndex>()
+    private var introducedAt = Date.timeIntervalSinceReferenceDate
+    private var previous = ""
+    private var recordedMessages: Set<UUID> = []
+
+    func shouldRecord(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return recordedMessages.insert(id).inserted
+    }
+
+    func begin(source: String, now: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        if source.isEmpty || (!previous.isEmpty && previous.commonPrefix(with: source).isEmpty) {
+            glyphs = ResponseGlyphBirths()
+        }
+        previous = source
+        introducedAt = now
+    }
+
+    func births(layout: Text.Layout, now: TimeInterval) -> [Text.Layout.CharacterIndex: TimeInterval] {
+        let indices = layout.flatMap { $0.flatMap { $0.characterIndices } }
+        lock.lock(); defer { lock.unlock() }
+        return glyphs.update(indices: indices, now: min(introducedAt, now))
+    }
+}
+
+@available(iOS 18.0, *)
+private struct ResponseRevealRenderer: TextRenderer {
+    let ledger: ResponseRevealLedger
+    let now: TimeInterval
+    var decorationOnly = false
+    var messageID: UUID?
+
+    func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        let births = ledger.births(layout: layout, now: now)
+        let firstCharacter = layout.first?.first?.characterIndices.first
+        for line in layout {
+            for run in line {
+                if decorationOnly {
+                    guard run[InlineCodeTextAttribute.self] != nil else { continue }
+                    var ink = context
+                    let opacities = run.characterIndices.compactMap { births[$0] }
+                        .map { ResponseRevealTiming.opacity(now: now, born: $0) }
+                    ink.opacity *= opacities.isEmpty ? 1 : opacities.reduce(0, +) / Double(opacities.count)
+                    let bounds = run.typographicBounds.rect.insetBy(dx: -3, dy: -0.5)
+                    ink.fill(Path(roundedRect: bounds, cornerRadius: 4), with: .color(MyChatTheme.inlineCodeSurface))
+                } else if run.characterIndices.allSatisfy({ now - (births[$0] ?? 0) >= 0.24 }) {
+                    context.draw(run)
+                } else {
+                    for slice in run {
+                        if let firstCharacter, slice.characterIndices.contains(firstCharacter) {
+                            // The leading answer glyph is full ink on its first
+                            // draw. Only subsequent glyphs use progressive fade.
+                            context.draw(slice)
+                            continue
+                        }
+                        var ink = context
+                        let born = slice.characterIndices.compactMap { births[$0] }.min() ?? 0
+                        ink.opacity *= ResponseRevealTiming.opacity(now: now, born: born)
+                        ink.translateBy(x: 0, y: ResponseRevealTiming.rise(now: now, born: born))
+                        let blur = ResponseRevealTiming.blur(now: now, born: born)
+                        if blur > 0.01 { ink.addFilter(.blur(radius: blur)) }
+                        ink.draw(slice)
+                    }
+                }
+            }
+        }
+        if !decorationOnly, !births.isEmpty, let messageID, ledger.shouldRecord(messageID) {
+            ResponseInkDiagnostics.record(messageID: messageID)
+        }
+    }
+}
+
+private struct ResponseMessageIDKey: EnvironmentKey {
+    static let defaultValue: UUID? = nil
+}
+private extension EnvironmentValues {
+    var responseMessageID: UUID? {
+        get { self[ResponseMessageIDKey.self] }
+        set { self[ResponseMessageIDKey.self] = newValue }
+    }
+}
+
+// Numeric first-draw evidence, queued off the rendering path. This does not
+// collect text, screenshots, authentication data or model credentials.
+private enum ResponseInkDiagnostics {
+    private struct Record: Codable, Sendable {
+        let messageID: UUID
+        let drawnAt: Date
+        let monotonicDraw: Double
+    }
+    private static let writer = DispatchQueue(label: "mychat.response-ink-timing", qos: .utility)
+    private static var records: [UUID: Record] = [:]
+
+    static func record(messageID: UUID) {
+        let record = Record(messageID: messageID, drawnAt: Date(),
+            monotonicDraw: ProcessInfo.processInfo.systemUptime)
+        writer.async {
+            guard records[messageID] == nil else { return }
+            if records.count >= 64, let oldest = records.values.min(by: { $0.monotonicDraw < $1.monotonicDraw }) {
+                records[oldest.messageID] = nil
+            }
+            records[messageID] = record
+            guard let folder = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+                  let data = try? JSONEncoder().encode(Array(records.values)) else { return }
+            try? data.write(to: folder.appendingPathComponent("response-ink-timing.json"),
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+    }
+}
+
+/// Layout the complete attributed text immediately and fade only native ink.
+/// The first glyph has visible ink on its first draw; later glyphs overlap.
+@available(iOS 18.0, *)
+private struct StreamingResponseText: View {
+    let text: AttributedString
+    var codeText: Text? = nil
+    @Environment(\.responseIsStreaming) private var streaming
+    @Environment(\.responseMessageID) private var messageID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var ledger = ResponseRevealLedger()
+    @State private var previous = ""
+    @State private var lastBirth = Date.timeIntervalSinceReferenceDate
+    @State private var revealing = true
+
+    var body: some View {
+        Group {
+            if (streaming || revealing) && !reduceMotion {
+                TimelineView(.animation(minimumInterval: 1 / 60, paused: !revealing)) { timeline in
+                    ZStack(alignment: .topLeading) {
+                        if let codeText {
+                            codeText.textRenderer(ResponseRevealRenderer(ledger: ledger,
+                                now: timeline.date.timeIntervalSinceReferenceDate, decorationOnly: true))
+                                .allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                        Text(text).textRenderer(ResponseRevealRenderer(ledger: ledger,
+                            now: timeline.date.timeIntervalSinceReferenceDate,
+                            messageID: streaming ? messageID : nil))
+                    }
+                }
+                .textSelection(.disabled)
+            } else {
+                ZStack(alignment: .topLeading) {
+                    if let codeText {
+                        codeText.textRenderer(InlineCodeTextRenderer())
+                            .allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                    Text(text)
+                }
+            }
+        }
+        .onChange(of: text, initial: true) { _, _ in updateReveal() }
+        .onChange(of: reduceMotion) { _, _ in updateReveal() }
+        .task(id: lastBirth) {
+            let remaining = max(0, lastBirth + 0.32 - Date.timeIntervalSinceReferenceDate)
+            try? await Task.sleep(for: .seconds(remaining))
+            if !Task.isCancelled { revealing = false }
+        }
+    }
+
+    private func updateReveal() {
+        let current = String(text.characters)
+        let now = Date.timeIntervalSinceReferenceDate
+        guard !reduceMotion && (streaming || (revealing && !previous.isEmpty)) else {
+            previous = current; revealing = false
+            return
+        }
+        ledger.begin(source: current, now: now)
+        if current != previous {
+            lastBirth = now
+            revealing = true
+        }
+        previous = current
+    }
 }
 
 private struct MessageBodyTextSelectionPolicy: ViewModifier {
@@ -3918,7 +4372,7 @@ private struct SourcesSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ChatSheetHeader(title: "Sources")
+            ChatSheetHeader(title: "来源")
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 26) {
                     ForEach(Array(uniqueResults.enumerated()), id: \.offset) { _, result in
@@ -3997,7 +4451,7 @@ private struct SourceFavicon: View {
     }
 }
 
-private struct ChatSheetHeader: View {
+struct ChatSheetHeader: View {
     @Environment(\.dismiss) private var dismiss
     let title: String
 
@@ -4011,14 +4465,9 @@ private struct ChatSheetHeader: View {
                     dismiss()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(MyChatSystemFont.appFont(size: 19, weight: .regular))
-                        .frame(width: 44, height: 44)
-                        .background(MyChatTheme.raised, in: Circle())
-                        .overlay {
-                            Circle().stroke(MyChatTheme.border, lineWidth: 0.7)
-                        }
+                        .font(MyChatSystemFont.appFont(size: 17, weight: .regular))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MyChatIconButtonStyle())
                 .accessibilityLabel("关闭")
 
                 Spacer()

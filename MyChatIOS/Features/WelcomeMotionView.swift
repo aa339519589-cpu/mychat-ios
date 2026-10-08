@@ -29,7 +29,7 @@ struct WelcomeMotionView: UIViewControllerRepresentable {
     let isPrivate: Bool
     let bottomOcclusion: CGFloat
     let systemBottomInset: CGFloat
-    let timing: KeyboardTransitionTiming
+    let canvasLayout: ChatCanvasLayout
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeUIViewController(context: Context) -> WelcomeMotionController {
@@ -40,7 +40,7 @@ struct WelcomeMotionView: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: WelcomeMotionController, context: Context) {
         controller.configure(greeting: greeting, isPrivate: isPrivate,
             bottomOcclusion: bottomOcclusion, systemBottomInset: systemBottomInset,
-            timing: timing, reduceMotion: reduceMotion)
+            canvasLayout: canvasLayout, reduceMotion: reduceMotion)
     }
 }
 
@@ -49,25 +49,76 @@ final class WelcomeMotionSurface: UIView {
     let greeting = UILabel()
     let hint = UILabel()
     weak var privateLogo: UIView?
+    var didAttach: (() -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        didAttach?()
+    }
+}
+
+private struct WelcomePrivacyGhost: Shape {
+    func path(in rect: CGRect) -> Path {
+        // A round crown and three soft bottom scallops, matching the reference.
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: 40))
+        path.addCurve(to: CGPoint(x: 40, y: 0),
+            control1: CGPoint(x: 0, y: 17.91), control2: CGPoint(x: 17.91, y: 0))
+        path.addCurve(to: CGPoint(x: 80, y: 40),
+            control1: CGPoint(x: 62.09, y: 0), control2: CGPoint(x: 80, y: 17.91))
+        path.addLine(to: CGPoint(x: 80, y: 75.5))
+        path.addCurve(to: CGPoint(x: 73, y: 76),
+            control1: CGPoint(x: 80, y: 81), control2: CGPoint(x: 76, y: 81))
+        path.addCurve(to: CGPoint(x: 66.67, y: 70),
+            control1: CGPoint(x: 71, y: 72), control2: CGPoint(x: 69, y: 70))
+        path.addCurve(to: CGPoint(x: 53.33, y: 80),
+            control1: CGPoint(x: 60, y: 70), control2: CGPoint(x: 60, y: 80))
+        path.addCurve(to: CGPoint(x: 40, y: 70),
+            control1: CGPoint(x: 47, y: 80), control2: CGPoint(x: 47, y: 70))
+        path.addCurve(to: CGPoint(x: 26.67, y: 80),
+            control1: CGPoint(x: 33, y: 70), control2: CGPoint(x: 33, y: 80))
+        path.addCurve(to: CGPoint(x: 13.33, y: 70),
+            control1: CGPoint(x: 20, y: 80), control2: CGPoint(x: 20, y: 70))
+        path.addCurve(to: CGPoint(x: 7, y: 76),
+            control1: CGPoint(x: 11, y: 70), control2: CGPoint(x: 9, y: 72))
+        path.addCurve(to: CGPoint(x: 0, y: 75.5),
+            control1: CGPoint(x: 4, y: 81), control2: CGPoint(x: 0, y: 81))
+        path.closeSubpath()
+        for x: CGFloat in [23.2, 56.8] {
+            path.addEllipse(in: CGRect(x: x - 5.4, y: 34.6, width: 10.8, height: 10.8))
+        }
+        return path.applying(CGAffineTransform(scaleX: rect.width / 80, y: rect.height / 80)
+            .concatenating(CGAffineTransform(translationX: rect.minX, y: rect.minY)))
+    }
 }
 
 final class WelcomeMotionController: UIViewController {
     private let surface = WelcomeMotionSurface()
     private let privateHost = UIHostingController(rootView: AnyView(
-        PrivacyChatGlyph(foreground: MyChatTheme.text, eyeColor: MyChatTheme.canvas, size: 48).frame(width: 52, height: 52)))
+        WelcomePrivacyGhost().fill(MyChatTheme.text, style: FillStyle(eoFill: true))
+            .frame(width: 34, height: 34)
+            .frame(width: 52, height: 52)))
     private var greetingText = ""
     private var privateMode = false
     private var bottomOcclusion: CGFloat = 140
     private var systemBottomInset: CGFloat = 34
     private var configured = false
     private var reducedMotion = false
+    private weak var canvasLayout: ChatCanvasLayout?
+    private weak var boundComposer: UIView?
+    private let availableSpace = UILayoutGuide()
+    private let welcomeAnchor = UILayoutGuide()
+    private var restingBottom: NSLayoutConstraint!
+    private var composerBottom: NSLayoutConstraint?
+    private var greetingHeight: NSLayoutConstraint!
+    private var hintHeight: NSLayoutConstraint!
 
     override func loadView() { view = surface }
     override func viewDidLoad() {
         super.viewDidLoad()
         surface.backgroundColor = .clear
         surface.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard)))
-        if let url = Bundle.main.url(forResource: "home-logo", withExtension: "png", subdirectory: "DotMotion") {
+        if let url = Bundle.main.url(forResource: "coherent-idle", withExtension: "png", subdirectory: "DotMotion") {
             surface.logo.image = UIImage(contentsOfFile: url.path)
         }
         surface.logo.contentMode = .scaleAspectFit
@@ -89,6 +140,8 @@ final class WelcomeMotionController: UIViewController {
         privateHost.view.accessibilityLabel = "隐私聊天"
         privateHost.view.accessibilityTraits = .image
         surface.privateLogo = privateHost.view
+        installGeometry()
+        surface.didAttach = { [weak self] in self?.connectComposerGeometry() }
         refreshTypography()
         applyAppearance()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (controller: WelcomeMotionController, _) in
@@ -102,7 +155,8 @@ final class WelcomeMotionController: UIViewController {
     }
 
     func configure(greeting: String, isPrivate: Bool, bottomOcclusion: CGFloat,
-                   systemBottomInset: CGFloat, timing: KeyboardTransitionTiming, reduceMotion: Bool) {
+                   systemBottomInset: CGFloat, canvasLayout: ChatCanvasLayout, reduceMotion: Bool) {
+        self.canvasLayout = canvasLayout
         let changesMode = privateMode != isPrivate
         let changesGeometry = abs(self.bottomOcclusion - bottomOcclusion) > 0.5
         guard !configured || changesMode || changesGeometry || greetingText != greeting
@@ -115,44 +169,97 @@ final class WelcomeMotionController: UIViewController {
         guard isViewLoaded else { return }
         refreshTypography()
         updateAccessibility()
-        let changes = { self.placeContent(); self.applyAppearance() }
-        if animate && (changesGeometry || changesMode) {
-            let duration = changesMode ? 0.34 : timing.duration
-            let options: UIView.AnimationOptions = changesMode
-                ? [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction] : timing.options
-            UIView.animate(withDuration: duration, delay: 0, options: options, animations: changes)
-        } else { UIView.performWithoutAnimation(changes) }
+        restingBottom.constant = -max(0, bottomOcclusion - systemBottomInset)
+        connectComposerGeometry()
+        // Only the privacy appearance has its own animation. Position is an
+        // affine function of the native input's top anchor in the same layout
+        // tree, so keyboard show/hide/reversal cannot start a second chase.
+        if animate && changesMode {
+            UIView.animate(withDuration: 0.34, delay: 0,
+                options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction]) {
+                self.applyAppearance()
+            }
+        } else { UIView.performWithoutAnimation { self.applyAppearance() } }
     }
 
     private func refreshTypography() {
         surface.greeting.font = MyChatSystemFont.appSerifUIFont(size: 24, relativeTo: .title2, weight: .medium)
         surface.greeting.textColor = UIColor(MyChatTheme.text)
         surface.greeting.text = greetingText
-        surface.hint.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: UIFont.systemFont(ofSize: 13))
+        surface.hint.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: MyChatSystemFont.appUIFont(size: 13))
         surface.hint.textColor = UIColor(MyChatTheme.secondaryText)
-        let text = "Incognito chats stay out of history and memory."
+        let text = "隐私对话不会保存在历史记录或记忆中。"
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineSpacing = 2
         let attributed = NSMutableAttributedString(string: text, attributes: [.paragraphStyle: paragraph])
         surface.hint.attributedText = attributed
     }
 
-    override func viewDidLayoutSubviews() { super.viewDidLayoutSubviews(); placeContent() }
-    private func placeContent() {
+    private func installGeometry() {
+        surface.addLayoutGuide(availableSpace)
+        surface.addLayoutGuide(welcomeAnchor)
+        let children = [surface.logo, surface.greeting, surface.hint, privateHost.view!]
+        children.forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        restingBottom = availableSpace.bottomAnchor.constraint(equalTo: surface.bottomAnchor,
+            constant: -max(0, bottomOcclusion - systemBottomInset))
+        greetingHeight = surface.greeting.heightAnchor.constraint(equalToConstant: 32)
+        hintHeight = surface.hint.heightAnchor.constraint(equalToConstant: 36)
+        let preferredHintWidth = surface.hint.widthAnchor.constraint(equalTo: surface.widthAnchor, constant: -68)
+        preferredHintWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            availableSpace.topAnchor.constraint(equalTo: surface.topAnchor),
+            availableSpace.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
+            availableSpace.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
+            restingBottom,
+            welcomeAnchor.topAnchor.constraint(equalTo: availableSpace.topAnchor),
+            welcomeAnchor.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
+            welcomeAnchor.widthAnchor.constraint(equalToConstant: 0),
+            welcomeAnchor.heightAnchor.constraint(equalTo: availableSpace.heightAnchor, multiplier: 0.43),
+            surface.logo.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            surface.logo.centerYAnchor.constraint(equalTo: welcomeAnchor.bottomAnchor),
+            surface.logo.widthAnchor.constraint(equalToConstant: 52),
+            surface.logo.heightAnchor.constraint(equalToConstant: 52),
+            privateHost.view.centerXAnchor.constraint(equalTo: surface.logo.centerXAnchor),
+            privateHost.view.centerYAnchor.constraint(equalTo: surface.logo.centerYAnchor),
+            privateHost.view.widthAnchor.constraint(equalToConstant: 52),
+            privateHost.view.heightAnchor.constraint(equalToConstant: 52),
+            surface.greeting.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            surface.greeting.centerYAnchor.constraint(equalTo: surface.logo.centerYAnchor, constant: 52),
+            surface.greeting.widthAnchor.constraint(equalTo: surface.widthAnchor, constant: -36),
+            greetingHeight,
+            surface.hint.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            surface.hint.topAnchor.constraint(equalTo: surface.logo.centerYAnchor, constant: 52),
+            surface.hint.widthAnchor.constraint(lessThanOrEqualToConstant: 600),
+            preferredHintWidth, hintHeight
+        ])
+    }
+
+    private func connectComposerGeometry() {
+        guard let composer = canvasLayout?.composerView, surface.window != nil,
+              composer.window === surface.window else { return }
+        if boundComposer === composer, composerBottom?.isActive == true { return }
+        // Constraints may only cross the two hosts once they share an ancestor.
+        var ancestor = surface.superview
+        while let candidate = ancestor, !composer.isDescendant(of: candidate) {
+            ancestor = candidate.superview
+        }
+        guard ancestor != nil else { return }
+        composerBottom?.isActive = false
+        restingBottom.isActive = false
+        let constraint = availableSpace.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -8)
+        composerBottom = constraint
+        boundComposer = composer
+        constraint.isActive = true
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        connectComposerGeometry()
         let width = surface.bounds.width
         guard width > 0 else { return }
-        let available = max(0, surface.bounds.height - max(0, bottomOcclusion - systemBottomInset))
-        let anchor = CGPoint(x: width / 2, y: available * 0.43)
-        for logo in [surface.logo, privateHost.view!] {
-            logo.bounds = CGRect(x: 0, y: 0, width: 52, height: 52); logo.center = anchor
-        }
-        let greetingHeight = ceil(surface.greeting.font.lineHeight + 4)
-        surface.greeting.bounds = CGRect(x: 0, y: 0, width: max(1, width - 36), height: greetingHeight)
-        surface.greeting.center = CGPoint(x: anchor.x, y: anchor.y + 52)
+        greetingHeight.constant = ceil(surface.greeting.font.lineHeight + 4)
         let hintWidth = min(max(1, width - 68), 600)
-        let hintHeight = min(surface.hint.font.lineHeight * 2 + 2,
+        hintHeight.constant = min(surface.hint.font.lineHeight * 2 + 2,
             surface.hint.sizeThatFits(CGSize(width: hintWidth, height: .greatestFiniteMagnitude)).height)
-        surface.hint.bounds = CGRect(x: 0, y: 0, width: hintWidth, height: hintHeight)
-        surface.hint.center = CGPoint(x: anchor.x, y: anchor.y + 52 + hintHeight / 2)
     }
 
     private func applyAppearance() {

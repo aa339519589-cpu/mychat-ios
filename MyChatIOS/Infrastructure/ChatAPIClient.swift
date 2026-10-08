@@ -1,6 +1,13 @@
 import Foundation
 
+struct ChatTurnConnection {
+    let admission: ChatAdmission
+    let events: AsyncThrowingStream<ChatJobEvent, Error>?
+}
+
 protocol ChatAPIServing {
+    func openAppendTurn(_ command: ChatAppendCommand, accessToken: String) async throws -> ChatTurnConnection
+
     func generateConversationTitle(
         conversationID: UUID,
         userText: String,
@@ -38,6 +45,10 @@ protocol ChatAPIServing {
 }
 
 extension ChatAPIServing {
+    func openAppendTurn(_ command: ChatAppendCommand, accessToken: String) async throws -> ChatTurnConnection {
+        ChatTurnConnection(admission: try await enqueueAppendTurn(command, accessToken: accessToken), events: nil)
+    }
+
     func conversationGeneration(
         conversationID: UUID,
         accessToken: String
@@ -131,6 +142,62 @@ struct ChatAPIClient: ChatAPIServing {
         return result.isEmpty ? "附件对话" : result
     }
 
+    func openAppendTurn(_ command: ChatAppendCommand, accessToken: String) async throws -> ChatTurnConnection {
+        try validateBaseURL()
+        try validate(command)
+        let token = try validatedAccessToken(accessToken)
+        var request = authorizedRequest(url: baseURL.appendingPathComponent("api/chat"), accessToken: token)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20 * 60
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        request.httpBody = try JSONEncoder().encode(AppendRequestBody(command: command))
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw ChatTransportError.invalidResponse }
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--live-api-probe") {
+            NSLog("LIVE_NATIVE_HEADERS type=%@ encoding=%@ cache=%@", http.value(forHTTPHeaderField: "Content-Type") ?? "",
+                http.value(forHTTPHeaderField: "Content-Encoding") ?? "none", http.value(forHTTPHeaderField: "Cache-Control") ?? "")
+        }
+        #endif
+        if http.statusCode == 200 {
+            guard http.value(forHTTPHeaderField: "Content-Type")?.lowercased().contains("text/event-stream") == true,
+                  let rawID = http.value(forHTTPHeaderField: "X-MyChat-Job-Id"),
+                  let jobID = UUID(uuidString: rawID), jobID == command.generationID,
+                  let streamPath = http.value(forHTTPHeaderField: "X-MyChat-Stream-Url") else {
+                bytes.task.cancel()
+                throw ChatTransportError.mismatchedAdmission
+            }
+            let streamURL: URL
+            do { streamURL = try resolvedStreamURL(streamPath) }
+            catch { bytes.task.cancel(); throw error }
+            let admission = ChatAdmission(schemaVersion: 1, jobID: jobID,
+                generationID: command.generationID, userMessageID: command.userMessageID,
+                assistantMessageID: command.assistantMessageID,
+                status: http.value(forHTTPHeaderField: "X-MyChat-Job-Status") ?? "queued",
+                created: http.value(forHTTPHeaderField: "X-MyChat-Job-Created") == "1",
+                streamURL: streamURL,
+                trialRemaining: http.value(forHTTPHeaderField: "X-MyChat-Trial-Remaining").flatMap(Int.init),
+                trialLimit: http.value(forHTTPHeaderField: "X-MyChat-Trial-Limit").flatMap(Int.init))
+            return ChatTurnConnection(admission: admission,
+                events: JobEventStream(session: session, allowedOrigin: baseURL).admittedEvents(
+                    bytes: bytes, admission: admission, accessToken: token))
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < 1024 * 1024 else { bytes.task.cancel(); throw ChatTransportError.invalidResponse }
+            data.append(byte)
+        }
+        if http.statusCode == 202 {
+            return ChatTurnConnection(admission: try decodeAdmission(data, command: command), events: nil)
+        }
+        // Reuse exactly the same generation and message IDs on a lock retry.
+        if http.statusCode == 425, Self.isActiveGenerationConflict(data) {
+            return ChatTurnConnection(admission: try await enqueueAppendTurn(command, accessToken: token), events: nil)
+        }
+        throw serverError(status: http.statusCode, data: data)
+    }
+
     func enqueueAppendTurn(
         _ command: ChatAppendCommand,
         accessToken: String
@@ -172,6 +239,10 @@ struct ChatAPIClient: ChatAPIServing {
             try await Task.sleep(for: .seconds(delay))
         }
 
+        return try decodeAdmission(data, command: command)
+    }
+
+    private func decodeAdmission(_ data: Data, command: ChatAppendCommand) throws -> ChatAdmission {
         let wire: AdmissionWire
         do {
             wire = try JSONDecoder().decode(AdmissionWire.self, from: data)
@@ -510,6 +581,7 @@ struct ChatAPIClient: ChatAPIServing {
 }
 
 private struct AppendRequestBody: Encodable {
+    let healthContext: String?
     let modelId: String?
     let endpointId: String?
     let reasoningEffort: ChatReasoningEffort?
@@ -530,6 +602,7 @@ private struct AppendRequestBody: Encodable {
     let turn: AppendTurnBody
 
     init(command: ChatAppendCommand) {
+        healthContext = command.healthContext
         modelId = command.endpointID == nil
             ? command.modelID.trimmingCharacters(in: .whitespacesAndNewlines)
             : nil

@@ -49,17 +49,17 @@ struct VegaLiteArtifactView: View {
                     }
                     .chartLegend(chart.hasSeries ? .visible : .hidden)
                     .frame(minHeight: 340)
-                    .accessibilityLabel(chart.title ?? "Data chart")
+                    .accessibilityLabel(chart.title ?? "数据图表")
                 }
                 .padding(20)
             }
             } else if didFail {
             ArtifactRenderFallback(
-                title: "This Vega-Lite specification is not supported yet",
+                title: "暂不支持此 Vega-Lite 规范",
                 raw: raw
             )
             } else {
-                ProgressView("Rendering chart")
+                ProgressView("正在渲染图表")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -169,15 +169,15 @@ struct FunctionPlotArtifactView: View {
                 .chartLegend(plot.labels.count > 1 ? .visible : .hidden)
                 .frame(minHeight: 360)
                 .padding(20)
-                .accessibilityLabel("Function plot")
+                .accessibilityLabel("函数图像")
             }
             } else if didFail {
             ArtifactRenderFallback(
-                title: "This function specification is not supported yet",
+                title: "暂不支持此函数规范",
                 raw: raw
             )
             } else {
-                ProgressView("Rendering function")
+                ProgressView("正在渲染函数")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
@@ -464,16 +464,16 @@ struct MermaidArtifactView: View {
                     }
                     .frame(width: layout.size.width, height: layout.size.height)
                     .accessibilityElement(children: .contain)
-                    .accessibilityLabel("Flow diagram")
+                    .accessibilityLabel("流程图")
                 }
             }
             } else if didFail {
             ArtifactRenderFallback(
-                title: "This Mermaid diagram is not supported yet",
+                title: "暂不支持此 Mermaid 图表",
                 raw: raw
             )
             } else {
-                ProgressView("Rendering diagram")
+                ProgressView("正在渲染图表")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
