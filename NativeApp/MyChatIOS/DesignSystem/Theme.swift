@@ -24,6 +24,8 @@ enum MyChatTheme {
     static let bubbleMidtone = Color.dynamic(light: 0xFDFDFB, dark: 0x181818)
     static let bubbleShade = Color.dynamic(light: 0xFAFAF8, dark: 0x151515)
     static let controlSurface = Color.dynamic(light: 0xF0EFED, dark: 0x303030)
+    static let composerControlSurface = Color.dynamic(light: 0xF0EFED, dark: 0x353535)
+    static let composerControlBorder = Color.dynamic(light: 0xF0EFED, dark: 0x464648)
     static let composerActionSurface = Color.dynamic(light: 0x171717, dark: 0xF8F8F6)
     static let thinking = Color.dynamic(light: 0xC86F4E, dark: 0xC86F4E)
     static let sendActionSurface = thinking
@@ -74,6 +76,8 @@ enum MyChatTypography {
     static let thoughtBody = MyChatSystemFont.serif(size: thoughtBodySize, weight: .regular, relativeTo: .body)
     static let thoughtStrong = MyChatSystemFont.serif(size: thoughtBodySize, weight: .bold, relativeTo: .body)
     static let thoughtItalic = MyChatSystemFont.italic(size: thoughtBodySize, relativeTo: .body)
+    static let reasoningSummaryBodySize: CGFloat = 19
+    static let reasoningSummaryBody = MyChatSystemFont.serif(size: reasoningSummaryBodySize, weight: .regular, relativeTo: .body)
     static let thoughtPreview = MyChatSystemFont.font(size: 17, weight: .regular, relativeTo: .body)
 
     static let userMessage = MyChatSystemFont.userMessageFont(size: 17.5, weight: .regular)
@@ -106,6 +110,8 @@ enum MyChatTypography {
     static let responseHanTracking: CGFloat = -0.55
     static let responseHanLineSpacing: CGFloat = 9.8
     static let thoughtBodyLineSpacing = responseBodyLineSpacing
+    static let reasoningSummaryBodyLineSpacing: CGFloat = 8
+    static let reasoningSummaryHanLineSpacing: CGFloat = 11
     static let thoughtHanLineSpacing = responseHanLineSpacing
     static let sidebarTracking: CGFloat = 0
     static let responseH1LineSpacing: CGFloat = 3
