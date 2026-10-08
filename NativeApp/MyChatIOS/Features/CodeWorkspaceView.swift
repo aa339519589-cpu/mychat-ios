@@ -182,67 +182,6 @@ struct CodeLanding: View {
     }
 }
 
-private struct CodeSwipeBackModifier: ViewModifier {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var horizontalOffset: CGFloat = 0
-    @State private var isTracking = false
-
-    func body(content: Content) -> some View {
-        GeometryReader { proxy in
-            content
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .offset(x: horizontalOffset)
-                .shadow(
-                    color: .black.opacity(horizontalOffset > 0 ? 0.12 : 0),
-                    radius: 10,
-                    x: -4
-                )
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 10, coordinateSpace: .global)
-                        .onChanged { value in
-                            guard value.startLocation.x <= 44 else { return }
-                            let horizontal = value.translation.width
-                            let vertical = abs(value.translation.height)
-                            guard isTracking || (horizontal > 0 && horizontal > vertical * 1.15) else { return }
-                            isTracking = true
-                            horizontalOffset = min(proxy.size.width, max(0, horizontal))
-                        }
-                        .onEnded { value in
-                            guard isTracking else { return }
-                            isTracking = false
-                            let projected = max(value.translation.width, value.predictedEndTranslation.width)
-                            let completes = projected >= max(88, proxy.size.width * 0.26)
-                            if completes {
-                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                                    horizontalOffset = proxy.size.width
-                                }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0 : 0.18)) {
-                                    var transaction = Transaction()
-                                    transaction.disablesAnimations = true
-                                    withTransaction(transaction) { dismiss() }
-                                    horizontalOffset = 0
-                                }
-                            } else {
-                                withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)) {
-                                    horizontalOffset = 0
-                                }
-                            }
-                        }
-                )
-        }
-    }
-}
-
-private struct CodeSendButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .frame(width: 44, height: 44)
-            .contentShape(Rectangle())
-    }
-}
-
 private struct CodeSessionDetailView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -256,6 +195,7 @@ private struct CodeSessionDetailView: View {
     @State private var errorMessage: String?
     @State private var draft = ""
     @State private var activeAdmission: CodeAdmission?
+    @State private var isCancelling = false
     @State private var streamedResponseID: UUID?
     @State private var streamedContent = ""
     @State private var steps: [CodeAgentStep] = []
@@ -313,39 +253,9 @@ private struct CodeSessionDetailView: View {
                                 .frame(width: 44, height: 44)
                         }
                         .buttonStyle(MyChatIconButtonStyle())
+                        .accessibilityLabel("返回 Code")
+                        .accessibilityIdentifier("code.session.back")
                         Spacer()
-                        if let activeAdmission {
-                            Button {
-                                Task { await stop(activeAdmission) }
-                            } label: {
-                                Image(systemName: "stop.fill")
-                                    .font(MyChatSystemFont.appFont(size: 14, weight: .bold))
-                                    .frame(width: 44, height: 44)
-                            }
-                            .buttonStyle(MyChatIconButtonStyle())
-                            .accessibilityLabel("停止 Code 任务")
-                        }
-                        Menu {
-                            Button(role: .destructive) {
-                                Task {
-                                    do {
-                                        try await appModel.deleteCodeSession(session)
-                                        dismiss()
-                                    } catch {
-                                        errorMessage = error.localizedDescription
-                                    }
-                                }
-                            } label: {
-                                Label("删除会话", systemImage: "trash")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis")
-                                .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(MyChatIconButtonStyle())
-                        .disabled(activeAdmission != nil || isAdmitting)
-                        .accessibilityLabel("编程会话操作")
                     }
                 }
                 .padding(.horizontal, 16)
@@ -479,21 +389,37 @@ private struct CodeSessionDetailView: View {
                         .padding(.vertical, 10)
                         .accessibilityIdentifier("code.session.draft")
                     Button {
-                        Task { await send() }
+                        if let activeAdmission {
+                            Task { await stop(activeAdmission) }
+                        } else {
+                            Task { await send() }
+                        }
                     } label: {
                         ZStack {
                             Circle()
                                 .fill(MyChatTheme.brand)
                                 .frame(width: 40, height: 40)
-                            Image(systemName: "arrow.up")
-                                .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
-                                .foregroundStyle(MyChatTheme.onBrand)
+                            if isCancelling || isAdmitting || isApplying {
+                                ProgressView().tint(MyChatTheme.onBrand)
+                            } else if activeAdmission != nil {
+                                Image(systemName: "stop.fill")
+                                    .font(MyChatSystemFont.appFont(size: 15, weight: .bold))
+                                    .foregroundStyle(MyChatTheme.onBrand)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
+                                    .foregroundStyle(MyChatTheme.onBrand)
+                            }
                         }
                         .frame(width: 44, height: 44)
                     }
                     .buttonStyle(CodeSendButtonStyle())
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
+                    .disabled(isCancelling || isAdmitting || isApplying || (activeAdmission == nil && !canSend))
+                    .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
+                    .accessibilityLabel(activeAdmission != nil
+                        ? (isCancelling ? "正在停止 Code 任务" : "停止 Code 任务")
+                        : ((isAdmitting || isApplying) ? "正在处理 Code 任务" : "发送编程消息"))
+                    .accessibilityHint(activeAdmission != nil ? "取消正在运行的云端任务" : "发送 Code 任务")
                     .accessibilityIdentifier("code.session.send")
                 }
                 .padding(.horizontal, 6)
@@ -556,7 +482,7 @@ private struct CodeSessionDetailView: View {
             .presentationDragIndicator(.visible)
             .presentationBackground(MyChatTheme.canvas)
         }
-        .modifier(CodeSwipeBackModifier())
+
     }
 
     private func load() async {
@@ -818,14 +744,21 @@ private struct CodeSessionDetailView: View {
             messages[index].content = streamedContent
         }
         activeAdmission = nil
+        isCancelling = false
         await load()
         if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) { taskDetail = recovery.task }
         if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
     }
 
     private func stop(_ admission: CodeAdmission) async {
-        do { try await appModel.cancelCodeRun(admission) }
-        catch { errorMessage = error.localizedDescription }
+        guard !isCancelling, activeAdmission?.jobID == admission.jobID else { return }
+        isCancelling = true
+        do {
+            try await appModel.cancelCodeRun(admission)
+        } catch {
+            errorMessage = error.localizedDescription
+            isCancelling = false
+        }
     }
 
     private func requestPublish() async {
@@ -1460,11 +1393,17 @@ private struct CodeNewSessionView: View {
                         }
                         if let branchError { Text(branchError).font(MyChatTypography.caption).foregroundStyle(.red) }
                         if let capabilities {
-                            Label(capabilities.execution.location == "cloud" && capabilities.execution.configured
-                                ? (capabilities.execution.verified ? "云端执行已验证" : "云端执行待验收")
-                                : "云端执行不可用", systemImage: "cloud")
-                                .font(MyChatTypography.caption)
-                            if let reason = capabilities.execution.reason { Text(reason).font(MyChatTypography.caption) }
+                            let isConfigured = capabilities.execution.location == "cloud" && capabilities.execution.configured
+                            let isVerified = isConfigured && capabilities.execution.verified
+                            let statusLabel = isVerified ? "云端已验证" : (isConfigured ? "云端待验收" : "云端不可用")
+                            HStack(spacing: 7) {
+                                Circle()
+                                    .fill(isVerified ? Color.green : (isConfigured ? MyChatTheme.brand : MyChatTheme.secondaryText))
+                                    .frame(width: 6, height: 6)
+                                Text(statusLabel).font(MyChatTypography.caption)
+                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("执行状态：\(statusLabel)")
                         } else {
                             Text(capabilityError ?? "正在检查执行环境…").font(MyChatTypography.caption)
                         }
@@ -1589,7 +1528,7 @@ private struct CodeNewSessionView: View {
                 .presentationDragIndicator(.visible)
                 .presentationBackground(MyChatTheme.canvas)
         }
-        .modifier(CodeSwipeBackModifier())
+
         }
     }
 
