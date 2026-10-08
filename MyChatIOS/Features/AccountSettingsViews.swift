@@ -34,33 +34,33 @@ struct SystemPromptSettingsView: View {
                             .frame(width: 88, height: 88)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Edit profile photo")
+                    .accessibilityLabel("编辑头像")
 
                     Menu {
-                        Button("View photo library", systemImage: "photo") { photoLibraryPresented = true }
-                        Button("Take a photo", systemImage: "camera") {
+                        Button("从照片图库选择", systemImage: "photo") { photoLibraryPresented = true }
+                        Button("拍照", systemImage: "camera") {
                             guard UIImagePickerController.isSourceTypeAvailable(.camera) else { photoError = "这台设备没有可用相机"; return }
                             guard AVCaptureDevice.authorizationStatus(for: .video) != .denied,
                                   AVCaptureDevice.authorizationStatus(for: .video) != .restricted else { photoError = "请在系统设置中允许 MyChat 使用相机"; return }
                             cameraPresented = true
                         }
                     } label: {
-                        Text("Edit photo").font(MyChatTypography.caption).foregroundStyle(MyChatTheme.text)
+                        Text("编辑头像").font(MyChatTypography.caption).foregroundStyle(MyChatTheme.text)
                             .padding(.horizontal, 12).frame(height: 28)
                             .background(MyChatTheme.raised, in: Capsule())
                             .overlay { Capsule().stroke(MyChatTheme.border, lineWidth: 0.7) }
-                    }.accessibilityLabel("Edit photo")
+                    }.accessibilityLabel("编辑头像")
                 }
                 .frame(maxWidth: .infinity)
 
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(spacing: 0) {
-                        profileField("Full name", text: $fullName)
+                        profileField("姓名", text: $fullName)
                         Divider().padding(.leading, 18)
-                        profileField("Nickname", text: $nickname)
+                        profileField("昵称", text: $nickname)
                     }
                     .settingsCardStyle(cornerRadius: 22)
-                    Text("Profile details are saved on this device.")
+                    Text("已保存在此设备上。")
                         .font(MyChatTypography.metadata)
                         .foregroundStyle(MyChatTheme.secondaryText)
                         .padding(.horizontal, 18)
@@ -75,27 +75,30 @@ struct SystemPromptSettingsView: View {
                     .frame(height: 180)
                 } else {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Instructions")
+                        Text("自定义指令")
                             .font(MyChatTypography.metadata)
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .padding(.horizontal, 10)
 
-                        TextField("How you’d like MyChat to respond", text: $prompt, axis: .vertical)
+                        TextField("你希望 MyChat 如何回复", text: $prompt, axis: .vertical)
                             .font(MyChatTypography.navigation).lineLimit(1...5)
                             .padding(.horizontal, 18).padding(.vertical, 14)
                             .settingsCardStyle(cornerRadius: 22)
                             .accessibilityIdentifier("profile.instructions")
 
-                        Text("Your instructions apply to all conversations.")
-                            .font(MyChatTypography.caption).foregroundStyle(MyChatTheme.secondaryText)
-                            .padding(.horizontal, 10)
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("你的指令会应用于所有对话。")
+                                .lineLimit(1).minimumScaleFactor(0.8)
+                            Spacer(minLength: 4)
+                            Text("\(prompt.count) / 20 000").monospacedDigit().fixedSize()
+                                .foregroundStyle(prompt.count > 20_000 ? Color.red : MyChatTheme.secondaryText)
+                        }
+                        .font(MyChatSystemFont.appFont(size: 12)).foregroundStyle(MyChatTheme.secondaryText)
+                        .padding(.horizontal, 10)
 
                     }
 
                     HStack {
-                        Text("\(prompt.count.formatted()) / 20,000")
-                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                            .foregroundStyle(prompt.count > 20_000 ? Color.red : MyChatTheme.secondaryText)
                         Spacer()
                         if let savedMessage {
                             Label(savedMessage, systemImage: "checkmark.circle.fill")
@@ -109,7 +112,7 @@ struct SystemPromptSettingsView: View {
             }
             .padding(18)
         }
-        .navigationTitle("Profile")
+        .navigationTitle("个人资料")
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(MyChatTheme.text)
         .tint(MyChatTheme.accent)
@@ -155,7 +158,7 @@ struct SystemPromptSettingsView: View {
                 }
                 .disabled(loading || saving || prompt.count > 20_000)
                 .opacity(loading || prompt.count > 20_000 ? 0.4 : 1)
-                .accessibilityLabel("Save instructions")
+                .accessibilityLabel("保存自定义指令")
             }
         }
     }
@@ -342,7 +345,7 @@ struct UsageSettingsView: View {
             }
             .padding(22)
         }
-        .navigationTitle("Usage")
+        .navigationTitle("用量")
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(MyChatTheme.text)
         .tint(MyChatTheme.accent)
@@ -466,7 +469,7 @@ struct ChangePasswordSettingsView: View {
             }
             .padding(22)
         }
-        .navigationTitle("Password")
+        .navigationTitle("密码")
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(MyChatTheme.text)
         .tint(MyChatTheme.accent)
@@ -529,7 +532,7 @@ struct DataControlsSettingsView: View {
             }
             .padding(22)
         }
-        .navigationTitle("Data")
+        .navigationTitle("数据")
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(MyChatTheme.text)
         .tint(MyChatTheme.accent)
@@ -670,7 +673,7 @@ struct CustomModelsSettingsView: View {
                     }
                     SettingsErrorText(message: endpointError)
                 }
-                Text("Available models")
+                Text("可用模型")
                     .font(MyChatSystemFont.appFont(for: .headline, weight: .semibold))
 
                 if builtInModels.isEmpty {
@@ -774,6 +777,8 @@ struct MCPConnectorsSettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 17) {
+                DefaultConnectorsView(ownerID: appModel.authSession?.user.id ?? "")
+                    .id(appModel.authSession?.user.id)
                 if case .loading = appModel.connectorsPhase, appModel.connectors.isEmpty {
                     HStack { Spacer(); ProgressView(); Spacer() }
                         .frame(height: 130)
@@ -786,18 +791,7 @@ struct MCPConnectorsSettingsView: View {
                     }
                     .frame(maxWidth: .infinity, minHeight: 130)
                 } else if appModel.connectors.isEmpty {
-                    VStack(spacing: 12) {
-                        Image(systemName: "square.grid.2x2").font(MyChatSystemFont.appFont(size: 18))
-                            .frame(width: 46, height: 46).background(MyChatTheme.selected, in: Circle())
-                        Text("添加你的第一个连接器").font(MyChatTypography.navigation)
-                        Text("连接 MyChat 和你常用的应用与数据。")
-                            .font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
-                        Button { selectedEntry = nil; directoryVisible = true } label: {
-                            Label("浏览连接器", systemImage: "square.grid.2x2")
-                                .font(MyChatTypography.navigation).padding(.horizontal, 18).frame(height: 42)
-                                .overlay { Capsule().stroke(MyChatTheme.border, lineWidth: 0.7) }
-                        }.buttonStyle(.plain).accessibilityIdentifier("connectors.browse")
-                    }.frame(maxWidth: .infinity, minHeight: 600, alignment: .bottom).padding(.bottom, 50)
+                    EmptyView()
                 } else {
                     ForEach(appModel.connectors) { connector in
                         connectorCard(connector)
@@ -1032,7 +1026,9 @@ private struct MCPConnectorEditor: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .buttonStyle(MyChatIconButtonStyle())
+                        .accessibilityLabel("关闭")
                         .disabled(saving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -1314,7 +1310,9 @@ private struct CustomModelEndpointEditor: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") { dismiss() }
+                    Button { dismiss() } label: { Image(systemName: "xmark") }
+                        .buttonStyle(MyChatIconButtonStyle())
+                        .accessibilityLabel("关闭")
                 }
             }
             .foregroundStyle(MyChatTheme.text)

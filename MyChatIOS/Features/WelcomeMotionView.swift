@@ -51,10 +51,47 @@ final class WelcomeMotionSurface: UIView {
     weak var privateLogo: UIView?
 }
 
+private struct WelcomePrivacyGhost: Shape {
+    func path(in rect: CGRect) -> Path {
+        // A round crown and three soft bottom scallops, matching the reference.
+        var path = Path()
+        path.move(to: CGPoint(x: 0, y: 40))
+        path.addCurve(to: CGPoint(x: 40, y: 0),
+            control1: CGPoint(x: 0, y: 17.91), control2: CGPoint(x: 17.91, y: 0))
+        path.addCurve(to: CGPoint(x: 80, y: 40),
+            control1: CGPoint(x: 62.09, y: 0), control2: CGPoint(x: 80, y: 17.91))
+        path.addLine(to: CGPoint(x: 80, y: 75.5))
+        path.addCurve(to: CGPoint(x: 73, y: 76),
+            control1: CGPoint(x: 80, y: 81), control2: CGPoint(x: 76, y: 81))
+        path.addCurve(to: CGPoint(x: 66.67, y: 70),
+            control1: CGPoint(x: 71, y: 72), control2: CGPoint(x: 69, y: 70))
+        path.addCurve(to: CGPoint(x: 53.33, y: 80),
+            control1: CGPoint(x: 60, y: 70), control2: CGPoint(x: 60, y: 80))
+        path.addCurve(to: CGPoint(x: 40, y: 70),
+            control1: CGPoint(x: 47, y: 80), control2: CGPoint(x: 47, y: 70))
+        path.addCurve(to: CGPoint(x: 26.67, y: 80),
+            control1: CGPoint(x: 33, y: 70), control2: CGPoint(x: 33, y: 80))
+        path.addCurve(to: CGPoint(x: 13.33, y: 70),
+            control1: CGPoint(x: 20, y: 80), control2: CGPoint(x: 20, y: 70))
+        path.addCurve(to: CGPoint(x: 7, y: 76),
+            control1: CGPoint(x: 11, y: 70), control2: CGPoint(x: 9, y: 72))
+        path.addCurve(to: CGPoint(x: 0, y: 75.5),
+            control1: CGPoint(x: 4, y: 81), control2: CGPoint(x: 0, y: 81))
+        path.closeSubpath()
+        for x: CGFloat in [23.2, 56.8] {
+            path.addEllipse(in: CGRect(x: x - 5.4, y: 34.6, width: 10.8, height: 10.8))
+        }
+        return path.applying(CGAffineTransform(scaleX: rect.width / 80, y: rect.height / 80)
+            .concatenating(CGAffineTransform(translationX: rect.minX, y: rect.minY)))
+    }
+}
+
 final class WelcomeMotionController: UIViewController {
     private let surface = WelcomeMotionSurface()
     private let privateHost = UIHostingController(rootView: AnyView(
-        PrivacyChatGlyph(foreground: MyChatTheme.text, eyeColor: MyChatTheme.canvas, size: 48).frame(width: 52, height: 52)))
+        WelcomePrivacyGhost().fill(MyChatTheme.text, style: FillStyle(eoFill: true))
+            .frame(width: 34, height: 34)
+            .frame(width: 52, height: 52)))
     private var greetingText = ""
     private var privateMode = false
     private var bottomOcclusion: CGFloat = 140
@@ -67,7 +104,7 @@ final class WelcomeMotionController: UIViewController {
         super.viewDidLoad()
         surface.backgroundColor = .clear
         surface.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dismissKeyboard)))
-        if let url = Bundle.main.url(forResource: "home-logo", withExtension: "png", subdirectory: "DotMotion") {
+        if let url = Bundle.main.url(forResource: "coherent-idle", withExtension: "png", subdirectory: "DotMotion") {
             surface.logo.image = UIImage(contentsOfFile: url.path)
         }
         surface.logo.contentMode = .scaleAspectFit
@@ -128,9 +165,9 @@ final class WelcomeMotionController: UIViewController {
         surface.greeting.font = MyChatSystemFont.appSerifUIFont(size: 24, relativeTo: .title2, weight: .medium)
         surface.greeting.textColor = UIColor(MyChatTheme.text)
         surface.greeting.text = greetingText
-        surface.hint.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: UIFont.systemFont(ofSize: 13))
+        surface.hint.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: MyChatSystemFont.appUIFont(size: 13))
         surface.hint.textColor = UIColor(MyChatTheme.secondaryText)
-        let text = "Incognito chats stay out of history and memory."
+        let text = "隐私对话不会保存在历史记录或记忆中。"
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineSpacing = 2
         let attributed = NSMutableAttributedString(string: text, attributes: [.paragraphStyle: paragraph])
         surface.hint.attributedText = attributed
@@ -142,9 +179,10 @@ final class WelcomeMotionController: UIViewController {
         guard width > 0 else { return }
         let available = max(0, surface.bounds.height - max(0, bottomOcclusion - systemBottomInset))
         let anchor = CGPoint(x: width / 2, y: available * 0.43)
-        for logo in [surface.logo, privateHost.view!] {
-            logo.bounds = CGRect(x: 0, y: 0, width: 52, height: 52); logo.center = anchor
-        }
+        surface.logo.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
+        surface.logo.center = anchor
+        privateHost.view.bounds = CGRect(x: 0, y: 0, width: 52, height: 52)
+        privateHost.view.center = anchor
         let greetingHeight = ceil(surface.greeting.font.lineHeight + 4)
         surface.greeting.bounds = CGRect(x: 0, y: 0, width: max(1, width - 36), height: greetingHeight)
         surface.greeting.center = CGPoint(x: anchor.x, y: anchor.y + 52)

@@ -6,6 +6,8 @@
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>GIDClientID</key>
+	<string>$(GOOGLE_IOS_CLIENT_ID)</string>
 	<key>CFBundleDisplayName</key>
 	<string>MyChat</string>
 	<key>CFBundleExecutable</key>
@@ -30,6 +32,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>mychat</string>
+				<string>com.mychat.ios</string>
 			</array>
 		</dict>
 	</array>
@@ -45,6 +48,10 @@
 	<string>MyChat 需要写入权限以将日程事件添加到你的日历。</string>
 	<key>NSCameraUsageDescription</key>
 	<string>MyChat 使用相机拍摄并添加到当前对话。</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>连接苹果健康，将你授权的健康数据、睡眠分期、心率、运动、营养和用药记录提供给聊天中选择的 AI 模型。</string>
+	<key>NSHealthClinicalHealthRecordsShareUsageDescription</key>
+	<string>将你授权的临床健康记录提供给聊天中选择的 AI 模型。</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>MyChat 使用你的位置信息以提供基于地理位置的智能回答与建议。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

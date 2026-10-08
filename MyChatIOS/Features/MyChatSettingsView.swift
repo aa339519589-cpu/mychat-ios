@@ -19,18 +19,18 @@ struct MyChatSettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     accountTile
-                    NativeSettingsSection(title: "Account") {
-                        row("Profile", icon: "person.crop.circle", destination: .profile)
+                    NativeSettingsSection(title: "账户") {
+                        row("个人资料", icon: "person.crop.circle", destination: .profile)
                         divider
-                        row("Password", icon: "lock", destination: .password)
+                        row("密码", icon: "lock", destination: .password)
                         divider
-                        row("Privacy", icon: "lock.shield", destination: .privacy)
+                        row("隐私", icon: "lock.shield", destination: .privacy)
                     }
-                    NativeSettingsSection(title: "App") {
-                        row("Capabilities", icon: "slider.horizontal.3", destination: .capabilities)
+                    NativeSettingsSection(title: "应用") {
+                        row("功能", icon: "slider.vertical.3", destination: .capabilities)
                         if appModel.authSession != nil {
                             divider
-                            row("Connectors", icon: "square.grid.2x2", destination: .connectors)
+                            row("连接器", icon: "square.on.square", destination: .connectors)
                         }
                     }
                     if appModel.authSession != nil {
@@ -40,31 +40,31 @@ struct MyChatSettingsView: View {
                         } label: {
                             HStack(spacing: 16) {
                                 Image(systemName: "rectangle.portrait.and.arrow.right").frame(width: 20)
-                                if signingOut { ProgressView() } else { Text("Sign out") }
+                                if signingOut { ProgressView() } else { Text("退出登录") }
                                 Spacer()
                             }.font(MyChatTypography.navigation).foregroundStyle(.red)
                                 .padding(.horizontal, 22).frame(height: 52).contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(signingOut)
-                            .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+                            .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 24))
                     }
                 }.padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 32)
             }
             .scrollIndicators(.hidden).background(MyChatTheme.canvas)
-            .navigationTitle("Settings").navigationBarTitleDisplayMode(.inline)
+            .navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button(action: close) { Image(systemName: "xmark").font(MyChatSystemFont.appFont(size: 16)) }
-                        .accessibilityLabel("Close settings")
+                    Button(action: close) { Image(systemName: "xmark").font(.system(size: 20, weight: .light)) }
+                        .accessibilityLabel("关闭设置")
                 }
                 ToolbarItem(placement: .principal) {
-                    Text("Settings").font(MyChatSystemFont.appFont(size: 17, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                    Text("设置").font(MyChatSystemFont.appFont(size: 17, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Text("MyChat v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"))")
-                        NavigationLink("Licenses", value: Destination.licenses)
-                    } label: { Image(systemName: "info").font(MyChatSystemFont.appFont(size: 16)) }
-                    .accessibilityLabel("About MyChat")
+                        NavigationLink("开源许可", value: Destination.licenses)
+                    } label: { Image(systemName: "info").font(.system(size: 20, weight: .regular)) }
+                    .accessibilityLabel("关于 MyChat")
                 }
             }
             .navigationDestination(for: Destination.self) { destination in
@@ -76,7 +76,7 @@ struct MyChatSettingsView: View {
                 case .connectors: MCPConnectorsSettingsView()
                 case .licenses: ScrollView {
                     Text(licenseText).font(MyChatTypography.caption).frame(maxWidth: .infinity, alignment: .leading).padding(20)
-                }.navigationTitle("Licenses").background(MyChatTheme.canvas)
+                }.navigationTitle("开源许可").background(MyChatTheme.canvas)
                 }
             }
         }
@@ -89,23 +89,22 @@ struct MyChatSettingsView: View {
         }
     }
     private var accountTile: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Group {
                 if let avatar { Image(uiImage: avatar).resizable().scaledToFill() }
-                else { Text(String((appModel.authSession?.user.email ?? "M").first ?? "M").uppercased())
-                    .font(MyChatSystemFont.appFont(size: 19, weight: .medium)) }
+                else { DotThinkingView(isGenerating: false) }
             }.frame(width: 40, height: 40)
                 .background(MyChatTheme.settingsAvatar).clipShape(Circle())
             VStack(alignment: .leading, spacing: 3) {
-                Text(appModel.authSession?.user.email ?? "Guest").font(MyChatTypography.navigation).lineLimit(1)
-                Label("Personal", systemImage: "person").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
+                Text(appModel.authSession?.user.email ?? "访客").font(MyChatTypography.navigation).lineLimit(1)
+                Label("个人账户", systemImage: "person").font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
             }
             Spacer(minLength: 0)
         }.padding(.horizontal, 20).frame(height: 72)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+            .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 24))
     }
-    private var divider: some View { Divider().padding(.leading, 58).padding(.trailing, 20) }
+    private var divider: some View { Divider().padding(.leading, 60).padding(.trailing, 20) }
     private func row(_ title: String, icon: String, destination: Destination) -> some View {
         Button { path.append(destination) } label: { NativeSettingsRow(title: title, icon: icon) }.buttonStyle(.plain)
     }
@@ -123,7 +122,7 @@ struct NativeSettingsSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(MyChatSystemFont.appFont(size: 15)).foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 20)
-            VStack(spacing: 0) { content }.background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22))
+            VStack(spacing: 0) { content }.background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 24))
         }
     }
 }
@@ -133,12 +132,13 @@ struct NativeSettingsRow: View {
     var detail: String? = nil
     var body: some View {
         HStack(spacing: 16) {
-            if !icon.isEmpty { Image(systemName: icon).font(MyChatSystemFont.appFont(size: 17)).frame(width: 20).foregroundStyle(MyChatTheme.secondaryText) }
+            if icon == "archivebox" { MyChatProjectIcon(size: 22).frame(width: 24).foregroundStyle(MyChatTheme.secondaryText) }
+            else if !icon.isEmpty { Image(systemName: icon).font(.system(size: 20, weight: .regular)).frame(width: 24).foregroundStyle(MyChatTheme.secondaryText) }
             Text(title).font(MyChatTypography.navigation)
             Spacer()
             if let detail { Text(detail).font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText) }
-            Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 13)).foregroundStyle(MyChatTheme.secondaryText)
-        }.padding(.horizontal, 22).frame(height: 52).contentShape(Rectangle())
+            Image(systemName: "chevron.right").font(.system(size: 15, weight: .light)).foregroundStyle(MyChatTheme.secondaryText)
+        }.padding(.horizontal, 20).frame(height: 52).contentShape(Rectangle())
     }
 }
 @MainActor private final class SettingsAccountUpdates: @preconcurrency ObservableObject {

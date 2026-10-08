@@ -19,6 +19,16 @@ struct AuthSession: Codable, Equatable, Sendable {
     }
 }
 
+enum ChatAuthenticationPolicy {
+    // Admission normally completes in a few seconds. Keep a small clock/network
+    // margin; an already expired or nearly expired token still refreshes first.
+    static let admissionSafetyMargin: TimeInterval = 8
+
+    static func canAdmitImmediately(_ session: AuthSession, now: Date = Date()) -> Bool {
+        !session.expires(within: admissionSafetyMargin, now: now)
+    }
+}
+
 enum AuthenticationResult: Equatable, Sendable {
     case authenticated(AuthSession)
     case emailConfirmationRequired(AuthUser?)

@@ -15,6 +15,10 @@ struct MyChatIOSApp: App {
     }
 
     #if DEBUG
+    private static var runsLiveAPIProbe: Bool {
+        ProcessInfo.processInfo.environment["MYCHAT_LIVE_NETWORK_PROBE"] != nil
+            || ProcessInfo.processInfo.arguments.contains("--live-api-probe")
+    }
     private static var runtimeTestColorScheme: ColorScheme? {
         let arguments = ProcessInfo.processInfo.arguments
         guard arguments.contains("--ui-test-mode"),
@@ -32,10 +36,36 @@ struct MyChatIOSApp: App {
                 .preferredColorScheme(Self.runtimeTestColorScheme)
                 #endif
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { Task { await appModel.resumeAuthentication() } }
+                    #if DEBUG
+                    guard !Self.runsLiveAPIProbe else { return }
+                    #endif
+                    if phase == .active { Task {
+                        await BackendReadinessPrewarmer.shared.start()
+                        await appModel.resumeAuthentication()
+                        if let owner = appModel.authSession?.user.id { _ = await HealthConnector.modelContext(ownerID: owner, refresh: true) }
+                    } }
                 }
                 .task {
+                    #if DEBUG
+                    // API probes own authentication; host startup must not rotate
+                    // the same stored refresh token concurrently with the test.
+                    if Self.runsLiveAPIProbe {
+                        if ProcessInfo.processInfo.environment["MYCHAT_LIVE_NETWORK_PROBE"] == "standalone"
+                            || ProcessInfo.processInfo.arguments.contains("--live-api-probe") {
+                            let probe = Task { await NativeLiveChatProbe.run(appModel: appModel) }
+                            let limit = Task {
+                                try? await Task.sleep(for: .seconds(150))
+                                if !Task.isCancelled { probe.cancel() }
+                            }
+                            await probe.value
+                            limit.cancel()
+                        }
+                        return
+                    }
+                    #endif
+                    await BackendReadinessPrewarmer.shared.start()
                     await appModel.restoreAuthenticationIfNeeded()
+                    if let owner = appModel.authSession?.user.id { Task { _ = await HealthConnector.modelContext(ownerID: owner) } }
                     await appModel.loadModelsIfNeeded()
                     await openFixtureConversationIfNeeded()
                 }

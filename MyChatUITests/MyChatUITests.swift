@@ -9,6 +9,81 @@ final class MyChatUITests: XCTestCase {
         return app
     }
 
+    @MainActor func testShortGentleSwipesOpenAndCloseDrawerFromAnywhere() {
+        let app = launch(extra: ["--drawer-motion-audit"])
+        let account = app.buttons["sidebar.accountSettings"]
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let y = app.frame.height * 0.48
+        // Dismiss startup keyboard and establish a closed drawer first.
+        app.buttons["header.sidebar"].tap()
+        XCTAssertTrue(account.waitForExistence(timeout: 5))
+        origin.withOffset(CGVector(dx: app.frame.width - 24, dy: y)).tap()
+        XCTAssertFalse(account.isHittable)
+
+        for fraction in [0.15, 0.5, 0.85] {
+            let x = app.frame.width * fraction
+            let opening = origin.withOffset(CGVector(dx: x, dy: y))
+            opening.press(forDuration: 0.03,
+                thenDragTo: origin.withOffset(CGVector(dx: x + 40, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0.08)
+            expectation(for: NSPredicate(format: "exists == true AND hittable == true"), evaluatedWith: account)
+            waitForExpectations(timeout: 5)
+
+            let closing = origin.withOffset(CGVector(dx: app.frame.width - 24, dy: y))
+            closing.press(forDuration: 0.03,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.width - 64, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0.08)
+            expectation(for: NSPredicate(format: "hittable == false"), evaluatedWith: account)
+            waitForExpectations(timeout: 5)
+            XCTAssertTrue(app.buttons["header.sidebar"].isHittable)
+        }
+        saveScreenshot(app, "short-gentle-swipe-closed")
+    }
+
+    @MainActor func testProjectPickerRemovesNoneAndShowsReferenceEmptyState() {
+        let app = launch(extra: ["--ui-test-no-projects"])
+        app.buttons["plus"].tap()
+        let projects = app.buttons["tools.projects.row"]
+        XCTAssertTrue(projects.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["无"].exists)
+        projects.tap()
+        XCTAssertTrue(app.staticTexts["暂无项目"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["tools.projects.search"].exists)
+        XCTAssertTrue(app.buttons["tools.projects.create"].isHittable)
+        XCTAssertFalse(app.buttons["无"].exists)
+        saveScreenshot(app, "projects-empty-reference")
+        app.buttons["tools.projects.create"].tap()
+        XCTAssertTrue(app.textFields["项目名称"].waitForExistence(timeout: 5))
+        app.buttons["关闭"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["暂无项目"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor func testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer() {
+        let app = launch()
+        let account = app.buttons["sidebar.accountSettings"]
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        app.buttons["header.sidebar"].tap()
+        origin.withOffset(CGVector(dx: app.frame.width - 24, dy: app.frame.height * 0.48)).tap()
+        XCTAssertFalse(account.isHittable)
+        for dx in [-22.0, 22.0] {
+            let start = origin.withOffset(CGVector(dx: app.frame.width * 0.5, dy: app.frame.height * 0.55))
+            start.press(forDuration: 0.03,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.width * 0.5 + dx, dy: app.frame.height * 0.55 - 110)),
+                withVelocity: .slow, thenHoldForDuration: 0.08)
+            XCTAssertFalse(account.isHittable, "Vertical intent must remain page scrolling")
+            XCTAssertTrue(app.buttons["header.sidebar"].isHittable)
+        }
+    }
+
+    @MainActor func testDefaultConnectorsContainsAppleButNoGmail() {
+        let app = launch()
+        app.buttons["plus"].tap()
+        app.buttons["连接器"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["connectors.default.health"].waitForExistence(timeout: 8))
+        XCTAssertFalse(app.buttons["connectors.default.gmail"].exists)
+        XCTAssertFalse(app.staticTexts["Gmail"].exists)
+    }
+
     /// Reproduces transcript/composer geometry: the newest row must clear the
     /// floating composer at rest, and the transcript must still reach its true
     /// bottom with the keyboard up.
@@ -336,22 +411,22 @@ final class MyChatUITests: XCTestCase {
     @MainActor func testClaudeModelNamesAndNativeEffortNavigation() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--ui-test-claude-models"])
         app.buttons["选择模型"].firstMatch.tap()
-        for name in ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 4.5"] {
+        for name in ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"] {
             XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
         }
         XCTAssertFalse(app.staticTexts["Claude Fable 5"].exists)
         saveScreenshot(app, "claude-model-main-dark")
         app.buttons["model.effort"].tap()
         XCTAssertTrue(app.buttons["effort.xhigh"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["effort.xhigh"].label.contains("Extra"))
+        XCTAssertTrue(app.buttons["effort.xhigh"].isHittable)
         app.buttons["effort.low"].tap()
         saveScreenshot(app, "claude-effort-dark")
-        app.buttons["Back"].firstMatch.tap()
+        app.buttons["返回"].firstMatch.tap()
         XCTAssertTrue(app.buttons["model.effort"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Low"].exists)
+        XCTAssertTrue(app.buttons["model.effort"].label.contains("低"))
         app.buttons["model.more"].tap()
-        XCTAssertTrue(app.staticTexts["More models"].waitForExistence(timeout: 5))
-        app.buttons["Back"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["更多模型"].waitForExistence(timeout: 5))
+        app.buttons["返回"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Sonnet 5.5"].exists)
     }
 
