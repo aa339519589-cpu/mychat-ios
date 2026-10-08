@@ -47,6 +47,23 @@ import CoreText
             "Checking version 1.2 and example.com")
     }
 
+    func testArtifactDocumentCountsPreserveNativeRenderingDecision() {
+        let html = "<artifact><html><head><title>Preview</title></head><body>" +
+            String(repeating: "<!-- Large immutable preview source -->", count: 4096) +
+            "<h1>Example</h1></body></html></artifact>"
+        let document = "<document>title: Note\nfilename: note.md\n\n# Note\nBody.</document>"
+        let svg = "<artifact><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\"><circle cx=\"10\" cy=\"10\" r=\"5\"/></svg></artifact>"
+        let diagram = "<mermaid>graph TD; A-->B;</mermaid>"
+        let sources = [html, document, svg, diagram, html + document, html + svg, document + diagram, ""]
+        for source in sources {
+            let blocks = ChatArtifactParser.parse(source).blocks.filter(\.isComplete)
+            let documents = ChatDocument.documents(in: source, namespace: "render-decision")
+            XCTAssertEqual(documents.count < blocks.count,
+                blocks.contains(where: { ChatDocument.from($0) == nil }),
+                "Cached counts must choose the same native renderer without reparsing HTML during a swipe")
+        }
+    }
+
     func testHapticSemanticsRespectPreferenceAndReducedMotion() {
         let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
         for event in events {

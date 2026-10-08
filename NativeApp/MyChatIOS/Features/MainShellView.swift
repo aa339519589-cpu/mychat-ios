@@ -2713,7 +2713,7 @@ private struct ArtifactLibraryDetail: View {
                         ConversationFilesSheet(documents: documents, showsHeader: false)
                     } else if let document = documents.first, document.isMarkdown {
                         DocumentTextContent(document: document)
-                    } else if blocks.contains(where: { ChatDocument.from($0) == nil }) {
+                    } else if documents.count < blocks.count {
                         ScrollView {
                             VStack(spacing: 18) {
                                 ForEach(blocks) { block in
