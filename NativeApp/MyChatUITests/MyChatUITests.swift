@@ -843,22 +843,28 @@ final class MyChatUITests: XCTestCase {
     }
 
     @MainActor func testComposerButtonsAcceptSmallHorizontalTouchDrift() {
-        let app = launch()
+        let app = launch(extra: ["--ui-test-open-conversation"])
         let add = app.buttons["添加内容和工具"].firstMatch
         let model = app.buttons["选择模型"].firstMatch
-        XCTAssertTrue(waitForHittable(add, timeout: 10))
+        XCTAssertTrue(add.waitForExistence(timeout: 10))
+        XCTAssertTrue(model.waitForExistence(timeout: 10))
+        waitForKeyboardDismissal(in: app)
+        XCTAssertTrue(waitForHittable(add, timeout: 10),
+            "The add button must be hittable in the settled existing conversation")
         XCTAssertTrue(waitForHittable(model, timeout: 5))
 
         for (button, title) in [(add, "添加到聊天"), (model, "选择模型")] {
-            XCTAssertTrue(waitForHittable(button, timeout: 5))
+            XCTAssertTrue(waitForHittable(button, timeout: 5),
+                "Button hit-test must be stable before the short-drift gesture; frame=\\(button.frame), keyboard=\\(app.keyboards.firstMatch.frame)")
             let origin = app.coordinate(withNormalizedOffset: .zero)
             let frame = button.frame
-            origin.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).press(forDuration: 0.02,
+            origin.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).press(forDuration: 0.08,
                 thenDragTo: origin.withOffset(CGVector(dx: frame.midX + 15, dy: frame.midY)),
                 withVelocity: .slow, thenHoldForDuration: 0.01)
             XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 8),
-                "A short 15 pt horizontal finger drift must not cancel the \(title) button tap")
+                "A short 15 pt horizontal finger drift must not cancel the \\(title) button tap")
             app.buttons["关闭"].firstMatch.tap()
+            waitForKeyboardDismissal(in: app)
             XCTAssertTrue(waitForHittable(button, timeout: 8))
         }
     }
