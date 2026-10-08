@@ -15,7 +15,7 @@ permissions:
 jobs:
   build102:
     name: Build 102 NativeApp
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
