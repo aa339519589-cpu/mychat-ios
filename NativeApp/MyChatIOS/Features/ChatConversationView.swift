@@ -3851,6 +3851,45 @@ struct MarkdownBody: View {
         case thought
         case user
 
+        var diagnosticUIFontSamples: [UIFont] {
+            let bodySize: CGFloat
+            let baseFonts: [UIFont]
+            switch self {
+            case .response:
+                bodySize = MyChatTypography.responseBodySize
+                baseFonts = [
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .bold, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true, italic: true), relativeTo: .body),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .semibold))
+                ]
+            case .thought:
+                bodySize = MyChatTypography.thoughtBodySize
+                baseFonts = [
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .bold, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true, italic: true), relativeTo: .body),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .semibold))
+                ]
+            case .user:
+                bodySize = 17.5
+                baseFonts = [MyChatSystemFont.scaledUIFont(
+                    MyChatSystemFont.appUIFont(size: bodySize, weight: .regular), relativeTo: .body)]
+            }
+            let han = [
+                UIFontMetrics(forTextStyle: .body).scaledFont(for: MyChatSystemFont.hanUIFont(size: bodySize, strong: false)),
+                UIFontMetrics(forTextStyle: .body).scaledFont(for: MyChatSystemFont.hanUIFont(size: bodySize, strong: true))
+            ]
+            let samples = baseFonts + han
+            let cascades = samples.flatMap { font -> [UIFont] in
+                (font.fontDescriptor.fontAttributes[.cascadeList] as? [UIFontDescriptor] ?? [])
+                    .map { UIFont(descriptor: $0, size: font.pointSize) }
+            }
+            return samples + cascades
+        }
+
         var font: Font {
             switch self {
             case .response: return MyChatTypography.responseBody
@@ -3970,7 +4009,8 @@ struct MarkdownBody: View {
                 .background {
                     if ResponseFontRuntimeDiagnostics.enabled {
                         ResponseFontRuntimeProbe(baseFont: typography.font,
-                            runFonts: text.runs.compactMap { $0.font })
+                            runFonts: text.runs.compactMap { $0.font },
+                            nativeFonts: typography.diagnosticUIFontSamples)
                     }
                 }
         }
@@ -4244,17 +4284,26 @@ private struct MessageBodyTextSelectionPolicy: ViewModifier {
 }
 
 private struct ResponseFontRuntimeProbe: View {
+#if compiler(>=6.2)
     @Environment(\.fontResolutionContext) private var context
+#endif
     @Environment(\.colorScheme) private var colorScheme
     let baseFont: Font
     let runFonts: [Font]
+    let nativeFonts: [UIFont]
 
     var body: some View {
         Color.clear.allowsHitTesting(false).task {
+#if compiler(>=6.2)
             if #available(iOS 26.0, *) {
                 ResponseFontRuntimeDiagnostics.record(fonts: [baseFont] + runFonts,
                     context: context, dark: colorScheme == .dark)
+                return
             }
+#endif
+            // Older SDKs cannot expose SwiftUI's Font.Context. Preserve the opt-in
+            // check by recording the exact native UIFont inputs plus their cascades.
+            ResponseFontRuntimeDiagnostics.record(nativeFonts: nativeFonts, dark: colorScheme == .dark)
         }
     }
 }
@@ -4263,6 +4312,7 @@ private enum ResponseFontRuntimeDiagnostics {
     static let enabled = ProcessInfo.processInfo.arguments.contains("--verify-reference-fonts")
     @MainActor private static var entries: [String: [String: Any]] = [:]
 
+#if compiler(>=6.2)
     @available(iOS 26.0, *) @MainActor
     static func record(fonts: [Font], context: Font.Context, dark: Bool) {
         for font in fonts {
@@ -4276,6 +4326,27 @@ private enum ResponseFontRuntimeDiagnostics {
             entries[key] = ["name": name, "size": resolved.pointSize, "axes": axes,
                             "dark": dark, "bold": resolved.isBold]
         }
+        save()
+    }
+#endif
+
+    @MainActor
+    static func record(nativeFonts: [UIFont], dark: Bool) {
+        for font in nativeFonts {
+            let native = font as CTFont
+            let axes = Dictionary(uniqueKeysWithValues:
+                ((CTFontCopyVariation(native) as? [NSNumber: NSNumber]) ?? [:])
+                    .map { (String($0.key.uint32Value), $0.value.doubleValue) })
+            let name = CTFontCopyPostScriptName(native) as String
+            let key = "\(name):\(font.pointSize):\(dark)"
+            entries[key] = ["name": name, "size": font.pointSize, "axes": axes,
+                            "dark": dark,
+                            "bold": font.fontDescriptor.symbolicTraits.contains(.traitBold)]
+        }
+        save()
+    }
+
+    @MainActor private static func save() {
         guard let data = try? JSONSerialization.data(withJSONObject: Array(entries.values),
                                                      options: [.prettyPrinted, .sortedKeys]) else { return }
         let file = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
