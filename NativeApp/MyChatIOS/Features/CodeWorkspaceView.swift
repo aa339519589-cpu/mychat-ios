@@ -395,7 +395,7 @@ private struct CodeSessionDetailView: View {
                             Circle()
                                 .fill(MyChatTheme.brand)
                                 .frame(width: 40, height: 40)
-                            if isCancelling || isAdmitting || isApplying {
+                            if isCancelling || (activeAdmission == nil && (isAdmitting || isApplying)) {
                                 ProgressView().tint(MyChatTheme.onBrand)
                             } else if activeAdmission != nil {
                                 Image(systemName: "stop.fill")
@@ -410,7 +410,7 @@ private struct CodeSessionDetailView: View {
                         .frame(width: 44, height: 44)
                     }
                     .buttonStyle(CodeSendButtonStyle())
-                    .disabled(isCancelling || isAdmitting || isApplying || (activeAdmission == nil && !canSend))
+                    .disabled(isCancelling || (activeAdmission == nil && (isAdmitting || isApplying || !canSend)))
                     .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
                     .accessibilityLabel(activeAdmission != nil
                         ? (isCancelling ? "正在停止 Code 任务" : "停止 Code 任务")
@@ -1303,11 +1303,15 @@ private struct CodeTasksSheet: View {
 private struct CodeNewSessionView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var githubAuthenticator = GitHubWebAuthenticator()
     @FocusState private var composerFocused: Bool
     @State private var draft = ""
     @State private var repositoryPickerVisible = false
     @State private var modelPickerVisible = false
     @State private var selectedRepository: GitHubRepositoryRecord?
+    @State private var githubConnection: GitHubConnectionStatus?
+    @State private var isCheckingGitHub = true
+    @State private var isConnectingGitHub = false
     @State private var createNewRepository = false
     @State private var isStarting = false
     @State private var pendingPrompt: String?
@@ -1345,6 +1349,7 @@ private struct CodeNewSessionView: View {
                         }
                         .buttonStyle(MyChatIconButtonStyle())
                         .accessibilityLabel("返回 Code")
+                        .accessibilityIdentifier("code.new.back")
                         Spacer()
                     }
                 }
@@ -1400,6 +1405,7 @@ private struct CodeNewSessionView: View {
                             }
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("执行状态：\(statusLabel)")
+                            .accessibilityIdentifier("code.execution-status")
                         } else {
                             Text(capabilityError ?? "正在检查执行环境…").font(MyChatTypography.caption)
                         }
@@ -1415,16 +1421,27 @@ private struct CodeNewSessionView: View {
 
                     HStack(spacing: 10) {
                         Button {
-                            repositoryPickerVisible = true
+                            if githubConnection?.connected == true {
+                                repositoryPickerVisible = true
+                            } else {
+                                Task { await connectGitHub() }
+                            }
                         } label: {
-                            Text(repositoryLabel)
-                                .font(MyChatTypography.metadata)
-                                .lineLimit(1)
-                                .padding(.horizontal, 13)
-                                .frame(minHeight: 44)
-                                .background(MyChatTheme.selected, in: Capsule())
+                            HStack(spacing: 7) {
+                                if isConnectingGitHub || isCheckingGitHub {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text(repositoryLabel)
+                                    .font(MyChatTypography.metadata)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 13)
+                            .frame(minHeight: 44)
+                            .background(MyChatTheme.selected, in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        .disabled(isCheckingGitHub || isConnectingGitHub)
+                        .accessibilityIdentifier("code.repository-selector")
 
                         Button {
                             modelPickerVisible = true
@@ -1530,7 +1547,8 @@ private struct CodeNewSessionView: View {
 
     private var repositoryLabel: String {
         if createNewRepository { return "新仓库" }
-        return selectedRepository?.fullName ?? "选择仓库"
+        if let selectedRepository { return selectedRepository.fullName }
+        return githubConnection?.connected == true ? "选择仓库" : "连接 GitHub"
     }
 
     private var canStart: Bool {
@@ -1548,13 +1566,62 @@ private struct CodeNewSessionView: View {
     private func restoreDraft() async {
         let value = CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: "new")
         draft = value.prompt; branch = value.branch
+
+        isCheckingGitHub = true
         do {
-            capabilities = try await appModel.codeCapabilities()
-            if let repo = value.repository {
+            githubConnection = try await appModel.githubConnectionStatus()
+        } catch {
+            githubConnection = nil
+            if value.repository != nil { errorMessage = error.localizedDescription }
+        }
+        isCheckingGitHub = false
+
+        do { capabilities = try await appModel.codeCapabilities() }
+        catch { capabilityError = error.localizedDescription }
+
+        if let repo = value.repository, githubConnection?.connected == true {
+            do {
                 selectedRepository = try await appModel.githubRepositories().first { $0.fullName == repo }
-                if selectedRepository == nil { errorMessage = "草稿仓库尚未授权，请重新选择" }
+                if selectedRepository == nil { errorMessage = "已选仓库不可用，请重新选择" }
+            } catch { errorMessage = error.localizedDescription }
+        } else if value.repository != nil {
+            errorMessage = "GitHub 未连接，请重新选择仓库"
+        }
+    }
+
+    private func connectGitHub() async {
+        guard !isConnectingGitHub, !isCheckingGitHub else { return }
+        isConnectingGitHub = true
+        errorMessage = nil
+        defer { isConnectingGitHub = false }
+
+        do {
+            let authorizationURL = try await appModel.githubAuthorizationURL()
+            let callbackURL = try await githubAuthenticator.authenticate(using: authorizationURL)
+            try GitHubMobileOAuthCallback.validateConnectedCallback(callbackURL)
+
+            let status = try await appModel.githubConnectionStatus()
+            guard status.connected else { throw GitHubWebAuthenticationError.connectionFailed }
+            githubConnection = status
+
+            let savedRepository = selectedRepository?.fullName
+                ?? CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: "new").repository
+            if let savedRepository {
+                let repositories = try await appModel.githubRepositories()
+                if let match = repositories.first(where: { $0.fullName == savedRepository }) {
+                    selectedRepository = match
+                    createNewRepository = false
+                    return
+                }
+                errorMessage = "已选仓库不可用，请重新选择"
             }
-        } catch { capabilityError = error.localizedDescription }
+            repositoryPickerVisible = true
+        } catch let error as ASWebAuthenticationSessionError
+            where error.code == .canceledLogin {
+            // OAuth cancellation does not create a repository or workspace.
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func startSession() async {
@@ -1644,20 +1711,16 @@ private struct CodeRepositoryPickerView: View {
             .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
             .padding(.horizontal, 18)
 
-            Button {
-                select(nil)
-            } label: {
+            if connection?.connected == true {
+                Button {
+                    select(nil)
+                } label: {
                 HStack(spacing: 13) {
                     Image(systemName: "folder.badge.plus")
                         .frame(width: 38, height: 38)
                         .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 11))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("创建新仓库")
-                            .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
-                        Text("MyChat 编程会先准备文件")
-                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                            .foregroundStyle(MyChatTheme.secondaryText)
-                    }
+                    Text("创建新仓库")
+                        .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
@@ -1669,6 +1732,7 @@ private struct CodeRepositoryPickerView: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 18)
             .padding(.top, 14)
+            }
 
             if isLoading {
                 ProgressView()
@@ -1679,10 +1743,12 @@ private struct CodeRepositoryPickerView: View {
                         .font(MyChatSystemFont.appFont(size: 24, weight: .medium))
                     Text("GitHub 尚未连接")
                         .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                    Text(PresentationText.plain(errorMessage ?? "请先在 MyChat 网页版连接 GitHub，然后刷新此页面。"))
-                        .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
-                        .foregroundStyle(MyChatTheme.secondaryText)
-                        .multilineTextAlignment(.center)
+                    if let errorMessage {
+                        Text(PresentationText.plain(errorMessage))
+                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                            .foregroundStyle(MyChatTheme.secondaryText)
+                            .multilineTextAlignment(.center)
+                    }
                     Button {
                         Task { await connectGitHub() }
                     } label: {
@@ -1696,8 +1762,7 @@ private struct CodeRepositoryPickerView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isConnecting)
-                    Button("刷新") { Task { await load() } }
-                        .buttonStyle(.bordered)
+                    .accessibilityIdentifier("code.github.connect")
                 }
                 .padding(28)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1738,6 +1803,7 @@ private struct CodeRepositoryPickerView: View {
                                 .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("code.github.repository.\(repository.fullName)")
                         }
                     }
                     .padding(.horizontal, 18)
@@ -1783,7 +1849,7 @@ private struct CodeRepositoryPickerView: View {
         do {
             let authorizationURL = try await appModel.githubAuthorizationURL()
             let callbackURL = try await authenticator.authenticate(using: authorizationURL)
-            try GitHubWebAuthenticator.validateConnectedCallback(callbackURL)
+            try GitHubMobileOAuthCallback.validateConnectedCallback(callbackURL)
             await load()
         } catch let error as ASWebAuthenticationSessionError
             where error.code == .canceledLogin {
@@ -1841,6 +1907,9 @@ private final class GitHubWebAuthenticator: NSObject, ObservableObject,
         return UIWindow(frame: .zero)
     }
 
+}
+
+enum GitHubMobileOAuthCallback {
     static func validateConnectedCallback(_ url: URL) throws {
         guard url.scheme?.lowercased() == "mychat",
               url.host?.lowercased() == "oauth",
@@ -1849,11 +1918,11 @@ private final class GitHubWebAuthenticator: NSObject, ObservableObject,
               url.password == nil,
               url.fragment == nil,
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              items.filter({ $0.name == "status" }).count == 1,
-              !items.contains(where: { $0.name.localizedCaseInsensitiveContains("token") }) else {
+              items.count == 1,
+              items[0].name == "status" else {
             throw GitHubWebAuthenticationError.invalidCallback
         }
-        guard items.first(where: { $0.name == "status" })?.value == "connected" else {
+        guard items[0].value == "connected" else {
             throw GitHubWebAuthenticationError.connectionFailed
         }
     }
@@ -1960,3 +2029,4 @@ private struct CodeReceiptView: View {
         .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
+
