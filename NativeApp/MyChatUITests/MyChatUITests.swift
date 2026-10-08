@@ -209,6 +209,43 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["暂无项目"].waitForExistence(timeout: 5))
     }
 
+    @MainActor func testVerticalChatScrollMovesContentWithoutOpeningDrawer() {
+        let app = launch(extra: ["--ui-test-long-chat"])
+        app.buttons["header.sidebar"].tap()
+        let conversation = app.buttons["隔离测试对话"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        conversation.tap()
+        let tail = app.descendants(matching: .any)
+            .matching(identifier: "message.row.50000000-0000-4000-8000-0000000003E8").firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+
+        let rows = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.row."))
+            .allElementsBoundByIndex
+        guard let anchor = rows.first(where: {
+            $0.isHittable && $0.frame.minY > 180 && $0.frame.maxY < app.frame.height - 150
+        }) else {
+            XCTFail("Expected a visible conversation row before vertical scrolling")
+            return
+        }
+        let before = anchor.frame.minY
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let x = app.frame.midX
+        origin.withOffset(CGVector(dx: x, dy: app.frame.height * 0.58)).press(forDuration: 0.03,
+            thenDragTo: origin.withOffset(CGVector(dx: x, dy: app.frame.height * 0.34)),
+            withVelocity: .slow, thenHoldForDuration: 0.08)
+
+        let transcriptMoved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !anchor.isHittable || abs(anchor.frame.minY - before) > 40
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [transcriptMoved], timeout: 5), .completed,
+            "A vertical-intent gesture must still scroll the transcript")
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable,
+            "Vertical transcript scrolling must not reveal the drawer")
+        XCTAssertTrue(app.buttons["header.sidebar"].isHittable)
+    }
+
     @MainActor func testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer() {
         let app = launch()
         let account = app.buttons["sidebar.accountSettings"]
