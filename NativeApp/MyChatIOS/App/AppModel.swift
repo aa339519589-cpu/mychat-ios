@@ -116,6 +116,7 @@ final class AppModel: ObservableObject {
     private var automaticallyPreviewedMessages: Set<UUID> = []
     @Published var selectedModelID: String?
     @Published var selectedDestination: AppDestination = .chats
+    @Published var pendingCodeLink: URL?
     @Published var draft = ""
     @Published var webSearchEnabled = UserDefaults.standard.object(forKey: "mychat.web-search-enabled.v1") as? Bool ?? true {
         didSet { UserDefaults.standard.set(webSearchEnabled, forKey: "mychat.web-search-enabled.v1") }
@@ -1986,20 +1987,22 @@ final class AppModel: ObservableObject {
         codeSessions.removeAll { $0.id == sessionRecord.id }
     }
 
-    func startCodeSession(repository: String?, prompt: String) async throws -> CodeSessionStart {
+    func startCodeSession(repository: String?, prompt: String, branch: String? = nil, mode: String = "code") async throws -> CodeSessionStart {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             throw CodeAPIError.invalidRequest("请输入 Code 任务")
         }
         let title = String(prompt.prefix(80))
         let session = try await createCodeSession(repository: repository, title: title)
-        let turn = try await startCodeTurn(in: session, prompt: prompt)
+        let turn = try await startCodeTurn(in: session, prompt: prompt, branch: branch, mode: mode)
         return CodeSessionStart(session: session, turn: turn)
     }
 
     func startCodeTurn(
         in sessionRecord: CodeSessionRecord,
-        prompt: String
+        prompt: String,
+        branch: String? = nil,
+        mode: String = "code"
     ) async throws -> CodeTurnStart {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, prompt.utf16.count <= 100_000 else {
@@ -2046,7 +2049,9 @@ final class AppModel: ObservableObject {
             messages: context,
             taskID: activeCodeTaskID(in: prior),
             responseID: UUID(),
-            sessionID: sessionID
+            sessionID: sessionID,
+            branch: branch,
+            mode: mode
         )
         let admission = try await codeClient.enqueue(command, accessToken: auth.accessToken)
         return CodeTurnStart(userMessage: userMessage, admission: admission)
@@ -2060,6 +2065,45 @@ final class AppModel: ObservableObject {
             admission: admission,
             accessToken: session.accessToken
         )
+    }
+
+    func codeCapabilities() async throws -> CodeCapabilities {
+        let auth = try await refreshedSession()
+        return try await codeClient.capabilities(accessToken: auth.accessToken)
+    }
+
+    func openCodeLink(_ url: URL) {
+        guard authSession != nil, url.scheme?.lowercased() == "mychat",
+              url.host?.lowercased() == "code", url.user == nil, url.password == nil,
+              url.port == nil, url.fragment == nil,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+        let items = components.queryItems ?? []
+        guard Set(items.map(\.name)).count == items.count,
+              items.allSatisfy({ ["q", "repo", "branch", "mode"].contains($0.name) && ($0.value?.count ?? 0) <= 100_000 }) else { return }
+        let parts = url.path.split(separator: "/")
+        guard parts.isEmpty || parts == ["new"] || (parts.count == 2 && parts[0] == "task" && UUID(uuidString: String(parts[1])) != nil) else { return }
+        selectedDestination = .code
+        pendingCodeLink = url
+    }
+
+    func recoverCodeTask(sessionID: String) async throws -> CodeTaskRecovery {
+        let auth = try await refreshedSession()
+        return try await codeClient.recovery(sessionID: sessionID, accessToken: auth.accessToken)
+    }
+
+    func recoverCodeTask(taskID: UUID) async throws -> CodeTaskRecovery {
+        let auth = try await refreshedSession()
+        return try await codeClient.taskRecovery(taskID: taskID, accessToken: auth.accessToken)
+    }
+
+    func rejectCodeOperation(_ request: CodeConfirmationRequest) async throws {
+        let auth = try await refreshedSession()
+        try await codeClient.reject(request, accessToken: auth.accessToken)
+    }
+
+    func codeBranches(repository: String) async throws -> CodeBranches {
+        let auth = try await refreshedSession()
+        return try await codeClient.branches(repository: repository, accessToken: auth.accessToken)
     }
 
     func requestCodeApply(_ command: CodeApplyCommand) async throws -> CodeApplyResponse {

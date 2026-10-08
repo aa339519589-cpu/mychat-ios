@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		CC1020000000000000000005 /* CodeWorkspaceUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1020000000000000000006 /* CodeWorkspaceUITests.swift */; };
+		CC1020000000000000000003 /* CodeWorkspaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1020000000000000000004 /* CodeWorkspaceTests.swift */; };
+		CC1020000000000000000001 /* CodeWorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1020000000000000000002 /* CodeWorkspaceView.swift */; };
 		B10200000000000000000001 /* HealthConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000011 /* HealthConnector.swift */; };
 		B10200000000000000000002 /* GmailConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000012 /* GmailConnector.swift */; };
 		B10200000000000000000003 /* DefaultConnectorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000013 /* DefaultConnectorsView.swift */; };
@@ -85,6 +88,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		CC1020000000000000000006 /* CodeWorkspaceUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeWorkspaceUITests.swift; sourceTree = "<group>"; };
+		CC1020000000000000000004 /* CodeWorkspaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeWorkspaceTests.swift; sourceTree = "<group>"; };
+		CC1020000000000000000002 /* CodeWorkspaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeWorkspaceView.swift; sourceTree = "<group>"; };
 		B10200000000000000000011 /* HealthConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthConnector.swift; sourceTree = "<group>"; };
 		B10200000000000000000012 /* GmailConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GmailConnector.swift; sourceTree = "<group>"; };
 		B10200000000000000000013 /* DefaultConnectorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DefaultConnectorsView.swift; sourceTree = "<group>"; };
@@ -275,6 +281,7 @@
 				F72000000000000000000002 /* ChatDocumentViews.swift */,
 				F72000000000000000000001 /* SpeechPlaybackController.swift */,
 				300000000000000000000006 /* MainShellView.swift */,
+				CC1020000000000000000002 /* CodeWorkspaceView.swift */,
 				300000000000000000000007 /* SidebarView.swift */,
 				300000000000000000000008 /* ComposerView.swift */,
 				300000000000000000000014 /* ChatConversationView.swift */,
@@ -328,6 +335,7 @@
 			isa = PBXGroup;
 			children = (
 				A06400000000000000000004 /* MyChatRuntimeTests.swift */,
+				CC1020000000000000000004 /* CodeWorkspaceTests.swift */,
 			);
 			path = MyChatRuntimeTests;
 			sourceTree = "<group>";
@@ -336,6 +344,7 @@
 			isa = PBXGroup;
 			children = (
 				A06400000000000000000010 /* MyChatUITests.swift */,
+				CC1020000000000000000006 /* CodeWorkspaceUITests.swift */,
 			);
 			path = MyChatUITests;
 			sourceTree = "<group>";
@@ -494,6 +503,7 @@
 				20000000000000000000001B /* AttachmentPreparation.swift in Sources */,
 				20000000000000000000001E /* AccountSettingsClient.swift in Sources */,
 				200000000000000000000006 /* MainShellView.swift in Sources */,
+				CC1020000000000000000001 /* CodeWorkspaceView.swift in Sources */,
 				F73000000000000000000007 /* SheetEntranceMotion.swift in Sources */,
 				200000000000000000000007 /* SidebarView.swift in Sources */,
 				200000000000000000000008 /* ComposerView.swift in Sources */,
@@ -516,6 +526,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A06400000000000000000005 /* MyChatRuntimeTests.swift in Sources */,
+				CC1020000000000000000003 /* CodeWorkspaceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -524,6 +535,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A06400000000000000000011 /* MyChatUITests.swift in Sources */,
+				CC1020000000000000000005 /* CodeWorkspaceUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
