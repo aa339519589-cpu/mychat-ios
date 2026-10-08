@@ -112,4 +112,5 @@ jobs:
             -only-testing:MyChatUITests/MyChatUITests/testComposerButtonsAcceptSmallHorizontalTouchDrift \
             -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsReopenAfterSelectingConversation \
             -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard \
+            -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
             test
