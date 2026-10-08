@@ -186,7 +186,11 @@ final class WelcomeMotionController: UIViewController {
         surface.greeting.font = MyChatSystemFont.appSerifUIFont(size: 24, relativeTo: .title2, weight: .medium)
         surface.greeting.textColor = UIColor(MyChatTheme.text)
         surface.greeting.text = greetingText
-        surface.hint.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(for: MyChatSystemFont.appUIFont(size: 13))
+        surface.hint.font = MyChatSystemFont.scaledUIFont(
+            MyChatSystemFont.appUIFont(size: 13),
+            relativeTo: .footnote,
+            compatibleWith: surface.traitCollection
+        )
         surface.hint.textColor = UIColor(MyChatTheme.secondaryText)
         let text = "隐私对话不会保存在历史记录或记忆中。"
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center; paragraph.lineSpacing = 2

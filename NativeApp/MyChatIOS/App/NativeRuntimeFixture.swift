@@ -308,7 +308,30 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/profile/system-prompt":
             if let prompt = body["prompt"] as? String { systemPrompt = prompt }
             return (200, ["prompt": systemPrompt])
-        case "/api/endpoints": return (200, ["endpoints": []])
+        case "/api/endpoints":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-connected-model") else {
+                return (200, ["endpoints": []])
+            }
+            return (200, ["endpoints": [[
+                "id": "90000000-0000-4000-8000-000000000064", "name": "My endpoint",
+                "baseUrl": "https://endpoint.example.invalid/v1", "model": "audit-connected-model",
+                "outputKind": "chat", "authType": "bearer", "needsReconnect": false,
+                "createdAt": date, "updatedAt": date
+            ]]])
+        case "/rest/v1/code_sessions":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else { return (200, []) }
+            let id = "80000000-0000-4000-8000-000000000064"
+            let provisionalRepository = "__mychat_new__/" + id
+            return (200, [
+                ["id": id, "repo": provisionalRepository, "title": provisionalRepository, "created_at": date, "updated_at": date],
+                ["id": "80000000-0000-4000-8000-000000000065", "repo": provisionalRepository, "title": "继续当前任务", "created_at": date, "updated_at": date],
+                ["id": "80000000-0000-4000-8000-000000000066", "repo": "mychat/test-app", "title": "修复登录边界", "created_at": date, "updated_at": date],
+            ])
+        case "/api/code/tasks":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else {
+                return (503, ["error": "隔离测试未配置任务恢复"])
+            }
+            return (200, ["task": NSNull(), "admission": NSNull()])
         case "/api/connectors": return (200, ["connectors": []])
         case "/api/connectors/directory": return (200, ["entries": [["id": "sample", "name": "Sample service", "description": "An isolated directory entry", "serverUrl": "https://connector.example.invalid/mcp", "authType": "oauth"]], "nextCursor": NSNull()])
         case "/api/tts": return (503, ["error": "隔离测试：模拟语音提供方失败"])

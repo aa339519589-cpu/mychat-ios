@@ -337,12 +337,41 @@ struct CodeSessionRecord: Codable, Equatable, Identifiable, Sendable {
     let createdAt: String?
     var updatedAt: String?
 
+    var displayTitle: String {
+        CodeDisplay.title(title, sessionID: id) ?? "新建会话"
+    }
+
+    var displayRepository: String? { CodeDisplay.repository(repository) }
+
     enum CodingKeys: String, CodingKey {
         case id
         case repository = "repo"
         case title
         case createdAt = "created_at"
         case updatedAt = "updated_at"
+    }
+}
+
+enum CodeDisplay {
+    static func repository(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.contains("__mychat_"), !containsControl(value) else { return nil }
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return nil }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_.-"))
+        guard parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.unicodeScalars.allSatisfy(allowed.contains) }) else { return nil }
+        return value
+    }
+
+    static func title(_ raw: String, sessionID: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.contains("__mychat_"), !containsControl(value),
+              UUID(uuidString: value) == nil, value.lowercased() != sessionID.lowercased() else { return nil }
+        return value
+    }
+
+    private static func containsControl(_ value: String) -> Bool {
+        value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 }
 
@@ -434,6 +463,106 @@ struct CodeChatCommand: Equatable, Sendable {
     let taskID: UUID?
     let responseID: UUID
     let sessionID: UUID
+    var branch: String? = nil
+    let mode = "code"
+
+    init(repository: String, modelID: String = ModelCatalogItem.defaultChatModelID,
+         endpointID: UUID? = nil, reasoningEffort: String? = ModelCatalogItem.defaultChatReasoningEffort,
+         messages: [CodeContextMessage], taskID: UUID?, responseID: UUID, sessionID: UUID,
+         branch: String? = nil) {
+        self.repository = repository
+        self.modelID = modelID
+        self.endpointID = endpointID
+        self.reasoningEffort = reasoningEffort
+        self.messages = messages
+        self.taskID = taskID
+        self.responseID = responseID
+        self.sessionID = sessionID
+        self.branch = branch
+    }
+}
+
+struct CodeCapabilities: Decodable, Sendable {
+    struct Execution: Decodable, Sendable {
+        let backend: String
+        let location: String
+        let configured: Bool
+        let verified: Bool
+        let reason: String?
+    }
+    let schemaVersion: Int
+    let execution: Execution
+    let cloudOnly: Bool?
+    let durableQueue: Bool
+}
+
+struct CodeTaskRecovery: Decodable, Sendable {
+    let admission: CodeAdmission?
+    var sessionId: String? = nil
+    var task: CodeTaskDetail? = nil
+    var operationAdmission: CodeAdmission? = nil
+}
+
+struct CodeBranches: Decodable, Sendable {
+    struct Branch: Decodable, Identifiable, Sendable {
+        let name: String
+        var id: String { name }
+    }
+    let branches: [Branch]
+    let defaultBranch: String?
+}
+
+struct CodeTaskDetail: Decodable, Sendable {
+    struct Tool: Decodable, Identifiable, Sendable {
+        let id: String
+        let toolName: String
+        let status: String
+        let output: [String: JSONValue]?
+        let error: String?
+        let durationMs: Int?
+    }
+    struct Artifact: Decodable, Identifiable, Sendable {
+        let id: String
+        let kind: String
+        let title: String?
+        let content: String?
+        let url: String?
+    }
+    let id: String
+    let status: String
+    let branch: String
+    let error: String?
+    let pullRequestUrl: String?
+    let toolCalls: [Tool]
+    let artifacts: [Artifact]
+}
+
+struct CodeDraftRecord: Codable, Equatable {
+    var prompt = ""
+    var repository: String? = nil
+    var branch = ""
+}
+
+enum CodeLocalState {
+    private static func key(owner: String, scope: String) -> String {
+        "mychat.code.v1." + Data(owner.utf8).base64EncodedString() + "." + Data(scope.utf8).base64EncodedString()
+    }
+    static func draft(owner: String, scope: String) -> CodeDraftRecord {
+        guard !owner.isEmpty, let data = UserDefaults.standard.data(forKey: key(owner: owner, scope: scope)),
+              let value = try? JSONDecoder().decode(CodeDraftRecord.self, from: data) else { return CodeDraftRecord() }
+        return value
+    }
+    static func containsDraft(owner: String, scope: String) -> Bool {
+        !owner.isEmpty && UserDefaults.standard.data(forKey: key(owner: owner, scope: scope)) != nil
+    }
+    static func save(_ value: CodeDraftRecord, owner: String, scope: String) {
+        guard !owner.isEmpty, let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key(owner: owner, scope: scope))
+    }
+    static func clear(owner: String, scope: String) {
+        guard !owner.isEmpty else { return }
+        UserDefaults.standard.removeObject(forKey: key(owner: owner, scope: scope))
+    }
 }
 
 struct CodeAdmission: Codable, Equatable, Sendable {

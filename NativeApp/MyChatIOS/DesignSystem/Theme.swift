@@ -182,6 +182,24 @@ enum MyChatSystemFont {
         return UIFont(descriptor: descriptor, size: size)
     }
 
+    // CoreText scales a cascade automatically, but SwiftUI's Font(UIFont)
+    // bridge reads each fallback descriptor's own point size. Cached Han
+    // descriptors carry 17pt; leaving that size in a 12pt caption draws a
+    // 17pt glyph inside the caption's smaller line box and clips its top.
+    // Normalize after both construction and Dynamic Type scaling. Keep the
+    // primary Latin face and the Han face/weight/variation unchanged.
+    static func matchingCascadeSize(_ font: UIFont) -> UIFont {
+        guard let cascade = font.fontDescriptor.fontAttributes[.cascadeList] as? [UIFontDescriptor],
+              !cascade.isEmpty else { return font }
+        let resized = cascade.map { $0.addingAttributes([.size: font.pointSize]) }
+        return UIFont(descriptor: font.fontDescriptor.addingAttributes([.cascadeList: resized]), size: font.pointSize)
+    }
+
+    static func scaledUIFont(_ font: UIFont, relativeTo textStyle: UIFont.TextStyle,
+                             compatibleWith traits: UITraitCollection? = nil) -> UIFont {
+        matchingCascadeSize(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: font, compatibleWith: traits))
+    }
+
     static func appUIFont(size: CGFloat, weight: UIFont.Weight = .regular,
                           design: UIFontDescriptor.SystemDesign? = nil) -> UIFont {
         let regular = design == .monospaced
@@ -196,7 +214,7 @@ enum MyChatSystemFont {
         guard let han else { return base }
         // A regular Han fallback previously erased the requested heading
         // weight, making Chinese page titles look like floating body labels.
-        return UIFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [han]]), size: size)
+        return matchingCascadeSize(UIFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [han]]), size: size))
     }
 
     static func appFont(size: CGFloat, design: UIFontDescriptor.SystemDesign? = nil,
@@ -208,7 +226,7 @@ enum MyChatSystemFont {
                         design: UIFontDescriptor.SystemDesign? = nil,
                         weight: UIFont.Weight = .regular) -> Font {
         let base = appUIFont(size: size, weight: weight, design: design)
-        return Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: base))
+        return Font(scaledUIFont(base, relativeTo: textStyle))
     }
 
     static func appFont(for textStyle: UIFont.TextStyle, design: UIFontDescriptor.SystemDesign? = nil,
@@ -241,7 +259,7 @@ enum MyChatSystemFont {
         let serif = licensedSerif(size: size, weight: weight)
         let withHan = appHan.map { serif.fontDescriptor.addingAttributes([.cascadeList: [$0]]) }
             .map { UIFont(descriptor: $0, size: size) } ?? serif
-        return UIFontMetrics(forTextStyle: textStyle).scaledFont(for: withHan)
+        return scaledUIFont(withHan, relativeTo: textStyle)
     }
 
     static func hanFont(size: CGFloat, strong: Bool = false) -> Font {
@@ -263,12 +281,12 @@ enum MyChatSystemFont {
 
     static func font(size: CGFloat, weight: UIFont.Weight, relativeTo textStyle: UIFont.TextStyle) -> Font {
         let baseFont = uiFont(size: size, weight: weight)
-        return Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: baseFont))
+        return Font(scaledUIFont(baseFont, relativeTo: textStyle))
     }
 
     static func userMessageFont(size: CGFloat, weight: UIFont.Weight) -> Font {
         let font = appUIFont(size: size, weight: weight)
-        return Font(UIFontMetrics(forTextStyle: .body).scaledFont(for: font))
+        return Font(scaledUIFont(font, relativeTo: .body))
     }
 
     static func uiFont(size: CGFloat, weight: UIFont.Weight, serif: Bool = false, italic: Bool = false) -> UIFont {
@@ -287,11 +305,11 @@ enum MyChatSystemFont {
         if let chinese = hanDescriptor {
             descriptor = descriptor.addingAttributes([.cascadeList: [chinese]])
         }
-        return UIFont(descriptor: descriptor, size: size)
+        return matchingCascadeSize(UIFont(descriptor: descriptor, size: size))
     }
 
     static func italic(size: CGFloat, relativeTo textStyle: UIFont.TextStyle) -> Font {
-        Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: uiFont(size: size, weight: .medium, serif: true, italic: true)))
+        Font(scaledUIFont(uiFont(size: size, weight: .medium, serif: true, italic: true), relativeTo: textStyle))
     }
 
     private static func licensedSerif(size: CGFloat, weight: UIFont.Weight, italic: Bool = false) -> UIFont {
@@ -312,7 +330,7 @@ enum MyChatSystemFont {
     }
 
     static func serif(size: CGFloat, weight: UIFont.Weight, relativeTo textStyle: UIFont.TextStyle) -> Font {
-        Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: uiFont(size: size, weight: weight, serif: true)))
+        Font(scaledUIFont(uiFont(size: size, weight: weight, serif: true), relativeTo: textStyle))
     }
 
     static func monospaced(size: CGFloat, weight: UIFont.Weight = .regular, relativeTo textStyle: UIFont.TextStyle) -> Font {
@@ -365,7 +383,7 @@ enum MyChatResponseTypesetting {
             if strong || italic {
                 let font = MyChatSystemFont.uiFont(size: bodySize, weight: strong ? .bold : .regular,
                                                   serif: true, italic: italic)
-                output[run.range].font = Font(UIFontMetrics(forTextStyle: .body).scaledFont(for: font))
+                output[run.range].font = Font(MyChatSystemFont.scaledUIFont(font, relativeTo: .body))
             }
             let font = run.inlinePresentationIntent?.contains(.stronglyEmphasized) == true ? strongHan : bodyHan
             let hasHan = input.characters[run.range].contains { $0.unicodeScalars.contains(where: isHan) }
