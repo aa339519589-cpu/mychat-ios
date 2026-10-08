@@ -205,6 +205,7 @@ private struct CodeSessionDetailView: View {
     @State private var toolActivities: [ChatToolActivity] = []
     @State private var taskDetail: CodeTaskDetail?
     @State private var isReplayingTerminalRecovery = false
+    @State private var terminalReplayFailed = false
     @State private var branch = ""
     @State private var isRecovering = false
     @State private var hasSavedSettings = false
@@ -274,7 +275,11 @@ private struct CodeSessionDetailView: View {
                         Text(PresentationText.plain(errorMessage))
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .multilineTextAlignment(.center)
-                        Button("重试") { Task { await load() } }
+                        if terminalReplayFailed {
+                            terminalReplayRetryButton
+                        } else {
+                            Button("重试") { Task { await load() } }
+                        }
                     }
                     .padding(24)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -353,10 +358,13 @@ private struct CodeSessionDetailView: View {
                             if let taskDetail { CodeTaskEvidenceView(detail: taskDetail) }
 
                             if let errorMessage, !errorMessage.isEmpty {
-                                Text(PresentationText.plain(errorMessage))
-                                    .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
-                                    .foregroundStyle(Color.red)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(PresentationText.plain(errorMessage))
+                                        .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
+                                        .foregroundStyle(Color.red)
+                                    if terminalReplayFailed { terminalReplayRetryButton }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
 
                             if canRequestPublish {
@@ -392,7 +400,7 @@ private struct CodeSessionDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("打开编程操作")
-                    .disabled(isReplayingTerminalRecovery)
+                    .disabled(isReplayingTerminalRecovery || terminalReplayFailed)
 
                     TextField("向 MyChat 编程发送消息", text: $draft, axis: .vertical)
                         .font(MyChatTypography.composerText)
@@ -401,7 +409,7 @@ private struct CodeSessionDetailView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 10)
                         .accessibilityIdentifier("code.session.draft")
-                        .disabled(isReplayingTerminalRecovery)
+                        .disabled(isReplayingTerminalRecovery || terminalReplayFailed)
                     Button {
                         if let activeAdmission {
                             Task { await stop(activeAdmission) }
@@ -477,7 +485,8 @@ private struct CodeSessionDetailView: View {
             saveSessionDraft()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, activeAdmission == nil, !isReplayingTerminalRecovery {
+            if phase == .active, activeAdmission == nil,
+               !isReplayingTerminalRecovery, !terminalReplayFailed {
                 Task { await load(); await recover() }
             }
         }
@@ -554,10 +563,12 @@ private struct CodeSessionDetailView: View {
                     cancellationPending = false
                     cancellationRetryAllowed = false
                     errorMessage = nil
+                    terminalReplayFailed = false
                     isReplayingTerminalRecovery = true
                     startConsuming(admission, terminalReplay: true)
                 } else {
                     activeAdmission = admission
+                    terminalReplayFailed = false
                     isReplayingTerminalRecovery = false
                     startConsuming(admission)
                 }
@@ -576,7 +587,8 @@ private struct CodeSessionDetailView: View {
     private var canSend: Bool {
         CodeSendEligibility.canSubmit(
             draft: draft,
-            isBusy: activeAdmission != nil || isAdmitting || isApplying || isReplayingTerminalRecovery
+            isBusy: activeAdmission != nil || isAdmitting || isApplying
+                || isReplayingTerminalRecovery || terminalReplayFailed
         )
     }
 
@@ -587,9 +599,21 @@ private struct CodeSessionDetailView: View {
     private var canRequestPublish: Bool {
         activeAdmission == nil
             && !isReplayingTerminalRecovery
+            && !terminalReplayFailed
             && lastTaskID != nil
             && (!isProvisionalRepository || !plans.isEmpty)
             && receipt == nil
+    }
+
+    private var terminalReplayRetryButton: some View {
+        Button("重新读取任务记录") {
+            Task {
+                terminalReplayFailed = false
+                errorMessage = nil
+                await recover()
+            }
+        }
+        .accessibilityIdentifier("code.terminal-replay.retry")
     }
 
     private func content(for message: CodeMessageRecord) -> String {
@@ -818,8 +842,19 @@ private struct CodeSessionDetailView: View {
             messages[index].content = streamedContent
         }
         if terminalReplay {
-            if !terminalReceived && errorMessage == nil {
-                errorMessage = "已完成任务的事件记录尚未完整，请下拉刷新重试"
+            if !terminalReceived {
+                terminalReplayFailed = true
+                if errorMessage == nil {
+                    errorMessage = "已完成任务的事件记录尚未完整，请重试读取"
+                }
+                streamedContent = ""
+                steps = []
+                plans = []
+                toolActivities = []
+                memoryChanges = []
+                receipt = nil
+            } else {
+                terminalReplayFailed = false
             }
             await load()
             if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
