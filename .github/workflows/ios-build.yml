@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      compile_offline_test_targets:
+        description: "Compile iOS Simulator app and test targets with build-for-testing only; do not launch the test host or run tests. No runtime download."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,6 +42,19 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             build | tee "$RUNNER_TEMP/build102-xcodebuild.log"
+
+      - name: Compile iOS Simulator test targets without running tests
+        if: ${{ inputs.compile_offline_test_targets }}
+        working-directory: NativeApp
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build-for-testing | tee "$RUNNER_TEMP/build102-test-targets.log"
 
       - name: Run offline runtime tests on an installed iOS 27 simulator
         if: ${{ inputs.run_offline_tests }}
