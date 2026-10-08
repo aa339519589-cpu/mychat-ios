@@ -778,17 +778,14 @@ struct MCPConnectorsSettingsView: View {
             VStack(alignment: .leading, spacing: 17) {
                 DefaultConnectorsView(ownerID: appModel.authSession?.user.id ?? "")
                     .id(appModel.authSession?.user.id)
-                if case .loading = appModel.connectorsPhase, appModel.connectors.isEmpty {
-                    HStack { Spacer(); ProgressView(); Spacer() }
-                        .frame(height: 130)
-                } else if case .failed = appModel.connectorsPhase, appModel.connectors.isEmpty {
+                if case .failed = appModel.connectorsPhase, appModel.connectors.isEmpty {
                     VStack(spacing: 10) {
                         Text("无法加载连接器")
                             .font(MyChatTypography.cardBody)
                         Button("重试") { Task { await appModel.reloadConnectors() } }
                             .buttonStyle(.bordered)
                     }
-                    .frame(maxWidth: .infinity, minHeight: 130)
+                    .frame(maxWidth: .infinity, minHeight: 56)
                 } else if appModel.connectors.isEmpty {
                     EmptyView()
                 } else {
@@ -812,13 +809,25 @@ struct MCPConnectorsSettingsView: View {
         .background(MyChatTheme.canvas)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button("浏览连接器", systemImage: "square.grid.2x2") { directoryPresented = true }
-                    Button("添加自定义连接器", systemImage: "plus") { editorPresented = true }
-                } label: { Image(systemName: "plus") }.accessibilityLabel("添加连接器")
+                HStack(spacing: 10) {
+                    if case .loading = appModel.connectorsPhase {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("正在加载连接器")
+                            .accessibilityIdentifier("connectors.loading")
+                    }
+                    Menu {
+                        Button("浏览连接器", systemImage: "square.grid.2x2") { directoryPresented = true }
+                        Button("添加自定义连接器", systemImage: "plus") { editorPresented = true }
+                    } label: { Image(systemName: "plus") }.accessibilityLabel("添加连接器")
+                }
             }
         }
-        .task { await appModel.reloadConnectors() }
+        .task {
+            if case .idle = appModel.connectorsPhase {
+                await appModel.reloadConnectors()
+            }
+        }
         .refreshable { await appModel.reloadConnectors() }
         .navigationDestination(isPresented: $editorPresented) {
             MCPConnectorEditor(entry: nil, onConnected: { editorPresented = false })
