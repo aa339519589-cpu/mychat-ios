@@ -1,5 +1,11 @@
 # MyChat Native iPhone Client
 
+## Current quality workstream
+
+The Build 102 native-quality snapshot is in [NativeApp](NativeApp/README.md).
+Open its own Xcode project. The root-level project and instructions below are
+the preserved July 2026 client, not the Build 102 acceptance target.
+
 This repository is the native iOS client. It shares the production HTTPS API
 with the web product, but its source code, Git history, releases, and device
 deployments are independent from `aa339519589-cpu/mychat`.

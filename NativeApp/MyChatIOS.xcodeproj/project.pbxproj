@@ -1,0 +1,738 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B10200000000000000000001 /* HealthConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000011 /* HealthConnector.swift */; };
+		B10200000000000000000002 /* GmailConnector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000012 /* GmailConnector.swift */; };
+		B10200000000000000000003 /* DefaultConnectorsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10200000000000000000013 /* DefaultConnectorsView.swift */; };
+		F73000000000000000000007 /* SheetEntranceMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000007 /* SheetEntranceMotion.swift */; };
+		200000000000000000000001 /* MyChatIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000001 /* MyChatIOSApp.swift */; };
+		200000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000002 /* AppModel.swift */; };
+		200000000000000000000003 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000003 /* Theme.swift */; };
+		200000000000000000000004 /* ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000004 /* ModelCatalog.swift */; };
+		200000000000000000000005 /* ModelCatalogClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000005 /* ModelCatalogClient.swift */; };
+		200000000000000000000006 /* MainShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000006 /* MainShellView.swift */; };
+		200000000000000000000007 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000007 /* SidebarView.swift */; };
+		200000000000000000000008 /* ComposerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000008 /* ComposerView.swift */; };
+		200000000000000000000009 /* AuthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000000B /* AuthModels.swift */; };
+		20000000000000000000000A /* MobileConfigurationClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000000C /* MobileConfigurationClient.swift */; };
+		20000000000000000000000B /* SupabaseAuthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000000D /* SupabaseAuthClient.swift */; };
+		20000000000000000000000C /* AuthenticationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000000E /* AuthenticationView.swift */; };
+		20000000000000000000000D /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000000F /* ChatModels.swift */; };
+		20000000000000000000000E /* ChatAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000010 /* ChatAPIClient.swift */; };
+		20000000000000000000000F /* JobEventStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000011 /* JobEventStream.swift */; };
+		200000000000000000000010 /* ConversationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000012 /* ConversationModels.swift */; };
+		200000000000000000000011 /* SupabaseDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000013 /* SupabaseDataClient.swift */; };
+		200000000000000000000012 /* ChatConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000014 /* ChatConversationView.swift */; };
+		200000000000000000000013 /* WorkspaceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000015 /* WorkspaceModels.swift */; };
+		200000000000000000000014 /* WorkspaceDataClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000016 /* WorkspaceDataClient.swift */; };
+		200000000000000000000015 /* ArtifactSandboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000017 /* ArtifactSandboxView.swift */; };
+		200000000000000000000016 /* GeneratedMediaView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000018 /* GeneratedMediaView.swift */; };
+		200000000000000000000017 /* CodeAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000019 /* CodeAPIClient.swift */; };
+		200000000000000000000018 /* ArtifactRenderers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001A /* ArtifactRenderers.swift */; };
+		200000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001B /* Assets.xcassets */; };
+		20000000000000000000001A /* AttachmentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001C /* AttachmentModels.swift */; };
+		20000000000000000000001B /* AttachmentPreparation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001D /* AttachmentPreparation.swift */; };
+		20000000000000000000001C /* AttachmentPickerSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001E /* AttachmentPickerSupport.swift */; };
+		20000000000000000000001D /* AccountModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30000000000000000000001F /* AccountModels.swift */; };
+		20000000000000000000001E /* AccountSettingsClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000020 /* AccountSettingsClient.swift */; };
+		20000000000000000000001F /* AccountSettingsViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000021 /* AccountSettingsViews.swift */; };
+		200000000000000000000020 /* provider-claude.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000022 /* provider-claude.png */; };
+		200000000000000000000021 /* provider-deepseek.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000023 /* provider-deepseek.png */; };
+		200000000000000000000022 /* provider-gemini.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000024 /* provider-gemini.png */; };
+		200000000000000000000023 /* provider-minimax.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000025 /* provider-minimax.png */; };
+		200000000000000000000024 /* provider-openai.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000026 /* provider-openai.png */; };
+		200000000000000000000025 /* provider-kimi.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000027 /* provider-kimi.png */; };
+		200000000000000000000026 /* provider-grok.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000028 /* provider-grok.png */; };
+		200000000000000000000027 /* provider-zai.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000029 /* provider-zai.png */; };
+		A06400000000000000000002 /* NativeRuntimeFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000001 /* NativeRuntimeFixture.swift */; };
+		A06400000000000000000005 /* MyChatRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000004 /* MyChatRuntimeTests.swift */; };
+		A06400000000000000000011 /* MyChatUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000010 /* MyChatUITests.swift */; };
+		A06400000000000000000021 /* MyChatRuntimeTests/tts.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000020 /* MyChatRuntimeTests/tts.mp3 */; };
+		B10000000000000000000001 /* ChatGPTPlanModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* ChatGPTPlanModels.swift */; };
+		B10000000000000000000002 /* ChatGPTPlanProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002 /* ChatGPTPlanProvider.swift */; };
+		B10000000000000000000003 /* ChatGPTPlanHistoryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* ChatGPTPlanHistoryClient.swift */; };
+		B10000000000000000000004 /* ChatGPTPlanSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* ChatGPTPlanSettingsSection.swift */; };
+		F25000000000000000000001 /* ReadingFonts in Resources */ = {isa = PBXBuildFile; fileRef = F25000000000000000000002 /* ReadingFonts */; };
+		F71000000000000000000001 /* SpeechPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000001 /* SpeechPlaybackController.swift */; };
+		F71000000000000000000002 /* ChatDocumentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000002 /* ChatDocumentViews.swift */; };
+		F71000000000000000000003 /* DotThinkingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000003 /* DotThinkingView.swift */; };
+		F71000000000000000000004 /* MyChatSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000004 /* MyChatSettingsView.swift */; };
+		F71000000000000000000005 /* DotMotion in Resources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000005 /* DotMotion */; };
+		F71000000000000000000006 /* WelcomeMotionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000006 /* WelcomeMotionView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A0640000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 800000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000001;
+			remoteInfo = MyChatIOS;
+		};
+		A06400000000000000000019 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 800000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000001;
+			remoteInfo = MyChatIOS;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		B10200000000000000000011 /* HealthConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthConnector.swift; sourceTree = "<group>"; };
+		B10200000000000000000012 /* GmailConnector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GmailConnector.swift; sourceTree = "<group>"; };
+		B10200000000000000000013 /* DefaultConnectorsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DefaultConnectorsView.swift; sourceTree = "<group>"; };
+		F72000000000000000000007 /* SheetEntranceMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetEntranceMotion.swift; sourceTree = "<group>"; };
+		300000000000000000000001 /* MyChatIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatIOSApp.swift; sourceTree = "<group>"; };
+		300000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		300000000000000000000003 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		300000000000000000000004 /* ModelCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCatalog.swift; sourceTree = "<group>"; };
+		300000000000000000000005 /* ModelCatalogClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCatalogClient.swift; sourceTree = "<group>"; };
+		300000000000000000000006 /* MainShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainShellView.swift; sourceTree = "<group>"; };
+		300000000000000000000007 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
+		300000000000000000000008 /* ComposerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerView.swift; sourceTree = "<group>"; };
+		300000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		30000000000000000000000A /* MyChat.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MyChat.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		30000000000000000000000B /* AuthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthModels.swift; sourceTree = "<group>"; };
+		30000000000000000000000C /* MobileConfigurationClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileConfigurationClient.swift; sourceTree = "<group>"; };
+		30000000000000000000000D /* SupabaseAuthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseAuthClient.swift; sourceTree = "<group>"; };
+		30000000000000000000000E /* AuthenticationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationView.swift; sourceTree = "<group>"; };
+		30000000000000000000000F /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
+		300000000000000000000010 /* ChatAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatAPIClient.swift; sourceTree = "<group>"; };
+		300000000000000000000011 /* JobEventStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobEventStream.swift; sourceTree = "<group>"; };
+		300000000000000000000012 /* ConversationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationModels.swift; sourceTree = "<group>"; };
+		300000000000000000000013 /* SupabaseDataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupabaseDataClient.swift; sourceTree = "<group>"; };
+		300000000000000000000014 /* ChatConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatConversationView.swift; sourceTree = "<group>"; };
+		300000000000000000000015 /* WorkspaceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceModels.swift; sourceTree = "<group>"; };
+		300000000000000000000016 /* WorkspaceDataClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDataClient.swift; sourceTree = "<group>"; };
+		300000000000000000000017 /* ArtifactSandboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactSandboxView.swift; sourceTree = "<group>"; };
+		300000000000000000000018 /* GeneratedMediaView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeneratedMediaView.swift; sourceTree = "<group>"; };
+		300000000000000000000019 /* CodeAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeAPIClient.swift; sourceTree = "<group>"; };
+		30000000000000000000001A /* ArtifactRenderers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtifactRenderers.swift; sourceTree = "<group>"; };
+		30000000000000000000001B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		30000000000000000000001C /* AttachmentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentModels.swift; sourceTree = "<group>"; };
+		30000000000000000000001D /* AttachmentPreparation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPreparation.swift; sourceTree = "<group>"; };
+		30000000000000000000001E /* AttachmentPickerSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachmentPickerSupport.swift; sourceTree = "<group>"; };
+		30000000000000000000001F /* AccountModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountModels.swift; sourceTree = "<group>"; };
+		300000000000000000000020 /* AccountSettingsClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingsClient.swift; sourceTree = "<group>"; };
+		300000000000000000000021 /* AccountSettingsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountSettingsViews.swift; sourceTree = "<group>"; };
+		300000000000000000000022 /* provider-claude.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-claude.png"; sourceTree = "<group>"; };
+		300000000000000000000023 /* provider-deepseek.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-deepseek.png"; sourceTree = "<group>"; };
+		300000000000000000000024 /* provider-gemini.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-gemini.png"; sourceTree = "<group>"; };
+		300000000000000000000025 /* provider-minimax.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-minimax.png"; sourceTree = "<group>"; };
+		300000000000000000000026 /* provider-openai.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-openai.png"; sourceTree = "<group>"; };
+		300000000000000000000027 /* provider-kimi.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-kimi.png"; sourceTree = "<group>"; };
+		300000000000000000000028 /* provider-grok.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-grok.png"; sourceTree = "<group>"; };
+		300000000000000000000029 /* provider-zai.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-zai.png"; sourceTree = "<group>"; };
+		30000000000000000000002A /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
+		F25000000000000000000002 /* ReadingFonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReadingFonts; sourceTree = "<group>"; };
+		A06400000000000000000001 /* NativeRuntimeFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRuntimeFixture.swift; sourceTree = "<group>"; };
+		A06400000000000000000004 /* MyChatRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatRuntimeTests.swift; sourceTree = "<group>"; };
+		A06400000000000000000006 /* MyChatRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MyChatRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A06400000000000000000010 /* MyChatUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatUITests.swift; sourceTree = "<group>"; };
+		A06400000000000000000012 /* MyChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MyChatUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A06400000000000000000020 /* MyChatRuntimeTests/tts.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = MyChatRuntimeTests/tts.mp3; sourceTree = SOURCE_ROOT; };
+		B20000000000000000000001 /* ChatGPTPlanModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanModels.swift; sourceTree = "<group>"; };
+		B20000000000000000000002 /* ChatGPTPlanProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanProvider.swift; sourceTree = "<group>"; };
+		B20000000000000000000003 /* ChatGPTPlanHistoryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanHistoryClient.swift; sourceTree = "<group>"; };
+		B20000000000000000000004 /* ChatGPTPlanSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanSettingsSection.swift; sourceTree = "<group>"; };
+		F72000000000000000000001 /* SpeechPlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPlaybackController.swift; sourceTree = "<group>"; };
+		F72000000000000000000002 /* ChatDocumentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDocumentViews.swift; sourceTree = "<group>"; };
+		F72000000000000000000003 /* DotThinkingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DotThinkingView.swift; sourceTree = "<group>"; };
+		F72000000000000000000004 /* MyChatSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatSettingsView.swift; sourceTree = "<group>"; };
+		F72000000000000000000005 /* DotMotion */ = {isa = PBXFileReference; lastKnownFileType = folder; path = DotMotion; sourceTree = "<group>"; };
+		F72000000000000000000006 /* WelcomeMotionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeMotionView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		400000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A06400000000000000000009 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A06400000000000000000015 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		03068DC83075AC520067BD61 /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000020 /* MyChatRuntimeTests/tts.mp3 */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
+		500000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000007 /* MyChatRuntimeTests */,
+				A06400000000000000000013 /* MyChatUITests */,
+				500000000000000000000002 /* MyChatIOS */,
+				500000000000000000000008 /* Products */,
+				03068DC83075AC520067BD61 /* Recovered References */,
+			);
+			sourceTree = "<group>";
+		};
+		500000000000000000000002 /* MyChatIOS */ = {
+			isa = PBXGroup;
+			children = (
+				500000000000000000000003 /* App */,
+				500000000000000000000004 /* DesignSystem */,
+				500000000000000000000005 /* Domain */,
+				500000000000000000000006 /* Infrastructure */,
+				500000000000000000000007 /* Features */,
+				500000000000000000000009 /* ProviderIcons */,
+				50000000000000000000000A /* Resources */,
+				30000000000000000000001B /* Assets.xcassets */,
+				300000000000000000000009 /* Info.plist */,
+			);
+			path = MyChatIOS;
+			sourceTree = "<group>";
+		};
+		500000000000000000000003 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000001 /* NativeRuntimeFixture.swift */,
+				300000000000000000000001 /* MyChatIOSApp.swift */,
+				300000000000000000000002 /* AppModel.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		500000000000000000000004 /* DesignSystem */ = {
+			isa = PBXGroup;
+			children = (
+				300000000000000000000003 /* Theme.swift */,
+			);
+			path = DesignSystem;
+			sourceTree = "<group>";
+		};
+		500000000000000000000005 /* Domain */ = {
+			isa = PBXGroup;
+			children = (
+				300000000000000000000004 /* ModelCatalog.swift */,
+				30000000000000000000000B /* AuthModels.swift */,
+				30000000000000000000000F /* ChatModels.swift */,
+				300000000000000000000012 /* ConversationModels.swift */,
+				300000000000000000000015 /* WorkspaceModels.swift */,
+				30000000000000000000001C /* AttachmentModels.swift */,
+				30000000000000000000001F /* AccountModels.swift */,
+				B20000000000000000000001 /* ChatGPTPlanModels.swift */,
+			);
+			path = Domain;
+			sourceTree = "<group>";
+		};
+		500000000000000000000006 /* Infrastructure */ = {
+			isa = PBXGroup;
+			children = (
+				B10200000000000000000011 /* HealthConnector.swift */,
+				B10200000000000000000012 /* GmailConnector.swift */,
+				300000000000000000000005 /* ModelCatalogClient.swift */,
+				30000000000000000000000C /* MobileConfigurationClient.swift */,
+				30000000000000000000000D /* SupabaseAuthClient.swift */,
+				300000000000000000000010 /* ChatAPIClient.swift */,
+				300000000000000000000011 /* JobEventStream.swift */,
+				300000000000000000000013 /* SupabaseDataClient.swift */,
+				300000000000000000000016 /* WorkspaceDataClient.swift */,
+				300000000000000000000019 /* CodeAPIClient.swift */,
+				30000000000000000000001D /* AttachmentPreparation.swift */,
+				300000000000000000000020 /* AccountSettingsClient.swift */,
+				B20000000000000000000002 /* ChatGPTPlanProvider.swift */,
+				B20000000000000000000003 /* ChatGPTPlanHistoryClient.swift */,
+			);
+			path = Infrastructure;
+			sourceTree = "<group>";
+		};
+		500000000000000000000007 /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				B10200000000000000000013 /* DefaultConnectorsView.swift */,
+				F72000000000000000000006 /* WelcomeMotionView.swift */,
+				F72000000000000000000007 /* SheetEntranceMotion.swift */,
+				F72000000000000000000003 /* DotThinkingView.swift */,
+				F72000000000000000000004 /* MyChatSettingsView.swift */,
+				F72000000000000000000002 /* ChatDocumentViews.swift */,
+				F72000000000000000000001 /* SpeechPlaybackController.swift */,
+				300000000000000000000006 /* MainShellView.swift */,
+				300000000000000000000007 /* SidebarView.swift */,
+				300000000000000000000008 /* ComposerView.swift */,
+				300000000000000000000014 /* ChatConversationView.swift */,
+				300000000000000000000017 /* ArtifactSandboxView.swift */,
+				30000000000000000000001A /* ArtifactRenderers.swift */,
+				300000000000000000000018 /* GeneratedMediaView.swift */,
+				30000000000000000000000E /* AuthenticationView.swift */,
+				30000000000000000000001E /* AttachmentPickerSupport.swift */,
+				300000000000000000000021 /* AccountSettingsViews.swift */,
+				B20000000000000000000004 /* ChatGPTPlanSettingsSection.swift */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		500000000000000000000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000006 /* MyChatRuntimeTests.xctest */,
+				A06400000000000000000012 /* MyChatUITests.xctest */,
+				30000000000000000000000A /* MyChat.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		500000000000000000000009 /* ProviderIcons */ = {
+			isa = PBXGroup;
+			children = (
+				300000000000000000000022 /* provider-claude.png */,
+				300000000000000000000023 /* provider-deepseek.png */,
+				300000000000000000000024 /* provider-gemini.png */,
+				300000000000000000000025 /* provider-minimax.png */,
+				300000000000000000000026 /* provider-openai.png */,
+				300000000000000000000027 /* provider-kimi.png */,
+				300000000000000000000028 /* provider-grok.png */,
+				300000000000000000000029 /* provider-zai.png */,
+			);
+			path = ProviderIcons;
+			sourceTree = "<group>";
+		};
+		50000000000000000000000A /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				F72000000000000000000005 /* DotMotion */,
+				30000000000000000000002A /* Fonts */,
+				F25000000000000000000002 /* ReadingFonts */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A06400000000000000000007 /* MyChatRuntimeTests */ = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000004 /* MyChatRuntimeTests.swift */,
+			);
+			path = MyChatRuntimeTests;
+			sourceTree = "<group>";
+		};
+		A06400000000000000000013 /* MyChatUITests */ = {
+			isa = PBXGroup;
+			children = (
+				A06400000000000000000010 /* MyChatUITests.swift */,
+			);
+			path = MyChatUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000001 /* MyChatIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 600000000000000000000002 /* Build configuration list for PBXNativeTarget "MyChatIOS" */;
+			buildPhases = (
+				700000000000000000000001 /* Sources */,
+				400000000000000000000001 /* Frameworks */,
+				700000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MyChatIOS;
+			productName = MyChat;
+			productReference = 30000000000000000000000A /* MyChat.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A06400000000000000000003 /* MyChatRuntimeTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A0640000000000000000000A /* Build configuration list for PBXNativeTarget "MyChatRuntimeTests" */;
+			buildPhases = (
+				A06400000000000000000008 /* Sources */,
+				A06400000000000000000009 /* Frameworks */,
+				A06400000000000000000022 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A0640000000000000000000E /* PBXTargetDependency */,
+			);
+			name = MyChatRuntimeTests;
+			productName = MyChatRuntimeTests;
+			productReference = A06400000000000000000006 /* MyChatRuntimeTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A0640000000000000000000F /* MyChatUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A06400000000000000000016 /* Build configuration list for PBXNativeTarget "MyChatUITests" */;
+			buildPhases = (
+				A06400000000000000000014 /* Sources */,
+				A06400000000000000000015 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A0640000000000000000001A /* PBXTargetDependency */,
+			);
+			name = MyChatUITests;
+			productName = MyChatUITests;
+			productReference = A06400000000000000000012 /* MyChatUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		800000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					100000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+				};
+			};
+			buildConfigurationList = 600000000000000000000001 /* Build configuration list for PBXProject "MyChatIOS" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 500000000000000000000001;
+			productRefGroup = 500000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A0640000000000000000000F /* MyChatUITests */,
+				A06400000000000000000003 /* MyChatRuntimeTests */,
+				100000000000000000000001 /* MyChatIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		700000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F71000000000000000000005 /* DotMotion in Resources */,
+				F25000000000000000000001 /* ReadingFonts in Resources */,
+				200000000000000000000019 /* Assets.xcassets in Resources */,
+				200000000000000000000020 /* provider-claude.png in Resources */,
+				200000000000000000000021 /* provider-deepseek.png in Resources */,
+				200000000000000000000022 /* provider-gemini.png in Resources */,
+				200000000000000000000023 /* provider-minimax.png in Resources */,
+				200000000000000000000024 /* provider-openai.png in Resources */,
+				200000000000000000000025 /* provider-kimi.png in Resources */,
+				200000000000000000000026 /* provider-grok.png in Resources */,
+				200000000000000000000027 /* provider-zai.png in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A06400000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A06400000000000000000021 /* MyChatRuntimeTests/tts.mp3 in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		700000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10200000000000000000001 /* HealthConnector.swift in Sources */,
+				B10200000000000000000002 /* GmailConnector.swift in Sources */,
+				B10200000000000000000003 /* DefaultConnectorsView.swift in Sources */,
+				F71000000000000000000006 /* WelcomeMotionView.swift in Sources */,
+				F71000000000000000000003 /* DotThinkingView.swift in Sources */,
+				F71000000000000000000004 /* MyChatSettingsView.swift in Sources */,
+				F71000000000000000000002 /* ChatDocumentViews.swift in Sources */,
+				F71000000000000000000001 /* SpeechPlaybackController.swift in Sources */,
+				A06400000000000000000002 /* NativeRuntimeFixture.swift in Sources */,
+				200000000000000000000001 /* MyChatIOSApp.swift in Sources */,
+				200000000000000000000002 /* AppModel.swift in Sources */,
+				200000000000000000000003 /* Theme.swift in Sources */,
+				200000000000000000000004 /* ModelCatalog.swift in Sources */,
+				200000000000000000000009 /* AuthModels.swift in Sources */,
+				20000000000000000000000D /* ChatModels.swift in Sources */,
+				200000000000000000000010 /* ConversationModels.swift in Sources */,
+				200000000000000000000013 /* WorkspaceModels.swift in Sources */,
+				20000000000000000000001A /* AttachmentModels.swift in Sources */,
+				20000000000000000000001D /* AccountModels.swift in Sources */,
+				200000000000000000000005 /* ModelCatalogClient.swift in Sources */,
+				20000000000000000000000A /* MobileConfigurationClient.swift in Sources */,
+				20000000000000000000000B /* SupabaseAuthClient.swift in Sources */,
+				20000000000000000000000E /* ChatAPIClient.swift in Sources */,
+				20000000000000000000000F /* JobEventStream.swift in Sources */,
+				200000000000000000000011 /* SupabaseDataClient.swift in Sources */,
+				200000000000000000000014 /* WorkspaceDataClient.swift in Sources */,
+				200000000000000000000017 /* CodeAPIClient.swift in Sources */,
+				20000000000000000000001B /* AttachmentPreparation.swift in Sources */,
+				20000000000000000000001E /* AccountSettingsClient.swift in Sources */,
+				200000000000000000000006 /* MainShellView.swift in Sources */,
+				F73000000000000000000007 /* SheetEntranceMotion.swift in Sources */,
+				200000000000000000000007 /* SidebarView.swift in Sources */,
+				200000000000000000000008 /* ComposerView.swift in Sources */,
+				200000000000000000000012 /* ChatConversationView.swift in Sources */,
+				200000000000000000000015 /* ArtifactSandboxView.swift in Sources */,
+				200000000000000000000018 /* ArtifactRenderers.swift in Sources */,
+				200000000000000000000016 /* GeneratedMediaView.swift in Sources */,
+				20000000000000000000000C /* AuthenticationView.swift in Sources */,
+				20000000000000000000001C /* AttachmentPickerSupport.swift in Sources */,
+				20000000000000000000001F /* AccountSettingsViews.swift in Sources */,
+				B10000000000000000000001 /* ChatGPTPlanModels.swift in Sources */,
+				B10000000000000000000002 /* ChatGPTPlanProvider.swift in Sources */,
+				B10000000000000000000003 /* ChatGPTPlanHistoryClient.swift in Sources */,
+				B10000000000000000000004 /* ChatGPTPlanSettingsSection.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A06400000000000000000008 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A06400000000000000000005 /* MyChatRuntimeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A06400000000000000000014 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A06400000000000000000011 /* MyChatUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A0640000000000000000000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000001 /* MyChatIOS */;
+			targetProxy = A0640000000000000000000D /* PBXContainerItemProxy */;
+		};
+		A0640000000000000000001A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000001 /* MyChatIOS */;
+			targetProxy = A06400000000000000000019 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		900000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		900000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		900000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MyChatIOS/MyChat.entitlements;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 102;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MyChatIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios;
+				PRODUCT_NAME = MyChat;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		900000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = MyChatIOS/MyChat.entitlements;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 102;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MyChatIOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios;
+				PRODUCT_NAME = MyChat;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A0640000000000000000000B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios.MyChatRuntimeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MyChat.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MyChat";
+			};
+			name = Debug;
+		};
+		A0640000000000000000000C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios.MyChatRuntimeTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MyChat.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MyChat";
+			};
+			name = Release;
+		};
+		A06400000000000000000017 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios.MyChatUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = MyChatIOS;
+			};
+			name = Debug;
+		};
+		A06400000000000000000018 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = RSW8MPXAN3;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.mychat.ios.MyChatUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = MyChatIOS;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		600000000000000000000001 /* Build configuration list for PBXProject "MyChatIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				900000000000000000000001 /* Debug */,
+				900000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		600000000000000000000002 /* Build configuration list for PBXNativeTarget "MyChatIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				900000000000000000000003 /* Debug */,
+				900000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A0640000000000000000000A /* Build configuration list for PBXNativeTarget "MyChatRuntimeTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A0640000000000000000000B /* Debug */,
+				A0640000000000000000000C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A06400000000000000000016 /* Build configuration list for PBXNativeTarget "MyChatUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A06400000000000000000017 /* Debug */,
+				A06400000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 800000000000000000000001 /* Project object */;
+}

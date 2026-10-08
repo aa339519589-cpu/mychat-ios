@@ -1,0 +1,11 @@
+{
+  "tileSize": 160,
+  "columns": 8,
+  "frames": 32,
+  "duration": 4.0,
+  "states": [
+    "idle",
+    "think",
+    "draw"
+  ]
+}
