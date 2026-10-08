@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       run_offline_summary_tests:
-        description: "Run the two fixture-only public-summary runtime tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        description: "Run the two fixture-only public-summary runtime tests and the artifact-count regression only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
         required: false
         type: boolean
         default: false
@@ -86,7 +86,7 @@ jobs:
             -skip-testing:MyChatRuntimeTests/MyChatRuntimeTests/testOptInLiveCustomEndpointFirstTextTiming \
             test
 
-      - name: Run focused public-summary runtime tests on an installed iOS 27 simulator
+      - name: Run focused summary and artifact runtime tests on an installed iOS 27 simulator
         if: ${{ inputs.run_offline_summary_tests }}
         working-directory: NativeApp
         run: |
@@ -122,6 +122,7 @@ jobs:
             -collect-test-diagnostics never \
             -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence \
             -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewKeepsOnlyExplicitPublicTextAndHandlesEmptyValues \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testArtifactDocumentCountsPreserveNativeRenderingDecision \
             CODE_SIGNING_ALLOWED=NO \
             test
 
