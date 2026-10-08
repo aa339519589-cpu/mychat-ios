@@ -133,6 +133,14 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "paper-closed-after-repeat")
     }
 
+    @MainActor private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let hittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: element
+        )
+        return XCTWaiter.wait(for: [hittable], timeout: timeout) == .completed
+    }
+
     @MainActor private func isEmptyTextField(_ field: XCUIElement, placeholder: String) -> Bool {
         guard let value = field.value as? String else { return true }
         return value.isEmpty || value == placeholder
@@ -832,6 +840,65 @@ final class MyChatUITests: XCTestCase {
         XCTAssertFalse(app.switches["扩展思考"].exists)
         XCTAssertFalse(app.switches["自动网页搜索"].exists)
         saveScreenshot(app, "add-menu-dark")
+    }
+
+    @MainActor func testComposerSheetsReopenAfterSelectingConversation() {
+        let app = launch()
+        app.buttons["header.sidebar"].tap()
+        let conversation = app.buttons["隔离测试对话"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        conversation.tap()
+
+        let add = app.buttons["添加内容和工具"].firstMatch
+        let model = app.buttons["选择模型"].firstMatch
+        XCTAssertTrue(waitForHittable(add, timeout: 10),
+            "The composer must become interactive after a history row closes the drawer")
+        XCTAssertTrue(waitForHittable(model, timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable)
+
+        let routes: [(XCUIElement, String)] = [
+            (model, "选择模型"),
+            (add, "添加到聊天"),
+            (model, "选择模型"),
+            (add, "添加到聊天")
+        ]
+        for (button, title) in routes {
+            XCTAssertTrue(waitForHittable(button, timeout: 5))
+            button.tap()
+            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
+            let close = app.buttons["关闭"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 5))
+            close.tap()
+            XCTAssertTrue(waitForHittable(button, timeout: 10),
+                "The same composer button must remain available after each dismissal")
+        }
+    }
+
+    @MainActor func testComposerSheetsStayReachableDuringIsolatedGeneration() {
+        let app = launch(extra: ["--ui-test-generating"])
+        let stop = app.buttons["composer.stop"].firstMatch
+        XCTAssertTrue(waitForHittable(stop, timeout: 15),
+            "The isolated fixture must hold a real in-progress generation")
+
+        let routes: [(XCUIElement, String)] = [
+            (app.buttons["选择模型"].firstMatch, "选择模型"),
+            (app.buttons["添加内容和工具"].firstMatch, "添加到聊天"),
+            (app.buttons["选择模型"].firstMatch, "选择模型"),
+            (app.buttons["添加内容和工具"].firstMatch, "添加到聊天")
+        ]
+        for (button, title) in routes {
+            XCTAssertTrue(waitForHittable(button, timeout: 5),
+                "Composer controls must remain reachable while a response streams")
+            button.tap()
+            XCTAssertTrue(app.staticTexts[title].firstMatch.waitForExistence(timeout: 10))
+            let close = app.buttons["关闭"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 5))
+            close.tap()
+            XCTAssertTrue(waitForHittable(stop, timeout: 10),
+                "Dismissing a composer sheet must restore the still-running generation UI")
+            XCTAssertTrue(waitForHittable(button, timeout: 5))
+        }
+        app.terminate()
     }
 
     @MainActor func testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard() {
