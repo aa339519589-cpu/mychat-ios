@@ -133,6 +133,11 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "paper-closed-after-repeat")
     }
 
+    @MainActor private func isEmptyTextField(_ field: XCUIElement, placeholder: String) -> Bool {
+        guard let value = field.value as? String else { return true }
+        return value.isEmpty || value == placeholder
+    }
+
     @MainActor private func openConnectorSettings(in app: XCUIApplication) {
         app.buttons["header.sidebar"].tap()
         let accountSettings = app.buttons["sidebar.accountSettings"].firstMatch
@@ -352,7 +357,7 @@ final class MyChatUITests: XCTestCase {
         app.buttons["添加自定义连接器"].firstMatch.tap()
         let reopenedName = app.textFields["connector.name"].firstMatch
         XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
-        XCTAssertEqual(reopenedName.value as? String, "",
+        XCTAssertTrue(isEmptyTextField(reopenedName, placeholder: "名称"),
             "Reopening a saved editor must start a fresh custom connector")
         reopenedName.tap()
         reopenedName.typeText("Canceled draft")
@@ -363,7 +368,7 @@ final class MyChatUITests: XCTestCase {
         addMenu.tap()
         app.buttons["添加自定义连接器"].firstMatch.tap()
         XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
-        XCTAssertEqual(reopenedName.value as? String, "",
+        XCTAssertTrue(isEmptyTextField(reopenedName, placeholder: "名称"),
             "Reopening after cancel must not restore a discarded draft")
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
