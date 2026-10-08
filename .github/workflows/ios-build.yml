@@ -109,10 +109,10 @@ jobs:
             -destination "platform=iOS Simulator,id=$device_id" \
             -parallel-testing-enabled NO \
             -collect-test-diagnostics never \
-            -only-testing:MyChatUITests/testComposerButtonsAcceptSmallHorizontalTouchDrift \
-            -only-testing:MyChatUITests/testComposerSheetsReopenAfterSelectingConversation \
-            -only-testing:MyChatUITests/testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard \
-            -only-testing:MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
-            -only-testing:MyChatUITests/testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer \
-            -only-testing:MyChatUITests/testVerticalChatScrollMovesContentWithoutOpeningDrawer \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerButtonsAcceptSmallHorizontalTouchDrift \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsReopenAfterSelectingConversation \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard \
+            -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
+            -only-testing:MyChatUITests/MyChatUITests/testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer \
+            -only-testing:MyChatUITests/MyChatUITests/testVerticalChatScrollMovesContentWithoutOpeningDrawer \
             test
