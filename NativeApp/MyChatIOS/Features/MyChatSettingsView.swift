@@ -8,7 +8,6 @@ struct MyChatSettingsView: View {
     @StateObject private var account: SettingsAccountUpdates
     @State private var path: [Destination] = []
     @AppStorage("mychat.profile.avatarJPEG") private var avatarData = Data()
-    @AppStorage(HapticFeedback.preferenceKey) private var hapticsEnabled = true
     @State private var avatar: UIImage?
     @State private var signingOut = false
     init(appModel: AppModel, close: @escaping () -> Void) {
@@ -23,23 +22,10 @@ struct MyChatSettingsView: View {
                     NativeSettingsSection(title: "账户") {
                         row("个人资料", icon: "person.crop.circle", destination: .profile)
                         divider
-                        row("密码", icon: "lock", destination: .password)
-                        divider
-                        row("隐私", icon: "lock.shield", destination: .privacy)
+                        row("密码与隐私", icon: "lock.shield", destination: .passwordPrivacy)
                     }
                     NativeSettingsSection(title: "应用") {
                         row("功能", icon: "slider.vertical.3", destination: .capabilities)
-                        divider
-                        Toggle(isOn: $hapticsEnabled) {
-                            Label("触觉反馈", systemImage: "hand.tap")
-                                .font(MyChatTypography.navigation)
-                        }
-                        .tint(MyChatTheme.brand)
-                        .padding(.horizontal, 20).padding(.vertical, 12)
-                        .accessibilityIdentifier("settings.haptics")
-                        .onChange(of: hapticsEnabled) { _, enabled in
-                            if enabled { HapticFeedback.play(.selection) }
-                        }
                         if appModel.authSession != nil {
                             divider
                             row("连接器", icon: "square.on.square", destination: .connectors)
@@ -84,6 +70,19 @@ struct MyChatSettingsView: View {
                 case .profile: SystemPromptSettingsView(appModel: appModel)
                 case .privacy: DataControlsSettingsView()
                 case .password: ChangePasswordSettingsView()
+                case .passwordPrivacy:
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            row("密码", icon: "lock", destination: .password)
+                            divider
+                            row("隐私", icon: "lock.shield", destination: .privacy)
+                        }
+                        .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 24))
+                        .padding(20)
+                    }
+                    .navigationTitle("密码与隐私")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .background(MyChatTheme.canvas)
                 case .capabilities: CapabilitiesSettingsView()
                 case .connectors: MCPConnectorsSettingsView()
                 case .licenses: ScrollView {
@@ -126,7 +125,7 @@ struct MyChatSettingsView: View {
             return try? String(contentsOf: url, encoding: .utf8)
         }.joined(separator: "\n\n")
     }
-    private enum Destination: Hashable { case profile, password, privacy, capabilities, connectors, licenses }
+    private enum Destination: Hashable { case profile, password, privacy, passwordPrivacy, capabilities, connectors, licenses }
 }
 struct NativeSettingsSection<Content: View>: View {
     let title: String

@@ -710,6 +710,7 @@ private struct SidebarGlyphPath: Shape {
 
 struct CapabilitiesSettingsView: View {
     @EnvironmentObject private var appModel: AppModel
+    @AppStorage(HapticFeedback.preferenceKey) private var hapticsEnabled = true
     @State private var errorMessage: String?
     var body: some View {
         ScrollView {
@@ -718,6 +719,12 @@ struct CapabilitiesSettingsView: View {
                     capability("内联可视化", icon: "chart.xyaxis.line", isOn: $appModel.renderEnabled)
                     divider
                     capability("网页搜索", icon: "globe", isOn: $appModel.webSearchEnabled)
+                    divider
+                    capability("触觉反馈", icon: "hand.tap", isOn: $hapticsEnabled)
+                        .accessibilityIdentifier("settings.haptics")
+                        .onChange(of: hapticsEnabled) { _, enabled in
+                            if enabled { HapticFeedback.play(.selection) }
+                        }
                 }
                 NativeSettingsSection(title: "记忆") {
                     capability("从对话中生成记忆", isOn: Binding(

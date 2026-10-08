@@ -68,6 +68,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(send.frame.height, 44)
         app.buttons["header.sidebar"].tap()
         app.buttons["sidebar.accountSettings"].tap()
+        app.buttons["功能"].firstMatch.tap()
         let toggle = app.switches["settings.haptics"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         if toggle.value as? String == "1" { toggle.tap() }
@@ -75,6 +76,7 @@ final class MyChatUITests: XCTestCase {
         app.terminate(); app.launch()
         app.buttons["header.sidebar"].tap()
         app.buttons["sidebar.accountSettings"].tap()
+        app.buttons["功能"].firstMatch.tap()
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         XCTAssertEqual(toggle.value as? String, "0", "Haptic preference must persist across relaunch")
         toggle.tap()
@@ -786,6 +788,21 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Settings"].firstMatch.waitForExistence(timeout: 5)
             || app.staticTexts["设置"].firstMatch.exists)
         saveScreenshot(app, "account-settings")
+    }
+
+    @MainActor func testPasswordAndPrivacyShareOneSettingsEntry() {
+        let app = launch()
+        app.buttons["打开侧边栏"].firstMatch.tap()
+        app.buttons["sidebar.accountSettings"].tap()
+
+        let combined = app.buttons["密码与隐私"].firstMatch
+        XCTAssertTrue(combined.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["密码"].exists)
+        XCTAssertFalse(app.buttons["隐私"].exists)
+        combined.tap()
+
+        XCTAssertTrue(app.buttons["密码"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["隐私"].firstMatch.exists)
     }
 
     @MainActor func testComposerKeyboardAndPrivacyTransitionsStayStable() {
