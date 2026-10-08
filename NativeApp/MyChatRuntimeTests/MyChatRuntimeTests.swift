@@ -87,7 +87,11 @@ import CoreText
         XCTAssertEqual(model.activeConversationID, second.conversationID)
         XCTAssertFalse(model.messages.contains { $0.id == first.assistantMessageID })
         model.openConversation(firstRecord)
-        try await waitUntil { model.messages.contains { $0.id == first.assistantMessageID && $0.content == "A 在后台完成" } }
+        XCTAssertTrue(model.isConversationLoadPending)
+        try await waitUntil {
+            !model.isConversationLoadPending
+                && model.messages.contains { $0.id == first.assistantMessageID && $0.content == "A 在后台完成" }
+        }
         XCTAssertTrue(model.generatingConversationIDs.contains(second.conversationID))
         transport.complete(second, text: "B 也独立完成", sequence: 1)
         try await waitUntil { !model.generatingConversationIDs.contains(second.conversationID) }
@@ -134,6 +138,36 @@ import CoreText
         try await Task.sleep(for: .milliseconds(40))
         XCTAssertEqual(scroll.contentOffset.y, 200, accuracy: 0.5,
             "A touch after scheduling restoration must cancel the old scroll intent")
+        controller.pauseFollowAnimation()
+    }
+
+    func testHistoryLoadDefersInitialFollowUntilLayoutIsStable() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        let scroll = UIScrollView(frame: window.bounds)
+        scroll.contentInsetAdjustmentBehavior = .never
+        // The empty transcript still has nonzero content from its top and bottom breathing room.
+        scroll.contentSize = CGSize(width: 390, height: 160)
+        window.addSubview(scroll)
+        let controller = ChatScrollController()
+        controller.setComposerGeometry(.init(bottomPadding: 300, topInWindow: 760))
+        let conversationID = UUID()
+        controller.attach(scroll, conversationID: conversationID, loadPending: true)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 0, accuracy: 0.5,
+            "Padding-only layout must not consume initial positioning while history is still loading")
+
+        scroll.contentSize = CGSize(width: 390, height: 3_000)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 0, accuracy: 0.5,
+            "History reflow must wait for the load state instead of starting a smooth follow")
+
+        controller.attach(scroll, conversationID: conversationID, loadPending: false)
+        try await Task.sleep(for: .milliseconds(20))
+        let settledOffset = scroll.contentOffset.y
+        XCTAssertGreaterThan(settledOffset, 1_000)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(scroll.contentOffset.y, settledOffset, accuracy: 0.5,
+            "The final correction after history load should settle immediately, not drift over a follow animation")
         controller.pauseFollowAnimation()
     }
 

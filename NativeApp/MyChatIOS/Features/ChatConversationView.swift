@@ -97,7 +97,8 @@ struct ChatConversationView: View, Equatable {
             .padding(.horizontal, 16)
             .padding(.top, 74)
             .background(alignment: .bottomLeading) {
-                NativeChatScrollObserver(controller: scrollController, conversationID: updates.snapshot.conversationID)
+                NativeChatScrollObserver(controller: scrollController, conversationID: updates.snapshot.conversationID,
+                    loadPending: updates.snapshot.isConversationLoadPending)
                     .frame(width: 0, height: 0)
             }
             // Keep real scrollable breathing room below the reading anchor;
@@ -215,6 +216,7 @@ private struct TranscriptSnapshot {
     var connectorApps: [UUID: [ChatConnectorAppEvent]]
     var accessToken: String?
     var conversationID: UUID?
+    var isConversationLoadPending: Bool
     var isGenerating: Bool
     var canRegenerate: Bool
     var error: String?
@@ -230,6 +232,7 @@ private struct TranscriptSnapshot {
         connectorApps = model.connectorAppsByMessageID
         accessToken = model.authSession?.accessToken
         conversationID = model.activeConversationID
+        isConversationLoadPending = model.isConversationLoadPending
         isGenerating = model.isCurrentConversationGenerating
         canRegenerate = model.selectedModel != nil && model.authSession != nil
             && !model.isCurrentConversationBusy
@@ -286,6 +289,7 @@ private struct TranscriptSnapshot {
             model.$toolActivitiesByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$connectorAppsByMessageID.dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$activeConversationID.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
+            model.$isConversationLoadPending.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$generatingConversationIDs.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$modelOutputCompletedConversationIDs.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
             model.$conversationErrors.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher(),
@@ -525,6 +529,7 @@ enum ChatReadingAnchor {
     private weak var scrollView: UIScrollView?
     private var observations: [NSKeyValueObservation] = []
     private var conversationID: UUID?
+    private var conversationLoadPending = false
     private var followingLatest = true
     private var explicitBottomFollow = false
     private var generationActive = false
@@ -667,7 +672,13 @@ enum ChatReadingAnchor {
         actions.forEach { $0() }
     }
 
-    func attach(_ scrollView: UIScrollView, conversationID: UUID?) {
+    func attach(_ scrollView: UIScrollView, conversationID: UUID?, loadPending: Bool = false) {
+        let loadStateChanged = conversationLoadPending != loadPending
+        conversationLoadPending = loadPending
+        if loadPending && followingLatest {
+            initialPositionPending = true
+            stopSmoothFollow()
+        }
         publishViewportAfterLayout()
         if self.scrollView !== scrollView {
             initialPositionPending = true
@@ -710,6 +721,7 @@ enum ChatReadingAnchor {
             restoreConversationPosition()
             scheduleFollow()
         }
+        if loadStateChanged && !loadPending { scheduleFollow() }
     }
 
     func setGenerationActive(_ active: Bool) {
@@ -862,6 +874,10 @@ enum ChatReadingAnchor {
     private func contentGeometryChanged() {
         publishViewportAfterLayout()
         if pendingRestoration != nil { scheduleRestoration(); return }
+        if conversationLoadPending {
+            if followingLatest { initialPositionPending = true; stopSmoothFollow() }
+            return
+        }
         guard followingLatest else {
             publishVisibility()
             return
@@ -887,6 +903,10 @@ enum ChatReadingAnchor {
 
     private func scheduleFollow() {
         guard !followPaused else { return }
+        if conversationLoadPending {
+            if followingLatest { initialPositionPending = true; stopSmoothFollow() }
+            return
+        }
         if generationActive && !initialPositionPending {
             startSmoothFollow()
             return
@@ -896,6 +916,10 @@ enum ChatReadingAnchor {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.followScheduled = false
+            if self.conversationLoadPending {
+                if self.followingLatest { self.initialPositionPending = true; self.stopSmoothFollow() }
+                return
+            }
             // Check UIKit again at execution time. A touch may have started
             // after the layout callback scheduled this block.
             guard self.followingLatest, !self.followPaused, !self.nativeInteractionActive,
@@ -1005,17 +1029,18 @@ enum ChatReadingAnchor {
 private struct NativeChatScrollObserver: UIViewRepresentable {
     let controller: ChatScrollController
     let conversationID: UUID?
+    let loadPending: Bool
 
     func makeUIView(context: Context) -> ScrollMarker {
         let marker = ScrollMarker()
         marker.isUserInteractionEnabled = false
-        marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID) }
+        marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID, loadPending: loadPending) }
         marker.bodyBottom = { [weak controller] bottom in controller?.setLaidOutBodyBottom(bottom) }
         marker.onLayout = { [weak controller] in controller?.logScrollGeometry("marker-layout") }
         return marker
     }
     func updateUIView(_ marker: ScrollMarker, context: Context) {
-        marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID) }
+        marker.attach = { [weak controller] scroll in controller?.attach(scroll, conversationID: conversationID, loadPending: loadPending) }
         marker.bodyBottom = { [weak controller] bottom in controller?.setLaidOutBodyBottom(bottom) }
         marker.onLayout = { [weak controller] in controller?.logScrollGeometry("marker-layout") }
         marker.findScrollView()

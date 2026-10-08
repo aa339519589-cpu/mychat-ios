@@ -46,6 +46,7 @@ final class AppModel: ObservableObject {
 
     @Published private(set) var catalogPhase: CatalogPhase = .idle
     @Published private(set) var conversationPhase: ConversationPhase = .idle
+    @Published private(set) var isConversationLoadPending = false
     @Published private(set) var models: [ModelCatalogItem] = [] {
         didSet { persistCurrentAccountSettingsCache() }
     }
@@ -458,6 +459,7 @@ final class AppModel: ObservableObject {
         conversationLoadTask?.cancel()
         conversationLoadTask = nil
         conversationLoadToken = nil
+        isConversationLoadPending = false
         selectedDestination = .chats
         draft = ""
         pendingAttachments = []
@@ -491,6 +493,7 @@ final class AppModel: ObservableObject {
         conversationLoadTask?.cancel()
         conversationLoadTask = nil
         conversationLoadToken = nil
+        isConversationLoadPending = false
         selectedDestination = .chats
         draft = ""
         pendingAttachments = []
@@ -705,6 +708,7 @@ final class AppModel: ObservableObject {
         conversationLoadTask?.cancel()
         conversationLoadTask = nil
         conversationLoadToken = nil
+        isConversationLoadPending = false
         generationRecoveryTasks.values.forEach { $0.cancel() }
         generationRecoveryTasks = [:]
         generationReconnects = []
@@ -2229,6 +2233,7 @@ final class AppModel: ObservableObject {
         conversationLoadTask?.cancel()
         let loadToken = UUID()
         conversationLoadToken = loadToken
+        isConversationLoadPending = true
         activeConversationID = conversationID
         isPrivateChat = false
         restoreConnectorSelection(for: conversationID)
@@ -2629,6 +2634,7 @@ final class AppModel: ObservableObject {
             if conversationLoadToken == loadToken {
                 conversationLoadTask = nil
                 conversationLoadToken = nil
+                isConversationLoadPending = false
             }
         }
 
