@@ -192,6 +192,12 @@ private struct CodeSessionDetailView: View {
     @State private var draft = ""
     @State private var activeAdmission: CodeAdmission?
     @State private var isCancelling = false
+    @State private var eventSubscription: Task<Void, Never>?
+    @State private var eventSubscriptionJobID: UUID?
+    @State private var eventSubscriptionToken: UUID?
+    @State private var cancellationReconciliation: Task<Void, Never>?
+    @State private var cancellationReconciliationToken: UUID?
+    @State private var cancellationPending = false
     @State private var streamedResponseID: UUID?
     @State private var streamedContent = ""
     @State private var steps: [CodeAgentStep] = []
@@ -413,9 +419,11 @@ private struct CodeSessionDetailView: View {
                     .disabled(isCancelling || (activeAdmission == nil && (isAdmitting || isApplying || !canSend)))
                     .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
                     .accessibilityLabel(activeAdmission != nil
-                        ? (isCancelling ? "正在停止 Code 任务" : "停止 Code 任务")
+                        ? (isCancelling ? "正在停止 Code 任务" : (cancellationPending ? "重试停止 Code 任务" : "停止 Code 任务"))
                         : ((isAdmitting || isApplying) ? "正在处理 Code 任务" : "发送编程消息"))
-                    .accessibilityHint(activeAdmission != nil ? "取消正在运行的云端任务" : "发送 Code 任务")
+                    .accessibilityHint(activeAdmission != nil
+                        ? (cancellationPending ? "取消状态待确认；可安全重试同一任务" : "取消正在运行的云端任务")
+                        : "发送 Code 任务")
                     .accessibilityIdentifier("code.session.send")
                 }
                 .padding(.horizontal, 6)
@@ -440,7 +448,7 @@ private struct CodeSessionDetailView: View {
                 consumedInitialTurn = true
                 prepare(initialTurn)
                 isLoading = false
-                await consume(initialTurn.admission)
+                startConsuming(initialTurn.admission)
             } else {
                 await load()
                 await recover()
@@ -510,7 +518,6 @@ private struct CodeSessionDetailView: View {
             }
             if let admission = recovery.operationAdmission ?? recovery.admission {
                 lastTaskID = admission.taskID
-                activeAdmission = admission
                 streamedResponseID = recovery.admission?.responseID ?? admission.responseID ?? admission.taskID
                 // Replay from zero rebuilds tool plans, receipts and text as one
                 // consistent snapshot; the stream verifies monotonic sequence.
@@ -518,7 +525,14 @@ private struct CodeSessionDetailView: View {
                 steps = []
                 plans = []
                 toolActivities = []
-                await consume(admission)
+                if isTerminalCodeStatus(recovery.task?.status) || isTerminalCodeStatus(admission.status) {
+                    activeAdmission = nil
+                    isCancelling = false
+                    cancellationPending = false
+                } else {
+                    activeAdmission = admission
+                    startConsuming(admission)
+                }
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -601,7 +615,7 @@ private struct CodeSessionDetailView: View {
                 branch: branch.isEmpty ? nil : branch)
             prepare(start)
             isAdmitting = false
-            await consume(start.admission)
+            startConsuming(start.admission)
         } catch {
             isAdmitting = false
             messages.removeAll { $0.id == localID }
@@ -700,7 +714,23 @@ private struct CodeSessionDetailView: View {
         }
     }
 
-    private func consume(_ admission: CodeAdmission) async {
+    @MainActor private func startConsuming(_ admission: CodeAdmission) {
+        guard eventSubscriptionJobID != admission.jobID || eventSubscription == nil else { return }
+        eventSubscription?.cancel()
+        let token = UUID()
+        eventSubscriptionJobID = admission.jobID
+        eventSubscriptionToken = token
+        eventSubscription = Task { @MainActor in
+            await consume(admission, subscriptionToken: token)
+            if eventSubscriptionToken == token {
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+            }
+        }
+    }
+
+    @MainActor private func consume(_ admission: CodeAdmission, subscriptionToken: UUID) async {
         var terminalError: String?
         do {
             let events = try await appModel.codeEvents(for: admission)
@@ -732,29 +762,164 @@ private struct CodeSessionDetailView: View {
                 }
             }
             errorMessage = terminalError
+        } catch is CancellationError {
+            if Task.isCancelled { return }
+            errorMessage = "Code 任务事件流已取消，请刷新恢复状态"
         } catch {
             errorMessage = error.localizedDescription
         }
+        guard eventSubscriptionToken == subscriptionToken,
+              eventSubscriptionJobID == admission.jobID else { return }
+        // The byte stream has ended. Release its handle before recovery so the
+        // same still-running task can be resubscribed with a fresh token.
+        eventSubscription = nil
+        eventSubscriptionJobID = nil
+        eventSubscriptionToken = nil
         if let id = streamedResponseID,
            let index = messages.firstIndex(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
             messages[index].content = streamedContent
         }
         activeAdmission = nil
         isCancelling = false
+        cancellationPending = false
+        cancellationReconciliation?.cancel()
+        cancellationReconciliation = nil
+        cancellationReconciliationToken = nil
         await load()
-        if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) { taskDetail = recovery.task }
+        if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
+            taskDetail = recovery.task
+            if let task = recovery.task { branch = task.branch }
+            if let admission = recovery.operationAdmission ?? recovery.admission,
+               !isTerminalCodeStatus(recovery.task?.status),
+               !isTerminalCodeStatus(admission.status) {
+                lastTaskID = admission.taskID
+                activeAdmission = admission
+                streamedResponseID = recovery.admission?.responseID ?? admission.responseID ?? admission.taskID
+                streamedContent = ""
+                steps = []
+                plans = []
+                toolActivities = []
+                startConsuming(admission)
+            }
+        }
         if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
     }
 
-    private func stop(_ admission: CodeAdmission) async {
+    @MainActor private func stop(_ admission: CodeAdmission) async {
         guard !isCancelling, activeAdmission?.jobID == admission.jobID else { return }
         isCancelling = true
+        errorMessage = nil
         do {
-            try await appModel.cancelCodeRun(admission)
+            let response = try await appModel.cancelCodeRun(admission)
+            guard response.jobID == admission.jobID else {
+                isCancelling = false
+                errorMessage = "取消响应与当前 Code 任务不匹配"
+                return
+            }
+            if isTerminalCodeStatus(response.status) {
+                _ = await reconcileCancellation(admission, confirmedTerminalStatus: response.status)
+            } else {
+                isCancelling = false
+                cancellationPending = true
+                errorMessage = response.accepted || response.replayed
+                    ? "取消请求已提交，正在等待云端状态"
+                    : "取消请求尚未确认，可以重试"
+                scheduleCancellationReconciliation(for: admission)
+            }
         } catch {
             errorMessage = error.localizedDescription
             isCancelling = false
+            cancellationPending = true
+            scheduleCancellationReconciliation(for: admission)
         }
+    }
+
+    @MainActor private func scheduleCancellationReconciliation(for admission: CodeAdmission) {
+        guard cancellationReconciliation == nil else { return }
+        let token = UUID()
+        cancellationReconciliationToken = token
+        cancellationReconciliation = Task { @MainActor in
+            var delay: UInt64 = 2_000_000_000
+            while !Task.isCancelled, activeAdmission?.jobID == admission.jobID, cancellationPending {
+                do { try await Task.sleep(nanoseconds: delay) }
+                catch { break }
+                guard activeAdmission?.jobID == admission.jobID, cancellationPending else { break }
+                if isCancelling { continue }
+                if await reconcileCancellation(admission) { break }
+                delay = min(delay * 2, 15_000_000_000)
+            }
+            if cancellationReconciliationToken == token {
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+            }
+        }
+    }
+
+    @MainActor private func reconcileCancellation(_ admission: CodeAdmission, confirmedTerminalStatus: String? = nil) async -> Bool {
+        guard activeAdmission?.jobID == admission.jobID else { return true }
+        do {
+            let recovery = try await appModel.recoverCodeTask(sessionID: session.id)
+            guard activeAdmission?.jobID == admission.jobID else { return true }
+            taskDetail = recovery.task
+            if let task = recovery.task { branch = task.branch }
+            let currentAdmission = recovery.operationAdmission ?? recovery.admission
+            let terminal = isTerminalCodeStatus(confirmedTerminalStatus)
+                || isTerminalCodeStatus(recovery.task?.status)
+                || isTerminalCodeStatus(currentAdmission?.status)
+
+            if terminal {
+                activeAdmission = nil
+                isCancelling = false
+                cancellationPending = false
+                errorMessage = nil
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+                let oldSubscription = eventSubscription
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+                oldSubscription?.cancel()
+                await load()
+                return true
+            }
+
+            if let currentAdmission, currentAdmission.jobID == admission.jobID {
+                activeAdmission = currentAdmission
+            }
+            isCancelling = false
+            cancellationPending = true
+            let status = recovery.task?.status ?? currentAdmission?.status ?? "未知"
+            errorMessage = status.lowercased() == "cancelling"
+                ? "云端仍在处理取消，状态将继续同步"
+                : "任务仍在运行（\(status)），可重试停止"
+            return false
+        } catch {
+            guard activeAdmission?.jobID == admission.jobID else { return true }
+            if isTerminalCodeStatus(confirmedTerminalStatus) {
+                activeAdmission = nil
+                isCancelling = false
+                cancellationPending = false
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+                let oldSubscription = eventSubscription
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+                oldSubscription?.cancel()
+                await load()
+                errorMessage = "任务已结束，但无法刷新最新状态：\(error.localizedDescription)"
+                return true
+            }
+            isCancelling = false
+            cancellationPending = true
+            errorMessage = "无法确认 Code 任务状态：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func isTerminalCodeStatus(_ status: String?) -> Bool {
+        guard let status else { return false }
+        return ["completed", "failed", "cancelled", "canceled"].contains(status.lowercased())
     }
 
     private func requestPublish() async {
@@ -770,7 +935,7 @@ private struct CodeSessionDetailView: View {
                 confirmation = request
             case let .accepted(admission):
                 activeAdmission = admission
-                await consume(admission)
+                startConsuming(admission)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -790,7 +955,7 @@ private struct CodeSessionDetailView: View {
             }
             confirmation = nil
             activeAdmission = admission
-            await consume(admission)
+            startConsuming(admission)
         } catch {
             errorMessage = error.localizedDescription
         }
