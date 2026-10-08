@@ -3,12 +3,16 @@ import Speech
 import SwiftUI
 
 struct ComposerView: View {
+    @ObservedObject var layoutBudget: ComposerLayoutBudget
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var focused = false
     @State private var isSidebarPresented = false
     @State private var keyboardVisible = false
+    @State private var measuredHeight: CGFloat = 104
+    @State private var measuredEditorHeight: CGFloat = 26
     @StateObject private var editor = ComposerEditorSession()
     let openTools: () -> Void
     let openModels: () -> Void
@@ -27,8 +31,8 @@ struct ComposerView: View {
                     Image(systemName: "square.and.pencil").font(MyChatSystemFont.appFont(size: 17))
                     Text("正在编辑消息").font(MyChatSystemFont.appFont(size: 13))
                     Spacer()
-                    Button { HapticFeedback.impact(); appModel.cancelMessageEdit() } label: {
-                        Image(systemName: "xmark").font(MyChatSystemFont.appFont(size: 14)).frame(width: 36, height: 36)
+                    Button { HapticFeedback.play(.selection); appModel.cancelMessageEdit() } label: {
+                        Image(systemName: "xmark").font(MyChatSystemFont.appFont(size: 14)).frame(width: 44, height: 44)
                     }.buttonStyle(.plain).accessibilityLabel("取消编辑")
                 }
                 .foregroundStyle(MyChatTheme.secondaryText).padding(.leading, 15)
@@ -41,7 +45,7 @@ struct ComposerView: View {
                         ForEach(appModel.pendingAttachments) { attachment in
                             PendingAttachmentChip(
                                 attachment: attachment,
-                                remove: { appModel.removePendingAttachment(id: attachment.id) }
+                                remove: { HapticFeedback.play(.selection); appModel.removePendingAttachment(id: attachment.id) }
                             )
                         }
                     }
@@ -53,11 +57,13 @@ struct ComposerView: View {
             }
 
             ComposerTextInput(text: $appModel.draft, focused: $focused, editor: editor,
-                              placeholder: composerPlaceholder) {
+                              placeholder: composerPlaceholder,
+                              maximumHeight: max(1, layoutBudget.availableHeight - max(0, measuredHeight - measuredEditorHeight))) {
                 if appModel.canSendCurrentDraft {
                     sendDraftAndDismissKeyboard()
                 }
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measuredEditorHeight = $0 }
             .padding(.horizontal, 13)
             .padding(.top, 14)
 
@@ -82,14 +88,14 @@ struct ComposerView: View {
             Group {
                 if (dictation.isListening || isWaveformFixture) && !isCancellingDictation {
                     dictationControls
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
                 } else {
                     standardControls
-                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98)))
                 }
             }
-            .animation(.easeOut(duration: 0.18), value: dictation.isListening)
-            .animation(.easeOut(duration: 0.18), value: isCancellingDictation)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: dictation.isListening)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isCancellingDictation)
         }
         .frame(minHeight: 98)
         .fixedSize(horizontal: false, vertical: true)
@@ -129,11 +135,12 @@ struct ComposerView: View {
                 requestInitialFocus()
             }
         }
-        .animation(.smooth(duration: 0.28), value: appModel.pendingAttachments.map(\.id))
+        .animation(reduceMotion ? nil : .smooth(duration: 0.28), value: appModel.pendingAttachments.map(\.id))
         .onChange(of: appModel.editingMessageID) { _, id in
             if id != nil { initialFocusTask?.cancel(); initialFocusTask = nil; focused = true }
         }
         .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
+            measuredHeight = height
             NotificationCenter.default.post(name: .myChatComposerHeightChanged, object: height)
         }
     .onChange(of: appModel.selectedDestination) { _, destination in
@@ -183,6 +190,7 @@ struct ComposerView: View {
             .accessibilityLabel("添加内容和工具")
 
             Button {
+                HapticFeedback.play(.selection)
                 openModels()
             } label: {
                 HStack(spacing: 5) {
@@ -201,7 +209,7 @@ struct ComposerView: View {
                 .frame(height: 36)
                 .background(MyChatTheme.controlSurface, in: Capsule())
             }
-            .buttonStyle(MyChatBubblePressStyle(glassSurface: false))
+            .buttonStyle(ComposerActionStyle())
             .accessibilityLabel("选择模型")
             .accessibilityValue(modelPickerLabel)
 
@@ -222,7 +230,7 @@ struct ComposerView: View {
                     .font(MyChatSystemFont.appFont(size: 15, weight: .medium))
                     .foregroundStyle(MyChatTheme.text)
             }
-            .buttonStyle(MyChatIconButtonStyle(size: 36))
+            .buttonStyle(MyChatIconButtonStyle(size: 44))
             .accessibilityLabel("取消语音输入")
 
             ExpandedDictationWaveform(level: isWaveformFixture ? 0.42 : dictation.level).frame(maxWidth: .infinity)
@@ -235,7 +243,7 @@ struct ComposerView: View {
                     .frame(width: 36, height: 36)
                     .background(MyChatTheme.controlSurface, in: Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ComposerActionStyle())
             .accessibilityLabel("暂停语音输入，检查草稿")
 
             Button {
@@ -248,7 +256,7 @@ struct ComposerView: View {
                     .frame(width: 36, height: 36)
                     .background(MyChatTheme.sendActionSurface, in: Circle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ComposerActionStyle())
             .disabled(!appModel.canSendCurrentDraft)
             .opacity(appModel.canSendCurrentDraft ? 1 : 0.45)
             .accessibilityLabel("发送语音草稿")
@@ -261,7 +269,10 @@ struct ComposerView: View {
     @ViewBuilder
     private var trailingAction: some View {
         if appModel.isCurrentConversationGenerating {
-            Button(action: appModel.stopCurrentGeneration) {
+            Button {
+                HapticFeedback.play(.stop)
+                appModel.stopCurrentGeneration()
+            } label: {
                 Group {
                     if appModel.isCurrentConversationCancelling {
                         ProgressView().tint(MyChatTheme.text)
@@ -273,9 +284,10 @@ struct ComposerView: View {
                 .frame(width: 36, height: 36)
                 .background(MyChatTheme.controlSurface, in: Circle())
             }
-            .buttonStyle(MyChatBubblePressStyle(glassSurface: false))
+            .buttonStyle(ComposerActionStyle())
             .disabled(appModel.isCurrentConversationCancelling)
             .accessibilityLabel("停止生成")
+            .accessibilityIdentifier("composer.stop")
         } else if appModel.canSendCurrentDraft {
             Button(action: sendDraftAndDismissKeyboard) {
                 Image(systemName: "arrow.up")
@@ -284,10 +296,11 @@ struct ComposerView: View {
                     .frame(width: 36, height: 36)
                     .background(MyChatTheme.sendActionSurface, in: Circle())
             }
-            .buttonStyle(MyChatBubblePressStyle(glassSurface: false))
+            .buttonStyle(ComposerActionStyle())
             .disabled(!appModel.canSendCurrentDraft)
             .opacity(appModel.canSendCurrentDraft ? 1 : 0.45)
             .accessibilityLabel("发送")
+            .accessibilityIdentifier("composer.send")
         } else {
             Button(action: toggleDictation) {
                 Image(systemName: "mic")
@@ -332,6 +345,7 @@ struct ComposerView: View {
                 appModel.draft = existingDraft + separator + transcript
             },
             onError: { message in
+                HapticFeedback.play(.error)
                 dictationError = message
             }
         )
@@ -341,7 +355,7 @@ struct ComposerView: View {
         guard !isCancellingDictation else { return }
         HapticFeedback.impact()
         isCancellingDictation = true
-        withAnimation(.easeOut(duration: 0.16)) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
             dictation.stop()
         }
         appModel.draft = draftBeforeDictation
@@ -351,8 +365,8 @@ struct ComposerView: View {
     }
 
     private func acceptDictation() {
-        HapticFeedback.impact()
-        withAnimation(.easeOut(duration: 0.16)) {
+        HapticFeedback.play(.selection)
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) {
             dictation.stop()
         }
         dictationError = nil
@@ -362,7 +376,7 @@ struct ComposerView: View {
     private func sendDraftAndDismissKeyboard() {
         editor.commitPendingText()
         guard appModel.canSendCurrentDraft else { return }
-        HapticFeedback.impact()
+        HapticFeedback.play(.send)
         // Apply the optimistic message insertion and focus change in the same
         // run-loop turn so SwiftUI and UIKit begin their movement together.
         appModel.sendDraft()
@@ -900,14 +914,14 @@ private final class WaveformDisplayTarget: NSObject {
 private struct PendingAttachmentChip: View {
     let attachment: ChatPendingAttachment
     let remove: () -> Void
+    @State private var thumbnail: UIImage?
 
     @ViewBuilder
     var body: some View {
         if attachment.kind == .image {
             ZStack(alignment: .topTrailing) {
                 Group {
-                    if let dataURL = attachment.imageDataURL,
-                       let image = UIImage(dataURL: dataURL) {
+                    if let image = thumbnail {
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
@@ -928,9 +942,10 @@ private struct PendingAttachmentChip: View {
                         .foregroundStyle(MyChatTheme.text)
                         .frame(width: 20, height: 20)
                         .background(MyChatTheme.canvas.opacity(0.94), in: Circle())
+                        .frame(width: 44, height: 44, alignment: .topTrailing)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .offset(x: 4, y: -4)
                 .accessibilityLabel("移除 \(attachment.name)")
                 .accessibilityIdentifier("attachment.remove-" + attachment.id.uuidString)
             }
@@ -938,6 +953,12 @@ private struct PendingAttachmentChip: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片附件")
             .accessibilityIdentifier("attachment.image")
+            .task(id: attachment.imageDataURL) {
+                guard let source = attachment.imageDataURL else { return }
+                let image = await Task.detached(priority: .utility) { ChatImageThumbnailCache.image(source) }.value
+                guard !Task.isCancelled else { return }
+                thumbnail = image
+            }
         } else {
             HStack(spacing: 8) {
                 Image(systemName: attachment.kind == .pdf ? "doc.richtext" : "doc.text")
@@ -956,6 +977,8 @@ private struct PendingAttachmentChip: View {
                         .font(MyChatSystemFont.appFont(size: 11, weight: .bold))
                         .frame(width: 28, height: 28)
                         .background(Color.primary.opacity(0.06), in: Circle())
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("移除 \(attachment.name)")
@@ -967,16 +990,6 @@ private struct PendingAttachmentChip: View {
             .background(MyChatTheme.raised, in: Capsule())
             .overlay { Capsule().stroke(MyChatTheme.border.opacity(0.8), lineWidth: 0.7) }
         }
-    }
-}
-
-private extension UIImage {
-    convenience init?(dataURL: String) {
-        guard let comma = dataURL.firstIndex(of: ","),
-              dataURL[..<comma].lowercased().hasPrefix("data:image/"),
-              let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
-        else { return nil }
-        self.init(data: data)
     }
 }
 
@@ -1005,6 +1018,7 @@ struct ComposerTextInput: UIViewRepresentable {
     @Binding var focused: Bool
     let editor: ComposerEditorSession
     let placeholder: String
+    var maximumHeight: CGFloat = .greatestFiniteMagnitude
     let submit: () -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -1057,7 +1071,7 @@ struct ComposerTextInput: UIViewRepresentable {
         guard let width = proposal.width, width > 0 else { return nil }
         let lineHeight = ceil(uiView.font?.lineHeight ?? 22)
         let natural = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-        let maximum = lineHeight * 5 + 4
+        let maximum = max(lineHeight + 4, min(lineHeight * 5 + 4, maximumHeight))
         let scrolls = natural > maximum + 0.5
         if uiView.isScrollEnabled != scrolls { uiView.isScrollEnabled = scrolls }
         if !scrolls, uiView.contentOffset != .zero { uiView.setContentOffset(.zero, animated: false) }
@@ -1191,6 +1205,17 @@ private struct ComposerControlStyle: ButtonStyle {
         configuration.label
             .frame(width: 36, height: 36)
             .background(MyChatTheme.controlSurface, in: Circle())
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            .modifier(MyChatBubblePressFeedback(isPressed: configuration.isPressed, glassOwnsFeedback: false))
+    }
+}
+
+private struct ComposerActionStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
             .modifier(MyChatBubblePressFeedback(isPressed: configuration.isPressed, glassOwnsFeedback: false))
     }
 }
@@ -1198,29 +1223,23 @@ private struct ComposerControlStyle: ButtonStyle {
 private struct SystemComposerSurface: ViewModifier {
     let reduceTransparency: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
+    @Environment(\.colorSchemeContrast) private var contrast
 
     @ViewBuilder func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: MyChatTheme.composerRadius, style: .continuous)
-        if #available(iOS 26.0, *), !reduceTransparency {
-            // The composer itself is the bubble: the same system Liquid Glass
-            // the toolbar buttons use. The old material + secondarySystemFill
-            // overlay is what read as a grey panel — no fill on top of glass.
-            // The glass renders its own contact shadow; stacking the previous
-            // custom `.shadow` on top showed up as dark bands flanking the
-            // composer, so the glass path carries no extra shadow.
-            content.glassEffect(.regular, in: shape)
-        } else if reduceTransparency {
-            content
-                .background { shape.fill(MyChatTheme.composer) }
-                .clipShape(shape)
-        } else {
-            content
-                .background {
-                    shape.fill(.ultraThinMaterial)
-                        .overlay { shape.fill(Color(UIColor.secondarySystemFill).opacity(0.4)) }
-                }
-                .clipShape(shape)
-        }
+        // A stable writing surface: scrolling text/photos cannot tint the
+        // editor or alter its contrast. Clip content first; the rounded shape
+        // alone casts the small contact shadow, never its rectangular host.
+        content
+            .background { shape.fill(MyChatTheme.composer) }
+            .clipShape(shape)
+            .overlay {
+                shape.strokeBorder(MyChatTheme.border.opacity(contrast == .increased ? 1 : 0.7),
+                    lineWidth: contrast == .increased ? 1 : 1 / max(1, displayScale))
+            }
+            .shadow(color: .black.opacity(reduceTransparency ? 0 : colorScheme == .dark ? 0.18 : 0.055),
+                radius: 3, x: 0, y: 1)
     }
 }
 

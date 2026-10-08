@@ -10,6 +10,216 @@ import CoreText
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
 
+    func testHapticSemanticsRespectPreferenceAndReducedMotion() {
+        let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
+        for event in events {
+            XCTAssertNil(HapticFeedback.pattern(for: event, enabled: false, reduceMotion: false))
+            XCTAssertNil(HapticFeedback.pattern(for: event, enabled: false, reduceMotion: true))
+        }
+        XCTAssertEqual(HapticFeedback.pattern(for: .selection, enabled: true, reduceMotion: false), .selection)
+        XCTAssertEqual(HapticFeedback.pattern(for: .send, enabled: true, reduceMotion: false), .impact(.medium, 0.65))
+        XCTAssertEqual(HapticFeedback.pattern(for: .stop, enabled: true, reduceMotion: false), .impact(.rigid, 0.55))
+        XCTAssertEqual(HapticFeedback.pattern(for: .success, enabled: true, reduceMotion: false), .notification(.success))
+        XCTAssertEqual(HapticFeedback.pattern(for: .error, enabled: true, reduceMotion: false), .notification(.error))
+        XCTAssertEqual(HapticFeedback.pattern(for: .surface, enabled: true, reduceMotion: true), .impact(.soft, 0.45))
+        XCTAssertEqual(HapticFeedback.pattern(for: .send, enabled: true, reduceMotion: true), .impact(.medium, 0.45))
+    }
+
+    func testIMECompositionDoesNotSubmitUntilNativeTextIsCommitted() {
+        var text = "", submissions: [String] = []
+        let input = ComposerTextInput(text: Binding(get: { text }, set: { text = $0 }),
+            focused: .constant(false), editor: ComposerEditorSession(), placeholder: "消息",
+            submit: { submissions.append(text) })
+        let coordinator = input.makeCoordinator()
+        let view = ComposerTextView()
+        view.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        XCTAssertNotNil(view.markedTextRange)
+        XCTAssertTrue(coordinator.textView(view, shouldChangeTextIn: NSRange(location: 2, length: 0), replacementText: "\n"))
+        XCTAssertTrue(submissions.isEmpty, "The candidate-confirmation Return is not a send command")
+        view.unmarkText()
+        view.text = "你好 👨‍👩‍👧‍👦 café"
+        coordinator.textViewDidChange(view)
+        XCTAssertFalse(coordinator.textView(view, shouldChangeTextIn: NSRange(location: (view.text as NSString).length, length: 0), replacementText: "\n"))
+        XCTAssertEqual(submissions, ["你好 👨‍👩‍👧‍👦 café"])
+    }
+
+    func testComposerBudgetUsesMeasuredNavigationAndFinalKeyboardGeometry() async {
+        let budget = ComposerLayoutBudget()
+        budget.setNavigationBottom(52)
+        budget.setInputBottom(175)
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        XCTAssertEqual(budget.availableHeight, 115)
+        budget.setInputBottom(630)
+        budget.setNavigationBottom(106)
+        await withCheckedContinuation { continuation in DispatchQueue.main.async { continuation.resume() } }
+        XCTAssertEqual(budget.availableHeight, 516)
+    }
+
+    func testConversationSwitchKeepsGenerationAndReconcilesOnlyItsOwnMessages() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "会话 A"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+        let first = transport.commands[0]
+        let firstRecord = ConversationRecord(id: first.conversationID.uuidString, title: "会话 A", updatedAt: "",
+            projectID: nil, starred: false, pinned: false)
+        transport.emit(.textDelta("A 的第一段"), for: first, sequence: 1)
+        model.beginNewChat()
+        XCTAssertTrue(model.generatingConversationIDs.contains(first.conversationID))
+        XCTAssertTrue(transport.cancelCalls.isEmpty)
+        model.draft = "会话 B"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 2 && transport.continuations.count == 2 }
+        let second = transport.commands[1]
+        await data.setMessages([
+            ConversationMessageRecord(id: first.userMessageID.uuidString, role: .user, content: "会话 A",
+                images: nil, thinking: nil, createdAt: nil, sequence: 1),
+            ConversationMessageRecord(id: first.assistantMessageID.uuidString, role: .assistant, content: "A 在后台完成",
+                images: nil, thinking: nil, createdAt: nil, sequence: 2)
+        ], for: first.conversationID)
+        transport.complete(first, text: "A 在后台完成", sequence: 2)
+        try await waitUntil { !model.generatingConversationIDs.contains(first.conversationID) }
+        XCTAssertEqual(model.activeConversationID, second.conversationID)
+        XCTAssertFalse(model.messages.contains { $0.id == first.assistantMessageID })
+        model.openConversation(firstRecord)
+        try await waitUntil { model.messages.contains { $0.id == first.assistantMessageID && $0.content == "A 在后台完成" } }
+        XCTAssertTrue(model.generatingConversationIDs.contains(second.conversationID))
+        transport.complete(second, text: "B 也独立完成", sequence: 1)
+        try await waitUntil { !model.generatingConversationIDs.contains(second.conversationID) }
+        XCTAssertEqual(model.messages.filter { $0.id == first.assistantMessageID }.count, 1)
+        XCTAssertFalse(model.messages.contains { $0.id == second.assistantMessageID })
+        XCTAssertEqual(transport.commands.count, 2)
+        XCTAssertTrue(transport.cancelCalls.isEmpty)
+    }
+
+    func testReadingPositionSurvivesConversationSwitchRotationAndUserTakeover() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 600, height: 900))
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 60, width: 390, height: 800))
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: 390, height: 3_000)
+        window.addSubview(scroll)
+        let row = UIView(frame: CGRect(x: 0, y: 1_000, width: 390, height: 180))
+        scroll.addSubview(row)
+        let controller = ChatScrollController()
+        let first = UUID(), second = UUID()
+        controller.setComposerGeometry(.init(bottomPadding: 300, topInWindow: 760))
+        controller.registerReadingAnchor(row, id: UUID())
+        controller.attach(scroll, conversationID: first)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.setInteractionActive(true)
+        scroll.contentOffset.y = 900
+        controller.setInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.attach(scroll, conversationID: second)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.attach(scroll, conversationID: first)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 900, accuracy: 0.5)
+        row.frame.origin.y = 1_100
+        scroll.frame.size.width = 600
+        scroll.contentSize.width = 600
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 1_000, accuracy: 0.5,
+            "Reflow retains the same row and relative position, not a percentage of the whole document")
+        controller.attach(scroll, conversationID: second)
+        controller.attach(scroll, conversationID: first)
+        controller.setInteractionActive(true)
+        scroll.contentOffset.y = 200
+        controller.setInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 200, accuracy: 0.5,
+            "A touch after scheduling restoration must cancel the old scroll intent")
+        controller.pauseFollowAnimation()
+    }
+
+    func testReadingPositionsAreBoundedAndClearedOnAccountChange() {
+        let store = ChatReadingPositionStore()
+        store.setOwner("account-a")
+        let ids = (0..<65).map { _ in UUID() }
+        for id in ids {
+            store.save(.init(offset: 100, anchorID: nil, anchorDistance: 0,
+                following: false, explicitBottom: false), for: id)
+        }
+        XCTAssertNil(store.position(for: ids[0]))
+        XCTAssertNotNil(store.position(for: ids[64]))
+        store.setOwner("account-b")
+        XCTAssertNil(store.position(for: ids[64]))
+    }
+
+    func testDrawerLayoutChangesDoNotBecomeManualReadingIntent() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        let scroll = UIScrollView(frame: window.bounds)
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: 390, height: 2_000)
+        window.addSubview(scroll)
+        let controller = ChatScrollController()
+        controller.setComposerGeometry(.init(bottomPadding: 400, topInWindow: 760))
+        controller.setDrawerInteractionActive(true)
+        controller.attach(scroll, conversationID: UUID())
+        scroll.contentOffset.y = 10
+        controller.setDrawerInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertGreaterThan(scroll.contentOffset.y, 1_000,
+            "Opening a history conversation while closing the drawer must still perform initial positioning")
+        controller.pauseFollowAnimation()
+    }
+
+    func testLicensedReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
+        for name in ["Newsreader16pt-Regular", "Newsreader16pt-Italic", "Newsreader16pt-Bold"] {
+            XCTAssertNotNil(UIFont(name: name, size: 17))
+        }
+        XCTAssertTrue(MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true).fontName.hasPrefix("Newsreader"))
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/ttf"))
+        func luminance(_ color: Color, style: UIUserInterfaceStyle) -> CGFloat {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&r, green: &g, blue: &b, alpha: &a)
+            func linear(_ v: CGFloat) -> CGFloat { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            return linear(r) * 0.2126 + linear(g) * 0.7152 + linear(b) * 0.0722
+        }
+        for style: UIUserInterfaceStyle in [.light, .dark] {
+            for surface in [MyChatTheme.canvas, MyChatTheme.composer, MyChatTheme.controlSurface, MyChatTheme.userBubble] {
+                let values = [luminance(surface, style: style), luminance(MyChatTheme.secondaryText, style: style)]
+                XCTAssertGreaterThanOrEqual((values.max()! + 0.05) / (values.min()! + 0.05), 4.5)
+            }
+        }
+    }
+
+    func testImageOnlyAndMixedDraftsSubmitActualAttachmentsExactlyOnce() async throws {
+        for (count, text) in [(1, ""), (3, ""), (2, "请比较这两张图片")] {
+            let transport = ControlledChatTransport()
+            let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+            await model.restoreAuthenticationIfNeeded()
+            await model.reloadModels()
+            model.beginNewChat()
+            model.draft = " \n\t"
+            XCTAssertFalse(model.canSendCurrentDraft)
+            for index in 0..<count {
+                model.addPendingAttachment(ChatPendingAttachment(kind: .image, name: "photo-\(index).png",
+                    imageDataURL: NativeRuntimeFixture.imageSource))
+            }
+            model.draft = text
+            XCTAssertTrue(model.canSendCurrentDraft)
+            model.sendDraft()
+            try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+            let command = try XCTUnwrap(transport.commands.first)
+            XCTAssertEqual(command.userMessage.content, text)
+            XCTAssertEqual(command.userMessage.sourceImages?.count, count)
+            XCTAssertTrue(command.userMessage.sourceImages?.allSatisfy { $0.hasPrefix("data:image/") } == true)
+            XCTAssertTrue(model.pendingAttachments.isEmpty)
+            XCTAssertTrue(model.draft.isEmpty)
+            model.sendDraft()
+            XCTAssertEqual(transport.commands.count, 1, "A rapid second tap cannot create an empty duplicate turn")
+            transport.complete(command, text: "已收到图片", sequence: 1)
+            try await waitUntil { !model.isCurrentConversationGenerating }
+            XCTAssertEqual(model.messages.filter { $0.role == .user }.count, 1)
+        }
+    }
+
     func testHealthConnectorRequestsHeartSleepAndWorkoutAlongsideActivity() {
         let types = Set(HealthConnector.readTypes.map(\.identifier))
         for identifier in [HKQuantityTypeIdentifier.heartRate.rawValue, HKQuantityTypeIdentifier.restingHeartRate.rawValue,
@@ -651,9 +861,9 @@ import CoreText
     }
 
     func testModelDisplayLabelsRemoveSeparatorsWithoutChangingRoutingIdentifiers() throws {
-        for (route, label, expected) in [("z-ai/glm-5.2", "GLM-5.2", "GLM5.2"),
-            ("chatgpt-plan:gpt-6-astra", "GPT-6-Astra", "GPT6 Astra"),
-            ("chatgpt-plan:gpt-5.6-sol", "GPT-5.6-Sol", "GPT5.6 Sol")] {
+        for (route, label, expected) in [("z-ai/glm-5.2", "GLM-5.2", "GLM 5.2"),
+            ("chatgpt-plan:gpt-6-astra", "GPT-6-Astra", "GPT 6 Astra"),
+            ("chatgpt-plan:gpt-5.6-sol", "GPT-5.6-Sol", "GPT 5.6 Sol")] {
             let payload: [String: Any] = ["id": route, "name": label, "provider": "test", "access": "quota",
                 "outputKind": "chat", "promptPrice": 0, "completionPrice": 0, "contextLength": 1000,
                 "vision": false, "tools": false, "flagship": false, "reasoningEfforts": [], "reasoningMandatory": false]
@@ -1670,7 +1880,7 @@ import CoreText
         XCTAssertGreaterThan(padding, 148)
         let offset = ChatReadingAnchor.offset(contentHeight: 1_000 + padding,
             bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 0)
-        XCTAssertEqual(1_000 - offset, 692 * 0.45, accuracy: 0.001)
+        XCTAssertEqual(1_000 - offset, 692 * (2.0 / 3.0), accuracy: 0.001)
         XCTAssertEqual(ChatReadingAnchor.offset(contentHeight: 200 + padding,
             bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 60), -60)
     }
@@ -1755,7 +1965,8 @@ import CoreText
 
     func testForegroundReattachesToActiveServerGenerationWithoutResubmittingTurn() async throws {
         let transport = ControlledChatTransport()
-        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
         await model.restoreAuthenticationIfNeeded()
         await model.reloadModels()
         model.beginNewChat()
@@ -1764,6 +1975,11 @@ import CoreText
         try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
 
         let command = try XCTUnwrap(transport.commands.first)
+        // Admission persists a real conversation on the server. The original
+        // generic URL fixture returned only its unrelated seeded conversation.
+        await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+            title: "恢复测试", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
         let checkpoint = 7
         transport.recovery = ChatGenerationRecovery(
             admission: ChatAdmission(
@@ -2055,12 +2271,17 @@ import CoreText
 }
 
 private actor ControlledConversationStore: SupabaseDataServing {
-    let records = ["20000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002"].map {
+    var records = ["20000000-0000-4000-8000-000000000001", "20000000-0000-4000-8000-000000000002"].map {
         ConversationRecord(id: $0, title: $0, updatedAt: "2026-10-03", projectID: nil, starred: false, pinned: false)
     }
     var pending: [String: CheckedContinuation<Void, Error>] = [:]
+    var messages: [UUID: [ConversationMessageRecord]] = [:]
+    func addConversation(_ record: ConversationRecord) { records.append(record) }
+    func setMessages(_ value: [ConversationMessageRecord], for id: UUID) { messages[id] = value }
     func fetchConversations(accessToken: String) async throws -> [ConversationRecord] { records }
-    func fetchMessages(conversationID: String, accessToken: String, limit: Int) async throws -> [ConversationMessageRecord] { [] }
+    func fetchMessages(conversationID: String, accessToken: String, limit: Int) async throws -> [ConversationMessageRecord] {
+        UUID(uuidString: conversationID).flatMap { messages[$0] } ?? []
+    }
     func fetchConversationToolHistory(conversationID: String, assistantMessageIDs: [UUID], accessToken: String) async throws -> ConversationToolHistory { ConversationToolHistory() }
     func updateConversationTitle(id: String, title: String, accessToken: String) async throws {}
     func setConversationPinned(id: String, pinned: Bool, accessToken: String) async throws {}

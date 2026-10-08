@@ -1,6 +1,113 @@
 import XCTest
 
 final class MyChatUITests: XCTestCase {
+    @MainActor func testHorizontalPhotosKeepGestureOwnershipAndReachTheLastImage() {
+        let app = launch(extra: ["--ui-test-images", "--ui-test-wide-images", "--ui-test-open-conversation"])
+        let prefix = "message.image.50000000-0000-4000-8000-000000000066."
+        let first = app.buttons[prefix + "0"], last = app.buttons[prefix + "4"]
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        let initialX = first.frame.minX
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let y = first.frame.midY
+        let left = initialX + 25
+        origin.withOffset(CGVector(dx: app.frame.width - 35, dy: y)).press(forDuration: 0.03,
+            thenDragTo: origin.withOffset(CGVector(dx: left, dy: y)))
+        XCTAssertTrue(last.waitForExistence(timeout: 5))
+        XCTAssertTrue(last.isHittable)
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable)
+        origin.withOffset(CGVector(dx: left, dy: y)).press(forDuration: 0.03,
+            thenDragTo: origin.withOffset(CGVector(dx: app.frame.width - 35, dy: y)))
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable,
+            "Dragging photos right must not be stolen by the full-screen drawer recognizer")
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertEqual(first.frame.minX, initialX, accuracy: 2)
+        saveScreenshot(app, "five-photos-horizontal-gesture")
+    }
+
+    @MainActor func testLargeTextComposerGrowsWithinScreenAndRetainsDraftOnRotation() {
+        let app = launch(extra: ["--ui-test-seed-draft", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryXXXL"])
+        let input = app.textViews["composer.input"]
+        let surface = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        input.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let draft = input.value as? String
+        XCTAssertTrue(draft?.contains("你好明确") == true)
+        XCTAssertGreaterThan(input.frame.height, 60)
+        XCTAssertGreaterThanOrEqual(surface.frame.minY, app.buttons["header.sidebar"].frame.maxY)
+        XCTAssertLessThanOrEqual(surface.frame.maxY, app.keyboards.firstMatch.frame.minY)
+        XCTAssertTrue(app.buttons["composer.send"].isHittable)
+        saveScreenshot(app, "large-text-long-draft")
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.frame.width > app.frame.height && surface.frame.maxX <= app.frame.maxX + 1
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        XCTAssertEqual(input.value as? String, draft)
+        XCTAssertTrue(app.buttons["composer.send"].isHittable)
+        XCTAssertGreaterThanOrEqual(surface.frame.minY, app.buttons["header.sidebar"].frame.maxY,
+            "Landscape must keep the composer below navigation, including at large font sizes")
+        XCTAssertLessThanOrEqual(surface.frame.maxY, app.keyboards.firstMatch.frame.minY)
+        saveScreenshot(app, "rotation-contract")
+        XCUIDevice.shared.orientation = .portrait
+        XCTAssertEqual(input.value as? String, draft)
+    }
+
+    @MainActor func testComposerTouchTargetsAndHapticPreferencePersist() {
+        let app = launch()
+        let input = app.textViews["composer.input"].firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        for label in ["添加内容和工具", "选择模型", "语音转文字"] {
+            let button = app.buttons[label].firstMatch
+            XCTAssertGreaterThanOrEqual(button.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44)
+        }
+        input.tap(); input.typeText("hello")
+        let send = app.buttons["composer.send"].firstMatch
+        XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+        app.buttons["header.sidebar"].tap()
+        app.buttons["sidebar.accountSettings"].tap()
+        let toggle = app.switches["settings.haptics"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if toggle.value as? String == "1" { toggle.tap() }
+        XCTAssertEqual(toggle.value as? String, "0")
+        app.terminate(); app.launch()
+        app.buttons["header.sidebar"].tap()
+        app.buttons["sidebar.accountSettings"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0", "Haptic preference must persist across relaunch")
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+    }
+
+    @MainActor func testManualReadingPositionSurvivesNewChatAndReturn() {
+        let app = launch(extra: ["--ui-test-long-chat", "--layout-audit"])
+        app.buttons["header.sidebar"].tap()
+        app.buttons["隔离测试对话"].firstMatch.tap()
+        let tail = app.descendants(matching: .any).matching(identifier: "message.row.50000000-0000-4000-8000-0000000003E8").firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 30))
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        for _ in 0..<2 {
+            origin.withOffset(CGVector(dx: app.frame.midX, dy: 220)).press(forDuration: 0.02,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.midX, dy: 520)))
+        }
+        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.row.")).allElementsBoundByIndex
+        guard let anchor = rows.first(where: { $0.frame.minY > 140 && $0.frame.maxY < 600 && $0.isHittable }) else {
+            XCTFail("No visible reading anchor after scrolling into history"); return
+        }
+        let identifier = anchor.identifier, before = anchor.frame.minY
+        app.buttons["header.new-chat"].tap()
+        app.buttons["header.sidebar"].tap()
+        app.buttons["隔离测试对话"].firstMatch.tap()
+        let restored = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        XCTAssertTrue(restored.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate { _, _ in abs(restored.frame.minY - before) < 3 }, evaluatedWith: restored)
+        waitForExpectations(timeout: 8)
+        XCTAssertTrue(app.buttons["chat.jump-to-latest"].exists)
+        saveScreenshot(app, "reading-position-restored")
+    }
+
     @MainActor func testPaperPanelSlowFastAndRepeatedSwipes() {
         let app = launch(extra: ["--drawer-motion-audit"])
         let account = app.buttons["sidebar.accountSettings"]
@@ -164,7 +271,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testSidebarDestinationsAndRepeatedOpenClose() {
         let app = launch()
-        for destination in ["Projects", "Artifacts", "Code", "Chats"] {
+        for destination in ["项目", "可视化", "编程", "聊天"] {
             app.buttons["打开侧边栏"].firstMatch.tap()
             let button = app.buttons[destination].firstMatch
             XCTAssertTrue(button.waitForExistence(timeout: 5))
@@ -174,8 +281,8 @@ final class MyChatUITests: XCTestCase {
         }
         for _ in 0..<5 {
             app.buttons["打开侧边栏"].firstMatch.tap()
-            XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
-            app.buttons["New chat"].firstMatch.tap()
+            XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["sidebar.newChat"].firstMatch.tap()
         }
         saveScreenshot(app, "sidebar-and-top-buttons")
     }
@@ -183,7 +290,7 @@ final class MyChatUITests: XCTestCase {
     @MainActor func testArtifactLibraryOpensAndDismissesPreviewRepeatedly() {
         let app = launch(extra: ["--ui-test-artifacts"])
         app.buttons["打开侧边栏"].firstMatch.tap()
-        app.buttons["Artifacts"].firstMatch.tap()
+        app.buttons["可视化"].firstMatch.tap()
 
         let artifact = app.buttons["artifact-record-70000000-0000-4000-8000-000000000064"]
         XCTAssertTrue(artifact.waitForExistence(timeout: 10))
@@ -232,7 +339,7 @@ final class MyChatUITests: XCTestCase {
     @MainActor func testArtifactLibraryKeepsEveryDocumentInPackage() {
         let app = launch(extra: ["--ui-test-document-library"])
         app.buttons["打开侧边栏"].firstMatch.tap()
-        app.buttons["Artifacts"].firstMatch.tap()
+        app.buttons["可视化"].firstMatch.tap()
         let artifact = app.buttons["artifact-record-70000000-0000-4000-8000-000000000065"]
         XCTAssertTrue(artifact.waitForExistence(timeout: 10))
         artifact.tap()
@@ -244,7 +351,7 @@ final class MyChatUITests: XCTestCase {
             app.buttons["关闭文件预览"].tap()
             XCTAssertTrue(document.waitForExistence(timeout: 5))
         }
-        XCTAssertTrue(app.buttons["Download all"].exists)
+        XCTAssertTrue(app.buttons["全部下载"].exists)
         app.buttons["artifact-preview-close"].tap()
         XCTAssertTrue(artifact.waitForExistence(timeout: 5))
     }
@@ -296,15 +403,15 @@ final class MyChatUITests: XCTestCase {
         transcript.swipeUp()
         let input = app.descendants(matching: .any).matching(identifier: "composer.input").firstMatch
         let bubble = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
-        XCTAssertEqual(bubble.frame.height, 98, accuracy: 2)
+        XCTAssertEqual(bubble.frame.height, 104, accuracy: 2)
         saveScreenshot(app, "long-transcript-bottom-before-keyboard")
         input.tap()
         input.typeText("long transcript keyboard")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
-        XCTAssertEqual(bubble.frame.height, 98, accuracy: 2)
+        XCTAssertEqual(bubble.frame.height, 104, accuracy: 2)
         saveScreenshot(app, "long-transcript-bottom-with-keyboard")
         app.buttons["打开侧边栏"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         app.buttons["隔离测试对话"].firstMatch.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
@@ -320,7 +427,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(history.waitForExistence(timeout: 5))
         XCTAssertTrue(history.isHittable)
         let historyY = history.frame.midY - app.frame.minY
-        app.buttons["New chat"].firstMatch.tap()
+        app.buttons["sidebar.newChat"].firstMatch.tap()
 
         let normalizedY = historyY / app.frame.height
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: normalizedY))
@@ -356,7 +463,8 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 5))
         composer.tap()
         composer.typeText("draft to clear")
-        newChat.tap()
+        app.buttons["header.sidebar"].tap()
+        app.buttons["sidebar.newChat"].tap()
         XCTAssertFalse((composer.value as? String ?? "").contains("draft to clear"))
         saveScreenshot(app, "new-chat-with-keyboard")
     }
@@ -365,16 +473,19 @@ final class MyChatUITests: XCTestCase {
         let app = launch(extra: ["--ui-test-images", "-AppleInterfaceStyle", "Dark"])
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["隔离测试对话"].firstMatch.tap()
-        let images = app.buttons.matching(identifier: "放大查看图片")
+        let images = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image."))
         XCTAssertTrue(images.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(images.count, 3)
         for thumbnail in images.allElementsBoundByIndex {
             XCTAssertEqual(thumbnail.frame.width, thumbnail.frame.height, accuracy: 1)
-            XCTAssertEqual(thumbnail.frame.width, 140, accuracy: 1)
+            XCTAssertEqual(thumbnail.frame.width, 104, accuracy: 1)
             XCTAssertGreaterThanOrEqual(thumbnail.frame.minX, 16)
             XCTAssertLessThanOrEqual(thumbnail.frame.maxX, app.frame.maxX - 16 + 1)
         }
-        XCTAssertEqual(images.allElementsBoundByIndex.map { $0.frame.minX }.min() ?? 0, app.frame.width - 16 - 288, accuracy: 1)
+        XCTAssertEqual(images.allElementsBoundByIndex.map { $0.frame.minX }.min() ?? 0, app.frame.width - 16 - 216, accuracy: 1)
+        let pair = images.allElementsBoundByIndex.suffix(2)
+        XCTAssertEqual(pair.first!.frame.midY, pair.last!.frame.midY, accuracy: 1,
+            "Multiple images occupy one horizontal row")
         XCTAssertTrue(app.staticTexts["图片加文字靠右"].firstMatch.exists)
         saveScreenshot(app, "dark-image-only-multi-image-text")
         images.firstMatch.tap()
@@ -386,7 +497,7 @@ final class MyChatUITests: XCTestCase {
         composer.typeText("keyboard drawer")
         XCTAssertTrue(app.keyboards.firstMatch.exists)
         app.buttons["打开侧边栏"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         saveScreenshot(app, "dark-drawer-dismisses-keyboard")
     }
@@ -395,13 +506,14 @@ final class MyChatUITests: XCTestCase {
         let app = launch()
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["账户设置"].firstMatch.tap()
-        let connector = app.buttons["Connectors"].firstMatch
+        let connector = app.buttons["连接器"].firstMatch
         if !connector.isHittable { app.swipeUp() }
         XCTAssertTrue(connector.waitForExistence(timeout: 5))
         connector.tap()
         XCTAssertTrue(app.staticTexts["连接器"].firstMatch.waitForExistence(timeout: 5))
         saveScreenshot(app, "chinese-connector-settings")
-        app.buttons["connectors.browse"].tap()
+        app.buttons["添加连接器"].tap()
+        app.buttons["浏览连接器"].tap()
         let service = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Sample service")).firstMatch
         XCTAssertTrue(service.waitForExistence(timeout: 5))
         service.tap()
@@ -413,22 +525,22 @@ final class MyChatUITests: XCTestCase {
     @MainActor func testMemoryFilesKeepEditingImportAndExportActions() {
         let app = launch()
         app.buttons["打开侧边栏"].firstMatch.tap(); app.buttons["账户设置"].firstMatch.tap()
-        app.buttons["Capabilities"].firstMatch.tap()
-        let files = app.buttons["Memory files"].firstMatch
+        app.buttons["功能"].firstMatch.tap()
+        let files = app.buttons["记忆文件"].firstMatch
         if !files.isHittable { app.swipeUp() }
         XCTAssertTrue(files.waitForExistence(timeout: 5)); files.tap()
-        XCTAssertTrue(app.staticTexts["Topics"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["主题"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.textFields["memory.topic"].exists)
         let topic = app.buttons["memory.topic.测试"].firstMatch
         XCTAssertTrue(topic.waitForExistence(timeout: 5)); topic.tap()
         let content = app.staticTexts["这是隔离测试记忆"].firstMatch
         XCTAssertTrue(content.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Delete topic"].exists)
+        XCTAssertTrue(app.buttons["删除主题"].exists)
         saveScreenshot(app, "memory-topic-natural")
         app.navigationBars.buttons.firstMatch.tap()
-        app.buttons["Memory actions"].tap()
-        XCTAssertTrue(app.buttons["Import"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Export"].exists)
+        app.buttons["记忆操作"].tap()
+        XCTAssertTrue(app.buttons["导入"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["导出"].exists)
     }
 
     @MainActor func testClaudeModelNamesAndNativeEffortNavigation() {
@@ -461,22 +573,22 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["effort.low"].waitForExistence(timeout: 5)); app.buttons["effort.low"].tap()
         XCTAssertEqual(app.buttons["effort.low"].exists, true)
         saveScreenshot(app, "effort-dark")
-        app.buttons["Back"].firstMatch.tap(); app.buttons["model.more"].tap()
-        XCTAssertTrue(app.staticTexts["More models"].waitForExistence(timeout: 5))
+        app.buttons["返回"].firstMatch.tap(); app.buttons["model.more"].tap()
+        XCTAssertTrue(app.staticTexts["更多模型"].waitForExistence(timeout: 5))
         saveScreenshot(app, "more-models-dark")
-        app.buttons["Back"].firstMatch.tap(); app.buttons["关闭"].firstMatch.tap()
+        app.buttons["返回"].firstMatch.tap(); app.buttons["关闭"].firstMatch.tap()
         app.buttons["添加内容和工具"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Add to Chat"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Photos"].exists)
+        XCTAssertTrue(app.staticTexts["添加到聊天"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["照片"].exists)
         let camera = app.buttons["拍照"].firstMatch
         XCTAssertEqual(camera.frame.width, camera.frame.height, accuracy: 1)
         let photo = app.buttons["添加最近照片"].firstMatch
         if photo.exists { XCTAssertEqual(photo.frame.width, photo.frame.height, accuracy: 1) }
         XCTAssertTrue(app.buttons["添加文件"].exists)
-        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Add to project")).firstMatch.exists)
-        XCTAssertTrue(app.buttons["Connectors"].firstMatch.exists)
-        XCTAssertFalse(app.switches["Extended thinking"].exists)
-        XCTAssertFalse(app.switches["Automatic web search"].exists)
+        XCTAssertTrue(app.buttons["tools.projects.row"].exists)
+        XCTAssertTrue(app.buttons["连接器"].firstMatch.exists)
+        XCTAssertFalse(app.switches["扩展思考"].exists)
+        XCTAssertFalse(app.switches["自动网页搜索"].exists)
         saveScreenshot(app, "add-menu-dark")
     }
 
@@ -484,12 +596,13 @@ final class MyChatUITests: XCTestCase {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["账户设置"].firstMatch.tap()
-        app.buttons["Profile"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["Edit photo"].waitForExistence(timeout: 5))
+        app.buttons["个人资料"].firstMatch.tap()
+        let photoMenu = app.buttons.matching(identifier: "编辑头像").element(boundBy: 1)
+        XCTAssertTrue(photoMenu.waitForExistence(timeout: 5))
         saveScreenshot(app, "profile-dark")
-        app.buttons["Edit photo"].tap()
-        XCTAssertTrue(app.buttons["View photo library"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Take a photo"].exists)
+        photoMenu.tap()
+        XCTAssertTrue(app.buttons["从照片图库选择"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["拍照"].exists)
         saveScreenshot(app, "profile-photo-menu-dark")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.7)).tap()
         let instructions = app.textFields["profile.instructions"]
@@ -497,15 +610,15 @@ final class MyChatUITests: XCTestCase {
         XCTAssertLessThan(instructions.frame.height, 60)
         instructions.tap()
         instructions.typeText("Keep replies concise.")
-        app.buttons["Save instructions"].tap()
+        app.buttons["保存自定义指令"].tap()
         XCTAssertTrue(app.staticTexts["已保存"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
-        let capabilities = app.buttons["Capabilities"].firstMatch
+        let capabilities = app.buttons["功能"].firstMatch
         if !capabilities.isHittable { app.swipeUp() }
         capabilities.tap()
-        XCTAssertTrue(app.switches.matching(NSPredicate(format: "label BEGINSWITH %@", "Web search")).firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.switches.matching(NSPredicate(format: "label BEGINSWITH %@", "Inline visualizations")).firstMatch.exists)
-        XCTAssertFalse(app.staticTexts["Code execution and file creation"].exists)
+        XCTAssertTrue(app.switches.matching(NSPredicate(format: "label BEGINSWITH %@", "网页搜索")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches.matching(NSPredicate(format: "label BEGINSWITH %@", "内联可视化")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["代码执行与文件创建"].exists)
         saveScreenshot(app, "capabilities-dark")
     }
 
@@ -579,9 +692,10 @@ final class MyChatUITests: XCTestCase {
                 surface.frame.maxY <= app.keyboards.firstMatch.frame.minY - 4
                     && logo.frame.minY < restingLogo.minY - 100
             }, object: nil)
-            XCTAssertEqual(XCTWaiter.wait(for: [keyboardDestination], timeout: 2), .completed)
+            XCTAssertEqual(XCTWaiter.wait(for: [keyboardDestination], timeout: 2), .completed,
+                "resting logo=\(restingLogo); current logo=\(logo.frame); surface=\(surface.frame); keyboard=\(app.keyboards.firstMatch.frame)")
             XCTAssertLessThan(input.frame.height, 30, "A short draft must occupy one text line")
-            XCTAssertEqual(surface.frame.height, 98, accuracy: 2)
+            XCTAssertEqual(surface.frame.height, 104, accuracy: 2)
             XCTAssertGreaterThanOrEqual(input.frame.minY, surface.frame.minY + 10,
                 "Text must not be cropped through the top of the input bubble")
             XCTAssertLessThan(input.frame.maxY, surface.frame.maxY - 40)
@@ -635,7 +749,7 @@ final class MyChatUITests: XCTestCase {
             let input = app.descendants(matching: .any).matching(identifier: "composer.input").firstMatch
             XCTAssertTrue(surface.exists)
             XCTAssertEqual(surface.frame.width, app.frame.width - 32, accuracy: 1)
-            XCTAssertEqual(surface.frame.height, 98, accuracy: 2)
+            XCTAssertEqual(surface.frame.height, 104, accuracy: 2)
             XCTAssertEqual(app.frame.maxY - surface.frame.maxY, 34, accuracy: 2,
                 "The composer must use the home-indicator inset once, without an extra bottom panel")
             saveScreenshot(app, "reference-chat-\(name)")
@@ -656,11 +770,11 @@ final class MyChatUITests: XCTestCase {
             XCTAssertLessThan(surface.frame.height, 240,
                 "Long drafts must scroll inside the composer instead of expanding it into a screen-sized box")
             app.buttons["打开侧边栏"].firstMatch.tap()
-            XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
             XCTAssertFalse(app.keyboards.firstMatch.exists)
-            let menuButtons = ["Chats", "Projects", "Code", "Artifacts"].map { app.buttons[$0].firstMatch }
+            let menuButtons = ["聊天", "项目", "编程", "可视化"].map { app.buttons[$0].firstMatch }
             for pair in zip(menuButtons, menuButtons.dropFirst()) {
-                XCTAssertEqual(pair.1.frame.midY - pair.0.frame.midY, 48, accuracy: 1,
+                XCTAssertEqual(pair.1.frame.midY - pair.0.frame.midY, 50, accuracy: 1,
                     "Sidebar destinations must stay compact while preserving 44 pt touch targets")
             }
             saveScreenshot(app, "reference-sidebar-\(name)")
@@ -678,26 +792,27 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(app.buttons["复制"].firstMatch.exists)
             XCTAssertTrue(app.buttons["重新回复"].firstMatch.exists)
             code.tap()
-            XCTAssertTrue(app.staticTexts["Swift code"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.staticTexts["Swift 代码"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-code-\(appearance)")
             app.buttons["关闭"].firstMatch.tap()
             app.buttons["选择模型"].firstMatch.tap()
-            XCTAssertTrue(app.staticTexts["Select model"].firstMatch.waitForExistence(timeout: 5))
-            XCTAssertTrue(app.staticTexts["自定义模型"].firstMatch.exists)
+            XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.staticTexts["测试模型"].firstMatch.exists,
+                "The selected fixture model must remain available in the native model picker")
             saveScreenshot(app, "claude-aligned-models-\(appearance)")
             app.buttons["关闭"].firstMatch.tap()
             app.buttons["打开侧边栏"].firstMatch.tap()
             XCTAssertTrue(app.staticTexts["MyChat"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-sidebar-\(appearance)")
             app.buttons["账户设置"].firstMatch.tap()
-            XCTAssertTrue(app.staticTexts["Settings"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.staticTexts["设置"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-settings-\(appearance)")
-            app.buttons["Close settings"].firstMatch.tap()
-            if !app.buttons["Artifacts"].firstMatch.isHittable {
+            app.buttons["关闭设置"].firstMatch.tap()
+            if !app.buttons["可视化"].firstMatch.isHittable {
                 app.buttons["打开侧边栏"].firstMatch.tap()
             }
-            app.buttons["Artifacts"].firstMatch.tap()
-            XCTAssertTrue(app.textFields["Search"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["可视化"].firstMatch.tap()
+            XCTAssertTrue(app.textFields["搜索"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-artifacts-\(appearance)")
             app.terminate()
         }
@@ -721,10 +836,10 @@ final class MyChatUITests: XCTestCase {
                 XCTAssertTrue(card.waitForExistence(timeout: 5))
             }
             app.buttons["对话文件"].firstMatch.tap()
-            XCTAssertTrue(app.staticTexts["Files"].firstMatch.waitForExistence(timeout: 5))
-            XCTAssertTrue(app.buttons["Download all"].firstMatch.isHittable)
+            XCTAssertTrue(app.staticTexts["文件"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["全部下载"].firstMatch.isHittable)
             saveScreenshot(app, "document-files-\(appearance)")
-            app.buttons["Download all"].firstMatch.tap()
+            app.buttons["全部下载"].firstMatch.tap()
             XCTAssertTrue(app.buttons["Close"].firstMatch.waitForExistence(timeout: 5) || app.buttons["关闭"].firstMatch.exists)
             saveScreenshot(app, "document-download-\(appearance)")
             app.terminate()
@@ -741,16 +856,16 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "uploaded-pdf-preview")
         app.buttons["关闭文件预览"].firstMatch.tap()
         app.buttons["选择模型"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Select model"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertFalse(app.switches["Extended thinking"].exists)
-        XCTAssertFalse(app.staticTexts["Thinking depth"].exists)
+        XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.switches["扩展思考"].exists)
+        XCTAssertFalse(app.staticTexts["思考深度"].exists)
         app.buttons["关闭"].firstMatch.tap()
         app.buttons["添加内容和工具"].firstMatch.tap()
-        XCTAssertTrue(app.staticTexts["Add to Chat"].firstMatch.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Photos"].firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["照片"].firstMatch.exists)
         XCTAssertTrue(app.buttons["拍照"].firstMatch.exists)
         XCTAssertTrue(app.buttons["添加文件"].firstMatch.exists)
-        XCTAssertFalse(app.staticTexts["Extended thinking"].firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["扩展思考"].firstMatch.exists)
         saveScreenshot(app, "add-to-chat")
         let photo = app.buttons["添加最近照片"].firstMatch
         if photo.exists {
@@ -763,7 +878,7 @@ final class MyChatUITests: XCTestCase {
     }
 
     @MainActor private func saveScreenshot(_ app: XCUIApplication, _ name: String) {
-        let attachment = XCTAttachment(screenshot: app.screenshot())
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)

@@ -16,7 +16,7 @@ enum MyChatTheme {
     static let userBubble = Color.dynamic(light: 0xEFEFED, dark: 0x2C2C2A)
     static let libraryCanvas = canvas
     static let text = Color.dynamic(light: 0x131313, dark: 0xF8F8F6)
-    static let secondaryText = Color.dynamic(light: 0x80807B, dark: 0x9A9A93)
+    static let secondaryText = Color.dynamic(light: 0x6E6D67, dark: 0xAAA9A1)
     static let border = Color.dynamic(light: 0xD6D5D0, dark: 0x3D3D3F)
     static let overlay = Color.black.opacity(0.34)
 
@@ -151,10 +151,11 @@ enum MyChatSystemFont {
     private static let weightAxis = NSNumber(value: 0x77676874)
 
     static let responseWebFontCSS: String = {
-        [("AnthropicSerif", "normal"), ("AnthropicSerifItalic", "italic")].compactMap { name, style in
-            guard let url = Bundle.main.url(forResource: name, withExtension: "woff2", subdirectory: "ResponseFonts"),
+        [("Newsreader16pt-Regular", "normal", 400), ("Newsreader16pt-Italic", "italic", 400),
+         ("Newsreader16pt-Bold", "normal", 700)].compactMap { name, style, weight in
+            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf", subdirectory: "ReadingFonts"),
                   let data = try? Data(contentsOf: url) else { return nil }
-            return "@font-face { font-family: MyChatResponseSerif; src: url(data:font/woff2;base64,\(data.base64EncodedString())) format('woff2'); font-weight: 300 800; font-style: \(style); font-display: block; }"
+            return "@font-face { font-family: MyChatResponseSerif; src: url(data:font/ttf;base64,\(data.base64EncodedString())) format('truetype'); font-weight: \(weight); font-style: \(style); font-display: block; }"
         }.joined(separator: "\n")
     }()
     // Keep native font descriptors cached. Typography never loads or registers
@@ -237,16 +238,7 @@ enum MyChatSystemFont {
 
     static func appSerifUIFont(size: CGFloat, relativeTo textStyle: UIFont.TextStyle,
                               weight: UIFont.Weight = .regular) -> UIFont {
-        let reference = UIFont(name: "AnthropicSerifWebWeb-TextLight", size: size)
-            ?? UIFont.systemFont(ofSize: size, weight: weight)
-        let variations: [NSNumber: NSNumber] = [
-            weightAxis: NSNumber(value: weight.rawValue >= UIFont.Weight.semibold.rawValue ? 700 : 400),
-            NSNumber(value: 0x6F70737A): NSNumber(value: 16)
-        ]
-        let descriptor = reference.fontDescriptor.addingAttributes([
-            UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): variations
-        ])
-        let serif = UIFont(descriptor: descriptor, size: size)
+        let serif = licensedSerif(size: size, weight: weight)
         let withHan = appHan.map { serif.fontDescriptor.addingAttributes([.cascadeList: [$0]]) }
             .map { UIFont(descriptor: $0, size: size) } ?? serif
         return UIFontMetrics(forTextStyle: textStyle).scaledFont(for: withHan)
@@ -282,15 +274,7 @@ enum MyChatSystemFont {
     static func uiFont(size: CGFloat, weight: UIFont.Weight, serif: Bool = false, italic: Bool = false) -> UIFont {
         let base: UIFont
         if serif {
-            let bold = weight.rawValue >= UIFont.Weight.semibold.rawValue
-            let face = italic ? "AnthropicSerifWebWeb-TextLightItalic" : "AnthropicSerifWebWeb-TextLight"
-            let reference = UIFont(name: face, size: size) ?? UIFont.systemFont(ofSize: size, weight: weight)
-            let variations: [NSNumber: CGFloat] = [NSNumber(value: 0x77676874): bold ? 700 : 400,
-                                                   NSNumber(value: 0x6F70737A): 16]
-            let descriptor = reference.fontDescriptor.addingAttributes([
-                UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): variations
-            ])
-            base = UIFont(descriptor: descriptor, size: size)
+            base = licensedSerif(size: size, weight: weight, italic: italic)
         } else {
             let system = UIFont.systemFont(ofSize: size, weight: weight)
             let descriptor = italic ? (system.fontDescriptor.withSymbolicTraits(.traitItalic) ?? system.fontDescriptor) : system.fontDescriptor
@@ -308,6 +292,16 @@ enum MyChatSystemFont {
 
     static func italic(size: CGFloat, relativeTo textStyle: UIFont.TextStyle) -> Font {
         Font(UIFontMetrics(forTextStyle: textStyle).scaledFont(for: uiFont(size: size, weight: .medium, serif: true, italic: true)))
+    }
+
+    private static func licensedSerif(size: CGFloat, weight: UIFont.Weight, italic: Bool = false) -> UIFont {
+        let face = italic ? "Newsreader16pt-Italic"
+            : weight >= .bold ? "Newsreader16pt-Bold"
+            : weight >= .semibold ? "Newsreader16pt-SemiBold"
+            : weight >= .medium ? "Newsreader16pt-Medium" : "Newsreader16pt-Regular"
+        if let font = UIFont(name: face, size: size) { return font }
+        let system = UIFont.systemFont(ofSize: size, weight: weight)
+        return UIFont(descriptor: system.fontDescriptor.withDesign(.serif) ?? system.fontDescriptor, size: size)
     }
 
     static func rounded(size: CGFloat, weight: UIFont.Weight, relativeTo textStyle: UIFont.TextStyle) -> Font {
@@ -523,9 +517,12 @@ struct MyChatBubblePressStyle: ButtonStyle {
 struct MyChatBubblePressFeedback: ViewModifier {
     let isPressed: Bool
     var glassOwnsFeedback: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *), glassOwnsFeedback {
+        if reduceMotion {
+            content.opacity(isPressed ? 0.72 : 1.0)
+        } else if #available(iOS 26.0, *), glassOwnsFeedback {
             content
                 .scaleEffect(isPressed ? 0.95 : 1.0)
                 .animation(.easeOut(duration: 0.15), value: isPressed)
@@ -540,16 +537,60 @@ struct MyChatBubblePressFeedback: ViewModifier {
 
 @MainActor
 enum HapticFeedback {
-    private static let generator = UIImpactFeedbackGenerator(style: .soft)
+    /// These are MyChat's interaction semantics, not inferred Claude waveforms.
+    enum Event { case surface, selection, send, stop, success, error }
+    enum Pattern: Equatable {
+        case selection
+        case impact(UIImpactFeedbackGenerator.FeedbackStyle, CGFloat)
+        case notification(UINotificationFeedbackGenerator.FeedbackType)
+    }
+    static let preferenceKey = "mychat.interaction.hapticsEnabled"
+    private static let soft = UIImpactFeedbackGenerator(style: .soft)
+    private static let medium = UIImpactFeedbackGenerator(style: .medium)
+    private static let rigid = UIImpactFeedbackGenerator(style: .rigid)
+    private static let selection = UISelectionFeedbackGenerator()
+    private static let notification = UINotificationFeedbackGenerator()
     static let intensity: Float = 0.9
 
+    static var isEnabled: Bool {
+        UserDefaults.standard.object(forKey: preferenceKey) as? Bool ?? true
+    }
+
+    static func pattern(for event: Event, enabled: Bool, reduceMotion: Bool) -> Pattern? {
+        guard enabled else { return nil }
+        func strength(_ value: CGFloat) -> CGFloat { reduceMotion ? min(value, 0.45) : value }
+        switch event {
+        case .surface: return .impact(.soft, strength(CGFloat(intensity)))
+        case .selection: return .selection
+        case .send: return .impact(.medium, strength(0.65))
+        case .stop: return .impact(.rigid, strength(0.55))
+        case .success: return .notification(.success)
+        case .error: return .notification(.error)
+        }
+    }
+
     static func prepare() {
-        generator.prepare()
+        if isEnabled { soft.prepare() }
     }
 
     static func impact() {
-        generator.impactOccurred(intensity: CGFloat(intensity))
-        prepare()
+        play(.surface)
+    }
+
+    static func play(_ event: Event) {
+        guard let pattern = pattern(for: event, enabled: isEnabled,
+                                    reduceMotion: UIAccessibility.isReduceMotionEnabled) else { return }
+        // UIKit handles hardware capability and system haptic policy. No custom
+        // engine, timers, token callbacks or animation-frame feedback is used.
+        switch pattern {
+        case .selection:
+            selection.selectionChanged(); selection.prepare()
+        case let .impact(style, strength):
+            let generator = style == .medium ? medium : style == .rigid ? rigid : soft
+            generator.impactOccurred(intensity: strength); generator.prepare()
+        case let .notification(type):
+            notification.notificationOccurred(type); notification.prepare()
+        }
     }
 }
 

@@ -376,6 +376,7 @@ struct SidebarView: View, Equatable {
                     close()
                 }
                 .accessibilityHint("开始一个新的对话")
+                .accessibilityIdentifier("sidebar.newChat")
             }
             .padding(.leading, 28)
             .padding(.trailing, 27)

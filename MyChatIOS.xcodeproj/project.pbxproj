@@ -58,7 +58,7 @@
 		B10000000000000000000002 /* ChatGPTPlanProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002 /* ChatGPTPlanProvider.swift */; };
 		B10000000000000000000003 /* ChatGPTPlanHistoryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000003 /* ChatGPTPlanHistoryClient.swift */; };
 		B10000000000000000000004 /* ChatGPTPlanSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000004 /* ChatGPTPlanSettingsSection.swift */; };
-		F25000000000000000000001 /* ResponseFonts in Resources */ = {isa = PBXBuildFile; fileRef = F25000000000000000000002 /* ResponseFonts */; };
+		F25000000000000000000001 /* ReadingFonts in Resources */ = {isa = PBXBuildFile; fileRef = F25000000000000000000002 /* ReadingFonts */; };
 		F71000000000000000000001 /* SpeechPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000001 /* SpeechPlaybackController.swift */; };
 		F71000000000000000000002 /* ChatDocumentViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000002 /* ChatDocumentViews.swift */; };
 		F71000000000000000000003 /* DotThinkingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72000000000000000000003 /* DotThinkingView.swift */; };
@@ -131,6 +131,7 @@
 		300000000000000000000028 /* provider-grok.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-grok.png"; sourceTree = "<group>"; };
 		300000000000000000000029 /* provider-zai.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "provider-zai.png"; sourceTree = "<group>"; };
 		30000000000000000000002A /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
+		F25000000000000000000002 /* ReadingFonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReadingFonts; sourceTree = "<group>"; };
 		A06400000000000000000001 /* NativeRuntimeFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRuntimeFixture.swift; sourceTree = "<group>"; };
 		A06400000000000000000004 /* MyChatRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatRuntimeTests.swift; sourceTree = "<group>"; };
 		A06400000000000000000006 /* MyChatRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MyChatRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -141,7 +142,6 @@
 		B20000000000000000000002 /* ChatGPTPlanProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanProvider.swift; sourceTree = "<group>"; };
 		B20000000000000000000003 /* ChatGPTPlanHistoryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanHistoryClient.swift; sourceTree = "<group>"; };
 		B20000000000000000000004 /* ChatGPTPlanSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTPlanSettingsSection.swift; sourceTree = "<group>"; };
-		F25000000000000000000002 /* ResponseFonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ResponseFonts; sourceTree = "<group>"; };
 		F72000000000000000000001 /* SpeechPlaybackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechPlaybackController.swift; sourceTree = "<group>"; };
 		F72000000000000000000002 /* ChatDocumentViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDocumentViews.swift; sourceTree = "<group>"; };
 		F72000000000000000000003 /* DotThinkingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DotThinkingView.swift; sourceTree = "<group>"; };
@@ -319,7 +319,7 @@
 			children = (
 				F72000000000000000000005 /* DotMotion */,
 				30000000000000000000002A /* Fonts */,
-				F25000000000000000000002 /* ResponseFonts */,
+				F25000000000000000000002 /* ReadingFonts */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -436,7 +436,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F71000000000000000000005 /* DotMotion in Resources */,
-				F25000000000000000000001 /* ResponseFonts in Resources */,
+				F25000000000000000000001 /* ReadingFonts in Resources */,
 				200000000000000000000019 /* Assets.xcassets in Resources */,
 				200000000000000000000020 /* provider-claude.png in Resources */,
 				200000000000000000000021 /* provider-deepseek.png in Resources */,

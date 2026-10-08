@@ -75,6 +75,7 @@ struct MainShellView: View {
                 canvas: canvasSurface
                     .environmentObject(appModel).environmentObject(canvasLayout),
                 composer: AnyView(FloatingComposerView(appModel: appModel,
+                    layoutBudget: canvasLayout.composerBudget,
                     openTools: { requestSheet(.tools) }, openModels: { requestSheet(.models) },
                     drawerIsOpen: { sidebarVisible }))
             )
@@ -89,6 +90,9 @@ struct MainShellView: View {
         .onChange(of: settingsVisible) { _, visible in if !visible { presentPendingDocument() } }
         .onChange(of: sidebarVisible) { _, visible in if !visible { presentPendingDocument() } }
         .onChange(of: appModel.activeConversationID) { _, _ in appModel.pendingDocumentPreview = nil }
+        .onChange(of: appModel.authSession?.user.id, initial: true) { _, owner in
+            canvasLayout.readingPositions.setOwner(owner)
+        }
         .sheet(item: $automaticDocument, onDismiss: {
             NativeDocumentModalActivity.set(documentModalID, active: false)
             Task { try? await Task.sleep(for: .milliseconds(250)); presentPendingDocument() }
@@ -308,6 +312,9 @@ private struct MainCanvasView: View {
             ZStack(alignment: .top) {
                 destinationContent
                 chatHeader
+                    .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { bottom in
+                        canvasLayout.composerBudget.setNavigationBottom(bottom)
+                    }
                     .background {
                         if !appModel.messages.isEmpty {
                             Rectangle().fill(.regularMaterial)
@@ -439,6 +446,8 @@ private struct MainCanvasView: View {
 }
 
 @MainActor final class ChatCanvasLayout: ObservableObject {
+    let readingPositions = ChatReadingPositionStore()
+    let composerBudget = ComposerLayoutBudget()
     private struct Geometry: Equatable {
         var bottomOcclusion: CGFloat = 140
         var composerTop: CGFloat?
@@ -467,14 +476,47 @@ private struct MainCanvasView: View {
     }
 }
 
+/// Input growth uses the same final keyboard geometry as native avoidance.
+/// Only the editor's height is bounded here; this never moves the composer.
+@MainActor final class ComposerLayoutBudget: ObservableObject {
+    @Published private(set) var availableHeight: CGFloat = .greatestFiniteMagnitude
+    private var navigationBottom: CGFloat?
+    private var inputBottom: CGFloat?
+    private var pendingHeight: CGFloat = .greatestFiniteMagnitude
+    private var scheduled = false
+
+    func setNavigationBottom(_ bottom: CGFloat) {
+        guard bottom.isFinite else { return }
+        navigationBottom = bottom; publish()
+    }
+    func setInputBottom(_ bottom: CGFloat) {
+        guard bottom.isFinite else { return }
+        inputBottom = bottom; publish()
+    }
+    private func publish() {
+        guard let navigationBottom, let inputBottom else { return }
+        pendingHeight = max(0, inputBottom - navigationBottom - 8)
+        guard !scheduled, abs(pendingHeight - availableHeight) > 0.5 else { return }
+        scheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scheduled = false
+            if abs(self.pendingHeight - self.availableHeight) > 0.5 {
+                self.availableHeight = self.pendingHeight
+            }
+        }
+    }
+}
+
 private struct FloatingComposerView: View {
     let appModel: AppModel
+    let layoutBudget: ComposerLayoutBudget
     let openTools: () -> Void
     let openModels: () -> Void
     let drawerIsOpen: () -> Bool
 
     var body: some View {
-        ComposerView(openTools: openTools, openModels: openModels, drawerIsOpen: drawerIsOpen)
+        ComposerView(layoutBudget: layoutBudget, openTools: openTools, openModels: openModels, drawerIsOpen: drawerIsOpen)
             .environmentObject(appModel)
             .font(MyChatTypography.appDefault)
     }
@@ -894,6 +936,12 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
     }
 
     private func setCanvasBottomInset(_ inset: CGFloat) {
+        if view.window != nil {
+            let restingTop = view.bounds.maxY - view.safeAreaInsets.bottom
+            let keyboardTop = keyboardEndFrame.map { view.convert($0, from: nil).minY } ?? restingTop
+            let bottom = min(max(keyboardTop, 0), restingTop) + (composerBottomConstraint?.constant ?? 0)
+            canvasLayout?.composerBudget.setInputBottom(view.convert(CGPoint(x: 0, y: bottom), to: nil).y)
+        }
         canvasLayout?.presentedComposerTop = { [weak self] in
             guard let self, let composer = self.composerHost.view, let parent = composer.superview else { return nil }
             let top = (composer.layer.presentation()?.frame ?? composer.frame).minY
@@ -1203,6 +1251,18 @@ private final class DrawerController<Sidebar: View, Canvas: View>: UIViewControl
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard gestureRecognizer === pan else { return true }
+        if !desiredOpen, currentOffset <= 1 {
+            var touchedView = touch.view
+            while let candidate = touchedView, candidate !== view {
+                if let scroll = candidate as? UIScrollView, scroll.isScrollEnabled,
+                   scroll.contentSize.width > scroll.bounds.width + 1 {
+                    // Image strips, tables and code already own a horizontal
+                    // reading gesture. Opening the drawer must not steal it.
+                    return false
+                }
+                touchedView = candidate.superview
+            }
+        }
         // A horizontal swipe may start anywhere, including the header. Taps
         // still reach their controls when direction classification fails.
         return true
@@ -4621,6 +4681,7 @@ private struct ModelPickerSheet: View {
                                         }
                                         ForEach(group.models) { model in
                                     Button {
+                                        if model.id != appModel.selectedModelID { HapticFeedback.play(.selection) }
                                         appModel.selectModel(model)
                                         dismiss()
                                     } label: {
@@ -4793,7 +4854,10 @@ private struct ChatModelSelectionSheet: View {
     private func modelRows(_ models: [ModelCatalogItem], raised: Bool = true) -> some View {
         VStack(spacing: 0) {
             ForEach(models) { model in
-                Button { appModel.selectModel(model); closeSheet() } label: {
+                Button {
+                    if model.id != appModel.selectedModelID { HapticFeedback.play(.selection) }
+                    appModel.selectModel(model); closeSheet()
+                } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(model.chatDisplayName).font(MyChatTypography.navigation)

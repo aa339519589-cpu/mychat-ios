@@ -403,10 +403,11 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-images") {
                 let image = NativeRuntimeFixture.imageSource
+                let multiImages = Array(repeating: image, count: ProcessInfo.processInfo.arguments.contains("--ui-test-wide-images") ? 5 : 2)
                 return (200, [
                     ["id": "50000000-0000-4000-8000-000000000064", "role": "user", "content": "纯文字靠右", "seq": 1, "created_at": date],
                     ["id": "50000000-0000-4000-8000-000000000065", "role": "user", "content": "", "images": ["refs": [image]], "seq": 2, "created_at": date],
-                    ["id": "50000000-0000-4000-8000-000000000066", "role": "user", "content": "图片加文字靠右", "images": ["refs": [image,image]], "seq": 3, "created_at": date],
+                    ["id": "50000000-0000-4000-8000-000000000066", "role": "user", "content": "图片加文字靠右", "images": ["refs": multiImages], "seq": 3, "created_at": date],
                     ["id": "60000000-0000-4000-8000-000000000064", "role": "assistant", "content": "中文回复靠左。\n\nEnglish typography stays unchanged.", "seq": 4, "created_at": date]
                 ].reversed().map { $0 })
             }
