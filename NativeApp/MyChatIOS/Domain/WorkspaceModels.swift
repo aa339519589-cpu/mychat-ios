@@ -464,7 +464,22 @@ struct CodeChatCommand: Equatable, Sendable {
     let responseID: UUID
     let sessionID: UUID
     var branch: String? = nil
-    var mode: String = "code"
+    let mode = "code"
+
+    init(repository: String, modelID: String = ModelCatalogItem.defaultChatModelID,
+         endpointID: UUID? = nil, reasoningEffort: String? = ModelCatalogItem.defaultChatReasoningEffort,
+         messages: [CodeContextMessage], taskID: UUID?, responseID: UUID, sessionID: UUID,
+         branch: String? = nil) {
+        self.repository = repository
+        self.modelID = modelID
+        self.endpointID = endpointID
+        self.reasoningEffort = reasoningEffort
+        self.messages = messages
+        self.taskID = taskID
+        self.responseID = responseID
+        self.sessionID = sessionID
+        self.branch = branch
+    }
 }
 
 struct CodeCapabilities: Decodable, Sendable {
@@ -477,8 +492,7 @@ struct CodeCapabilities: Decodable, Sendable {
     }
     let schemaVersion: Int
     let execution: Execution
-    let modes: [String]
-    let planReadOnly: Bool
+    let cloudOnly: Bool?
     let durableQueue: Bool
 }
 
@@ -517,7 +531,6 @@ struct CodeTaskDetail: Decodable, Sendable {
     let id: String
     let status: String
     let branch: String
-    let mode: String
     let error: String?
     let pullRequestUrl: String?
     let toolCalls: [Tool]
@@ -528,7 +541,6 @@ struct CodeDraftRecord: Codable, Equatable {
     var prompt = ""
     var repository: String? = nil
     var branch = ""
-    var mode = "code"
 }
 
 enum CodeLocalState {

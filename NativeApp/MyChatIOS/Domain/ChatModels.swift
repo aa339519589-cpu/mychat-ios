@@ -116,9 +116,9 @@ enum ChatReasoningEffort: String, Codable, CaseIterable, Sendable {
 }
 
 struct ChatToolSelection: Codable, Equatable, Sendable {
-    var searchMode: ChatSearchMode = .off
-    var historyRetrieval = false
-    var renderEnabled = false
+    var searchMode: ChatSearchMode = .web
+    var historyRetrieval = true
+    var renderEnabled = true
     var connectorAccessMode: ChatConnectorAccessMode = .auto
     /// nil means all account-enabled connectors; [] means none for this chat.
     var connectorIDs: [String]? = nil
@@ -155,10 +155,10 @@ struct ChatAppendCommand: Codable, Equatable, Sendable {
         userMessage: ChatMessage,
         generationID: UUID = UUID(),
         assistantMessageID: UUID = UUID(),
-        modelID: String,
+        modelID: String = ModelCatalogItem.defaultChatModelID,
         endpointID: UUID? = nil,
         outputKind: ModelOutputKind = .chat,
-        reasoningEffort: ChatReasoningEffort? = ChatReasoningEffort.none,
+        reasoningEffort: ChatReasoningEffort? = .medium,
         tools: ChatToolSelection = ChatToolSelection(),
         createConversation: Bool,
         conversationMemoryEnabled: Bool = true,

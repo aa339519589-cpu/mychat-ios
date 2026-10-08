@@ -165,10 +165,8 @@ struct CodeLanding: View {
                 deletionError = "此仓库未授权，无法打开任务草稿"; return
             }
             guard owner == appModel.authSession?.user.id else { return }
-            let mode = values["mode"] ?? "code"
-            guard ["plan", "code"].contains(mode) else { deletionError = "任务模式无效"; return }
             CodeLocalState.save(CodeDraftRecord(prompt: values["q"] ?? "", repository: repo,
-                branch: values["branch"] ?? "", mode: mode), owner: appModel.authSession?.user.id ?? "", scope: "new")
+                branch: values["branch"] ?? ""), owner: appModel.authSession?.user.id ?? "", scope: "new")
             newSessionPresented = true
         } else if parts.count == 2 {
             await appModel.reloadWorkspaceData()
@@ -181,6 +179,67 @@ struct CodeLanding: View {
             guard owner == appModel.authSession?.user.id else { return }
             selectedSession = record
         }
+    }
+}
+
+private struct CodeSwipeBackModifier: ViewModifier {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var horizontalOffset: CGFloat = 0
+    @State private var isTracking = false
+
+    func body(content: Content) -> some View {
+        GeometryReader { proxy in
+            content
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .offset(x: horizontalOffset)
+                .shadow(
+                    color: .black.opacity(horizontalOffset > 0 ? 0.12 : 0),
+                    radius: 10,
+                    x: -4
+                )
+                .contentShape(Rectangle())
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                        .onChanged { value in
+                            guard value.startLocation.x <= 44 else { return }
+                            let horizontal = value.translation.width
+                            let vertical = abs(value.translation.height)
+                            guard isTracking || (horizontal > 0 && horizontal > vertical * 1.15) else { return }
+                            isTracking = true
+                            horizontalOffset = min(proxy.size.width, max(0, horizontal))
+                        }
+                        .onEnded { value in
+                            guard isTracking else { return }
+                            isTracking = false
+                            let projected = max(value.translation.width, value.predictedEndTranslation.width)
+                            let completes = projected >= max(88, proxy.size.width * 0.26)
+                            if completes {
+                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                                    horizontalOffset = proxy.size.width
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0 : 0.18)) {
+                                    var transaction = Transaction()
+                                    transaction.disablesAnimations = true
+                                    withTransaction(transaction) { dismiss() }
+                                    horizontalOffset = 0
+                                }
+                            } else {
+                                withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)) {
+                                    horizontalOffset = 0
+                                }
+                            }
+                        }
+                )
+        }
+    }
+}
+
+private struct CodeSendButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
     }
 }
 
@@ -202,7 +261,6 @@ private struct CodeSessionDetailView: View {
     @State private var steps: [CodeAgentStep] = []
     @State private var toolActivities: [ChatToolActivity] = []
     @State private var taskDetail: CodeTaskDetail?
-    @State private var mode = "code"
     @State private var branch = ""
     @State private var isRecovering = false
     @State private var hasSavedSettings = false
@@ -292,12 +350,6 @@ private struct CodeSessionDetailView: View {
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 66)
-                Picker("任务模式", selection: $mode) {
-                    Text("Execute").tag("code")
-                    Text("Plan · 只读").tag("plan")
-                }.pickerStyle(.segmented).padding(.horizontal, 16)
-                    .disabled(activeAdmission != nil || isAdmitting)
-                    .accessibilityIdentifier("code.session.mode")
                 if !branch.isEmpty { Text(branch).font(MyChatTypography.caption).padding(.vertical, 6) }
 
                 if isLoading {
@@ -407,43 +459,49 @@ private struct CodeSessionDetailView: View {
                     .refreshable { await load(); await recover() }
                 }
 
-                HStack(alignment: .bottom, spacing: 10) {
+                HStack(alignment: .center, spacing: 4) {
                     Button {
                         composerFocused = false
-                        commandDestination = .commands
+                        commandDestination = .actions
                     } label: {
                         Image(systemName: "plus")
                             .font(MyChatSystemFont.appFont(size: 20, weight: .regular))
                             .frame(width: 44, height: 44)
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, 6)
-                    .padding(.bottom, 5)
                     .accessibilityLabel("打开编程操作")
 
                     TextField("向 MyChat 编程发送消息", text: $draft, axis: .vertical)
+                        .font(MyChatTypography.composerText)
                         .lineLimit(1...5)
                         .focused($composerFocused)
-                        .padding(.horizontal, 15)
-                        .padding(.vertical, 12)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 10)
+                        .accessibilityIdentifier("code.session.draft")
                     Button {
                         Task { await send() }
                     } label: {
-                        Image(systemName: "arrow.up")
-                            .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
-                            .foregroundStyle(MyChatTheme.onBrand)
-                            .frame(width: 44, height: 44)
-                            .background(MyChatTheme.brand, in: Circle())
+                        ZStack {
+                            Circle()
+                                .fill(MyChatTheme.brand)
+                                .frame(width: 40, height: 40)
+                            Image(systemName: "arrow.up")
+                                .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
+                                .foregroundStyle(MyChatTheme.onBrand)
+                        }
+                        .frame(width: 44, height: 44)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(CodeSendButtonStyle())
                     .disabled(!canSend)
                     .opacity(canSend ? 1 : 0.45)
-                    .padding(.trailing, 6)
-                    .padding(.bottom, 5)
+                    .accessibilityIdentifier("code.session.send")
                 }
-                .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 6)
+                .frame(minHeight: 56)
+                .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
                         .stroke(MyChatTheme.border.opacity(0.8), lineWidth: 0.7)
                 }
                 .padding(.horizontal, 14)
@@ -455,7 +513,7 @@ private struct CodeSessionDetailView: View {
         .task {
             let saved = CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: session.id)
             hasSavedSettings = CodeLocalState.containsDraft(owner: appModel.authSession?.user.id ?? "", scope: session.id)
-            draft = saved.prompt; mode = saved.mode; branch = saved.branch
+            draft = saved.prompt; branch = saved.branch
             if !consumedInitialTurn, let initialTurn {
                 consumedInitialTurn = true
                 prepare(initialTurn)
@@ -469,12 +527,11 @@ private struct CodeSessionDetailView: View {
         .onChange(of: draft) { _, value in
             saveSessionDraft()
         }
-        .onChange(of: mode) { _, _ in saveSessionDraft() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active, activeAdmission == nil { Task { await load(); await recover() } }
         }
         .sheet(item: $commandDestination) { destination in
-            commandSheet(destination)
+            actionSheet(destination)
                 .environmentObject(appModel)
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
@@ -499,6 +556,7 @@ private struct CodeSessionDetailView: View {
             .presentationDragIndicator(.visible)
             .presentationBackground(MyChatTheme.canvas)
         }
+        .modifier(CodeSwipeBackModifier())
     }
 
     private func load() async {
@@ -526,7 +584,6 @@ private struct CodeSessionDetailView: View {
             let recovery = try await appModel.recoverCodeTask(sessionID: session.id)
             taskDetail = recovery.task
             if let task = recovery.task {
-                if !hasSavedSettings { mode = task.mode == "plan" ? "plan" : "code" }
                 branch = task.branch
             }
             if let admission = recovery.operationAdmission ?? recovery.admission {
@@ -547,7 +604,7 @@ private struct CodeSessionDetailView: View {
     private func saveSessionDraft() {
         hasSavedSettings = true
         CodeLocalState.save(CodeDraftRecord(prompt: draft, repository: session.repository,
-            branch: branch, mode: mode), owner: appModel.authSession?.user.id ?? "", scope: session.id)
+            branch: branch), owner: appModel.authSession?.user.id ?? "", scope: session.id)
     }
 
     private var canSend: Bool {
@@ -562,7 +619,7 @@ private struct CodeSessionDetailView: View {
     }
 
     private var canRequestPublish: Bool {
-        mode == "code" && activeAdmission == nil
+        activeAdmission == nil
             && lastTaskID != nil
             && (!isProvisionalRepository || !plans.isEmpty)
             && receipt == nil
@@ -619,7 +676,7 @@ private struct CodeSessionDetailView: View {
         }
         do {
             let start = try await appModel.startCodeTurn(in: session, prompt: prompt,
-                branch: branch.isEmpty ? nil : branch, mode: mode)
+                branch: branch.isEmpty ? nil : branch)
             prepare(start)
             isAdmitting = false
             await consume(start.admission)
@@ -633,13 +690,13 @@ private struct CodeSessionDetailView: View {
     }
 
     @ViewBuilder
-    private func commandSheet(_ destination: CodeCommandDestination) -> some View {
+    private func actionSheet(_ destination: CodeCommandDestination) -> some View {
         switch destination {
-        case .commands:
-            CodeCommandSheet(
+        case .actions:
+            CodeActionSheet(
                 repository: session.repository,
                 close: { commandDestination = nil },
-                select: selectCommand
+                select: selectAction
             )
         case .model:
             ModelPickerSheet(codeOnly: true)
@@ -648,12 +705,6 @@ private struct CodeSessionDetailView: View {
         case .memory:
             CodeMemorySheet(
                 repository: session.repository,
-                close: { commandDestination = nil }
-            )
-        case .context:
-            CodeContextSheet(
-                messages: messages,
-                streamedContent: streamedContent,
                 close: { commandDestination = nil }
             )
         case .resume:
@@ -671,19 +722,16 @@ private struct CodeSessionDetailView: View {
         }
     }
 
-    private func selectCommand(_ command: CodeSlashCommand) {
-        switch command.command {
-        case "/new":
+    private func selectAction(_ action: CodeAction) {
+        switch action.kind {
+        case .new:
             commandDestination = nil
             Task { await createNewSession() }
-        case "/model": commandDestination = .model
-        case "/effort": commandDestination = .effort
-        case "/memory": commandDestination = .memory
-        case "/context": commandDestination = .context
-        case "/resume": commandDestination = .resume
-        case "/tasks": commandDestination = .tasks
-        default:
-            commandDestination = nil
+        case .model: commandDestination = .model
+        case .effort: commandDestination = .effort
+        case .memory: commandDestination = .memory
+        case .resume: commandDestination = .resume
+        case .tasks: commandDestination = .tasks
         }
     }
 
@@ -854,7 +902,7 @@ private struct CodeTaskEvidenceView: View {
     let detail: CodeTaskDetail
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Label("\(detail.status) · \(detail.branch) · \(detail.mode)", systemImage: "cloud")
+            Label("\(detail.status) · \(detail.branch)", systemImage: "cloud")
                 .font(MyChatTypography.caption)
             ForEach(detail.toolCalls) { tool in
                 DisclosureGroup("\(tool.toolName) · \(tool.status)") {
@@ -908,36 +956,37 @@ private struct CodeConversationMessage: View {
     }
 }
 
-private struct CodeSlashCommand: Identifiable {
-    var id: String { command }
-    let command: String
+private struct CodeAction: Identifiable {
+    enum Kind: String { case new, model, effort, memory, resume, tasks }
+    var id: Kind { kind }
+    let kind: Kind
+    let title: String
     let description: String
     let symbol: String
 
-    static let all: [CodeSlashCommand] = [
-        .init(command: "/new", description: "在当前项目内开启新对话", symbol: "plus.message"),
-        .init(command: "/model", description: "打开统一模型列表", symbol: "square.stack.3d.up"),
-        .init(command: "/effort", description: "选择当前模型的真实思考深度", symbol: "brain.head.profile"),
-        .init(command: "/memory", description: "查看或编辑本仓库记忆", symbol: "memorychip"),
-        .init(command: "/context", description: "查看当前上下文用量", symbol: "text.line.first.and.arrowtriangle.forward"),
-        .init(command: "/resume", description: "恢复本仓库的历史排查", symbol: "clock.arrow.circlepath"),
-        .init(command: "/tasks", description: "查看 Agent 任务列表与状态", symbol: "checklist"),
+    static let all: [CodeAction] = [
+        .init(kind: .new, title: "新建对话", description: "在当前仓库创建持久会话", symbol: "plus.message"),
+        .init(kind: .model, title: "模型", description: "选择实际用于云端任务的模型", symbol: "square.stack.3d.up"),
+        .init(kind: .effort, title: "思考强度", description: "设置实际发送给模型的思考档位", symbol: "brain.head.profile"),
+        .init(kind: .memory, title: "仓库记忆", description: "查看、添加或删除持久记忆", symbol: "memorychip"),
+        .init(kind: .resume, title: "历史会话", description: "打开本仓库已有的持久会话", symbol: "clock.arrow.circlepath"),
+        .init(kind: .tasks, title: "云端任务", description: "查看已入队任务及其真实状态", symbol: "checklist"),
     ]
 }
 
 private enum CodeCommandDestination: String, Identifiable {
-    case commands, model, effort, memory, context, resume, tasks
+    case actions, model, effort, memory, resume, tasks
     var id: String { rawValue }
 }
 
-private struct CodeCommandSheet: View {
+private struct CodeActionSheet: View {
     let repository: String
     let close: () -> Void
-    let select: (CodeSlashCommand) -> Void
+    let select: (CodeAction) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            SheetHeader(title: "编程指令", close: close)
+            SheetHeader(title: "编程操作", close: close)
             if let repository = CodeDisplay.repository(repository) {
                 Text(repository)
                     .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
@@ -950,18 +999,18 @@ private struct CodeCommandSheet: View {
 
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(CodeSlashCommand.all) { command in
+                    ForEach(CodeAction.all) { action in
                         Button {
-                            select(command)
+                            select(action)
                         } label: {
                             HStack(spacing: 13) {
-                                Image(systemName: command.symbol)
+                                Image(systemName: action.symbol)
                                     .font(MyChatSystemFont.appFont(size: 17, weight: .medium))
                                     .frame(width: 30)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(command.command)
-                                        .font(MyChatSystemFont.appFont(size: 17, design: .monospaced, weight: .semibold))
-                                    Text(command.description)
+                                    Text(action.title)
+                                        .font(MyChatSystemFont.appFont(size: 17, weight: .semibold))
+                                    Text(action.description)
                                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                                         .foregroundStyle(MyChatTheme.secondaryText)
                                         .lineLimit(1)
@@ -1180,55 +1229,6 @@ private struct CodeMemorySheet: View {
     }
 }
 
-private struct CodeContextSheet: View {
-    @EnvironmentObject private var appModel: AppModel
-    let messages: [CodeMessageRecord]
-    let streamedContent: String
-    let close: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            SheetHeader(title: "上下文", close: close)
-            VStack(spacing: 18) {
-                metric("Messages", value: "\(messages.count)")
-                metric("预计令牌数", value: "\(estimatedTokens.formatted()) / \(limit.formatted())")
-                ProgressView(value: Double(min(estimatedTokens, limit)), total: Double(limit))
-                    .tint(MyChatTheme.brand)
-                Text("根据当前编程对话估算")
-                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                    .foregroundStyle(MyChatTheme.secondaryText)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(20)
-            .background(
-                MyChatTheme.raised,
-                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-            )
-            .padding(.horizontal, 20)
-            Spacer(minLength: 12)
-        }
-        .foregroundStyle(MyChatTheme.text)
-        .background(MyChatTheme.canvas)
-    }
-
-    private var estimatedTokens: Int {
-        let characters = messages.reduce(0) { $0 + $1.content.count } + streamedContent.count
-        return max(0, Int((Double(characters) / 3).rounded()))
-    }
-
-    private var limit: Int {
-        max(appModel.selectedModel?.contextLength ?? 128_000, 1)
-    }
-
-    private func metric(_ title: String, value: String) -> some View {
-        HStack {
-            Text(title).foregroundStyle(MyChatTheme.secondaryText)
-            Spacer()
-                        Text(value).font(MyChatSystemFont.appFont(for: .body, design: .monospaced, weight: .regular))
-        }
-    }
-}
-
 private struct CodeResumeSheet: View {
     let repository: String
     let sessions: [CodeSessionRecord]
@@ -1385,7 +1385,6 @@ private struct CodeNewSessionView: View {
     @State private var errorMessage: String?
     @State private var startedSession: CodeSessionStart?
     @State private var branch = ""
-    @State private var mode = "code"
     @State private var capabilities: CodeCapabilities?
     @State private var capabilityError: String?
     @State private var branches: [CodeBranches.Branch] = []
@@ -1447,10 +1446,6 @@ private struct CodeNewSessionView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     VStack(alignment: .leading, spacing: 8) {
-                        Picker("任务模式", selection: $mode) {
-                            Text("Execute").tag("code")
-                            Text("Plan · 只读").tag("plan")
-                        }.pickerStyle(.segmented).accessibilityIdentifier("code.mode")
                         TextField("目标分支（留空使用仓库默认分支）", text: $branch)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                             .frame(minHeight: 44)
@@ -1465,9 +1460,9 @@ private struct CodeNewSessionView: View {
                         }
                         if let branchError { Text(branchError).font(MyChatTypography.caption).foregroundStyle(.red) }
                         if let capabilities {
-                            Label(capabilities.execution.location == "cloud"
-                                ? (capabilities.execution.verified ? "Cloud · 已验证" : "Cloud · 已配置，待实测")
-                                : (capabilities.execution.location == "local_test" ? "本地测试环境 · 非 Cloud" : "执行环境尚未就绪"), systemImage: "cloud")
+                            Label(capabilities.execution.location == "cloud" && capabilities.execution.configured
+                                ? (capabilities.execution.verified ? "云端执行已验证" : "云端执行待验收")
+                                : "云端执行不可用", systemImage: "cloud")
                                 .font(MyChatTypography.caption)
                             if let reason = capabilities.execution.reason { Text(reason).font(MyChatTypography.caption) }
                         } else {
@@ -1519,20 +1514,21 @@ private struct CodeNewSessionView: View {
                         Button {
                             Task { await startSession() }
                         } label: {
-                            if isStarting {
-                                ProgressView()
-                                    .tint(MyChatTheme.sendActionForeground)
-                                    .frame(width: 44, height: 44)
-                                    .background(MyChatTheme.sendActionSurface, in: Circle())
-                            } else {
-                                Image(systemName: "arrow.up")
-                                    .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
-                                    .foregroundStyle(MyChatTheme.sendActionForeground)
-                                    .frame(width: 44, height: 44)
-                                    .background(MyChatTheme.sendActionSurface, in: Circle())
+                            ZStack {
+                                Circle()
+                                    .fill(MyChatTheme.sendActionSurface)
+                                    .frame(width: 40, height: 40)
+                                if isStarting {
+                                    ProgressView().tint(MyChatTheme.sendActionForeground)
+                                } else {
+                                    Image(systemName: "arrow.up")
+                                        .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
+                                        .foregroundStyle(MyChatTheme.sendActionForeground)
+                                }
                             }
+                            .frame(width: 44, height: 44)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(CodeSendButtonStyle())
                         .disabled(!canStart)
                         .opacity(canStart ? 1 : 0.45)
                         .accessibilityHint("发送 Code 任务；仓库可以稍后选择")
@@ -1564,7 +1560,6 @@ private struct CodeNewSessionView: View {
         .task { await restoreDraft() }
         .onChange(of: draft) { _, _ in saveDraft() }
         .onChange(of: branch) { _, _ in saveDraft() }
-        .onChange(of: mode) { _, _ in saveDraft() }
         .onChange(of: selectedRepository) { _, _ in saveDraft() }
         .task(id: selectedRepository?.fullName) {
             branches = []; branchError = nil
@@ -1594,6 +1589,7 @@ private struct CodeNewSessionView: View {
                 .presentationDragIndicator(.visible)
                 .presentationBackground(MyChatTheme.canvas)
         }
+        .modifier(CodeSwipeBackModifier())
         }
     }
 
@@ -1604,18 +1600,19 @@ private struct CodeNewSessionView: View {
 
     private var canStart: Bool {
         CodeSendEligibility.canSubmit(draft: draft, isBusy: isStarting)
-            && (capabilities?.execution.configured == true || (mode == "plan" && capabilities?.planReadOnly == true))
+            && capabilities?.execution.location == "cloud"
+            && capabilities?.execution.configured == true
     }
 
     private func saveDraft() {
         guard !isStarting else { return }
         CodeLocalState.save(CodeDraftRecord(prompt: draft, repository: selectedRepository?.fullName,
-            branch: branch, mode: mode), owner: appModel.authSession?.user.id ?? "", scope: "new")
+            branch: branch), owner: appModel.authSession?.user.id ?? "", scope: "new")
     }
 
     private func restoreDraft() async {
         let value = CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: "new")
-        draft = value.prompt; branch = value.branch; mode = value.mode
+        draft = value.prompt; branch = value.branch
         do {
             capabilities = try await appModel.codeCapabilities()
             if let repo = value.repository {
@@ -1644,11 +1641,10 @@ private struct CodeNewSessionView: View {
             let started = try await appModel.startCodeSession(
                 repository: createNewRepository ? nil : selectedRepository?.fullName,
                 prompt: prompt,
-                branch: branch.isEmpty ? nil : branch,
-                mode: mode
+                branch: branch.isEmpty ? nil : branch
             )
             CodeLocalState.clear(owner: appModel.authSession?.user.id ?? "", scope: "new")
-            CodeLocalState.save(CodeDraftRecord(repository: selectedRepository?.fullName, branch: branch, mode: mode),
+            CodeLocalState.save(CodeDraftRecord(repository: selectedRepository?.fullName, branch: branch),
                 owner: appModel.authSession?.user.id ?? "", scope: started.session.id)
             withAnimation(.smooth(duration: 0.38)) { startedSession = started }
         } catch {

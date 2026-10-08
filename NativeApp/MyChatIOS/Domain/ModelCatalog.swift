@@ -13,6 +13,8 @@ enum ModelOutputKind: String, Codable {
 }
 
 struct ModelCatalogItem: Codable, Identifiable, Hashable {
+    static let defaultChatModelID = "anthropic/claude-haiku-5.5"
+    static let defaultChatReasoningEffort = "medium"
     let id: String
     let name: String
     let provider: String
@@ -121,12 +123,26 @@ struct ModelCatalogItem: Codable, Identifiable, Hashable {
     static func currentChatSelection(_ models: [Self], preferredID: String?) -> Self? {
         let preferred = models.first { $0.id == preferredID && $0.isSelectable }
         let current = primaryChatModels(models, selectedID: preferredID).filter(\.isSelectable)
+        if let preferred, current.contains(where: {
+            $0.claudeIdentity?.family == preferred.claudeIdentity?.family
+                && $0.claudeIdentity?.version == preferred.claudeIdentity?.version
+        }) { return preferred }
         let family = preferred?.claudeIdentity?.family
             ?? ["fable", "opus", "sonnet", "haiku"].first { preferredID?.lowercased().contains("claude-" + $0 + "-") == true }
         if let family, let matched = current.first(where: { $0.claudeIdentity?.family == family }) {
             return matched
         }
-        return preferred ?? current.first ?? models.first(where: \.isSelectable)
+        return preferred
+            ?? models.first { $0.id == defaultChatModelID && $0.isSelectable && $0.outputKind == .chat }
+            ?? current.first { $0.claudeIdentity?.family == "haiku" }
+            ?? current.first ?? models.first(where: \.isSelectable)
+    }
+
+    var factoryReasoningEffort: String {
+        if reasoningEfforts.contains(Self.defaultChatReasoningEffort) { return Self.defaultChatReasoningEffort }
+        if let defaultReasoningEffort, defaultReasoningEffort != "none",
+           reasoningEfforts.contains(defaultReasoningEffort) { return defaultReasoningEffort }
+        return reasoningEfforts.first { $0 != "none" } ?? "none"
     }
 
     var isSelectable: Bool {

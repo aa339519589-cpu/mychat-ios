@@ -114,7 +114,7 @@ final class AppModel: ObservableObject {
     @Published var artifactPreview: ArtifactRecord?
     @Published var pendingDocumentPreview: ChatDocument?
     private var automaticallyPreviewedMessages: Set<UUID> = []
-    @Published var selectedModelID: String?
+    @Published var selectedModelID: String? = ModelCatalogItem.defaultChatModelID
     @Published var selectedDestination: AppDestination = .chats
     @Published var pendingCodeLink: URL?
     @Published var draft = ""
@@ -122,12 +122,12 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(webSearchEnabled, forKey: "mychat.web-search-enabled.v1") }
     }
     @Published private(set) var historyRetrievalEnabled = true
-    @Published var renderEnabled = UserDefaults.standard.bool(forKey: "mychat.render-enabled.v1") {
+    @Published var renderEnabled = UserDefaults.standard.object(forKey: "mychat.render-enabled.v1") as? Bool ?? true {
         didSet { UserDefaults.standard.set(renderEnabled, forKey: "mychat.render-enabled.v1") }
     }
     @Published private(set) var pendingAttachments: [ChatPendingAttachment] = []
     @Published private(set) var attachmentError: String?
-    @Published private(set) var reasoningEffort = "none"
+    @Published private(set) var reasoningEffort = ModelCatalogItem.defaultChatReasoningEffort
 
     var canChangeActiveConversationMemory: Bool {
         memoryEnabled && activeConversationID == nil && messages.isEmpty
@@ -206,6 +206,7 @@ final class AppModel: ObservableObject {
         self.chatClient = chatClient
         self.codeClient = codeClient
         self.jobEventStream = jobEventStream
+        selectedModelID = UserDefaults.standard.string(forKey: selectedModelKey) ?? ModelCatalogItem.defaultChatModelID
     }
 
     var selectedModel: ModelCatalogItem? {
@@ -304,8 +305,8 @@ final class AppModel: ObservableObject {
                 if models.isEmpty { catalogError = error.localizedDescription }
             }
         }
-        let saved = UserDefaults.standard.string(forKey: selectedModelKey) ?? selectedModelID
-        if let saved, saved.hasPrefix(ChatGPTPlanProvider.modelIDPrefix),
+        let saved = UserDefaults.standard.string(forKey: selectedModelKey) ?? ModelCatalogItem.defaultChatModelID
+        if saved.hasPrefix(ChatGPTPlanProvider.modelIDPrefix),
            !models.contains(where: { $0.id == saved }) {
             // Keep the explicit plan-channel choice visible and unavailable
             // until its account/model is restored. Never switch billing paths.
@@ -1668,8 +1669,8 @@ final class AppModel: ObservableObject {
     }
 
     private func restoreCachedModelSelection() {
-        let saved = UserDefaults.standard.string(forKey: selectedModelKey) ?? selectedModelID
-        if let saved, saved.hasPrefix(ChatGPTPlanProvider.modelIDPrefix),
+        let saved = UserDefaults.standard.string(forKey: selectedModelKey) ?? ModelCatalogItem.defaultChatModelID
+        if saved.hasPrefix(ChatGPTPlanProvider.modelIDPrefix),
            !models.contains(where: { $0.id == saved }) {
             // Preserve the explicit plan choice while its cached model list is
             // temporarily unavailable; never silently switch billing paths.
@@ -1889,8 +1890,7 @@ final class AppModel: ObservableObject {
         let removedModelID = "endpoint:\(endpoint.id.lowercased())"
         models.removeAll { $0.id == removedModelID }
         if selectedModelID == removedModelID {
-            let fallback = models.first { $0.access == .quota && $0.endpointID == nil }
-                ?? models.first(where: \.isSelectable)
+            let fallback = ModelCatalogItem.currentChatSelection(models, preferredID: nil)
             selectedModelID = fallback?.id
             if let fallback {
                 UserDefaults.standard.set(fallback.id, forKey: selectedModelKey)
@@ -1987,22 +1987,21 @@ final class AppModel: ObservableObject {
         codeSessions.removeAll { $0.id == sessionRecord.id }
     }
 
-    func startCodeSession(repository: String?, prompt: String, branch: String? = nil, mode: String = "code") async throws -> CodeSessionStart {
+    func startCodeSession(repository: String?, prompt: String, branch: String? = nil) async throws -> CodeSessionStart {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             throw CodeAPIError.invalidRequest("请输入 Code 任务")
         }
         let title = String(prompt.prefix(80))
         let session = try await createCodeSession(repository: repository, title: title)
-        let turn = try await startCodeTurn(in: session, prompt: prompt, branch: branch, mode: mode)
+        let turn = try await startCodeTurn(in: session, prompt: prompt, branch: branch)
         return CodeSessionStart(session: session, turn: turn)
     }
 
     func startCodeTurn(
         in sessionRecord: CodeSessionRecord,
         prompt: String,
-        branch: String? = nil,
-        mode: String = "code"
+        branch: String? = nil
     ) async throws -> CodeTurnStart {
         let prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty, prompt.utf16.count <= 100_000 else {
@@ -2050,8 +2049,7 @@ final class AppModel: ObservableObject {
             taskID: activeCodeTaskID(in: prior),
             responseID: UUID(),
             sessionID: sessionID,
-            branch: branch,
-            mode: mode
+            branch: branch
         )
         let admission = try await codeClient.enqueue(command, accessToken: auth.accessToken)
         return CodeTurnStart(userMessage: userMessage, admission: admission)
@@ -2079,7 +2077,7 @@ final class AppModel: ObservableObject {
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         let items = components.queryItems ?? []
         guard Set(items.map(\.name)).count == items.count,
-              items.allSatisfy({ ["q", "repo", "branch", "mode"].contains($0.name) && ($0.value?.count ?? 0) <= 100_000 }) else { return }
+              items.allSatisfy({ ["q", "repo", "branch"].contains($0.name) && ($0.value?.count ?? 0) <= 100_000 }) else { return }
         let parts = url.path.split(separator: "/")
         guard parts.isEmpty || parts == ["new"] || (parts.count == 2 && parts[0] == "task" && UUID(uuidString: String(parts[1])) != nil) else { return }
         selectedDestination = .code
@@ -2847,7 +2845,7 @@ final class AppModel: ObservableObject {
                 connectorIDs: isPrivateChat ? [] : activeChatConnectorIDs?.sorted()
             ),
             createConversation: isNewConversation,
-            conversationMemoryEnabled: !isPrivateChat && activeConversationMemoryEnabled,
+            conversationMemoryEnabled: !isPrivateChat && memoryEnabled && activeConversationMemoryEnabled,
             title: isPrivateChat ? "隐私对话" : Self.initialConversationTitle(content, attachments: attachedFileNames),
             projectID: isPrivateChat ? nil : activeProjectID,
             attachments: attachedFiles
@@ -2927,7 +2925,7 @@ final class AppModel: ObservableObject {
             tools: ChatToolSelection(searchMode: webSearchEnabled ? .web : .off,
                 historyRetrieval: !isPrivateChat && historyRetrievalEnabled, renderEnabled: renderEnabled,
                 connectorAccessMode: activeChatConnectorAccessMode, connectorIDs: isPrivateChat ? [] : activeChatConnectorIDs?.sorted()),
-            createConversation: false, conversationMemoryEnabled: !isPrivateChat && activeConversationMemoryEnabled,
+            createConversation: false, conversationMemoryEnabled: !isPrivateChat && memoryEnabled && activeConversationMemoryEnabled,
             title: conversations.first(where: { $0.id == backup.conversationID.uuidString.lowercased() })?.title ?? "Chat",
             projectID: activeProjectID,
             regeneration: ChatRegeneration(operation: "replace-from-user", expectedTailMessageID: tail.id, targetAssistantMessageID: nil))
@@ -2965,6 +2963,7 @@ final class AppModel: ObservableObject {
                                      connectorAccessMode: activeChatConnectorAccessMode,
                                      connectorIDs: false ? [] : activeChatConnectorIDs?.sorted()),
             createConversation: false,
+            conversationMemoryEnabled: memoryEnabled && activeConversationMemoryEnabled,
             title: conversations.first(where: { UUID(uuidString: $0.id) == conversationID })?.title ?? "对话",
             projectID: activeProjectID,
             regeneration: ChatRegeneration(
@@ -4598,7 +4597,7 @@ final class AppModel: ObservableObject {
 
     private func restoreReasoningEffort(for model: ModelCatalogItem?) {
         guard let model else {
-            reasoningEffort = "none"
+            reasoningEffort = ModelCatalogItem.defaultChatReasoningEffort
             return
         }
 
@@ -4607,10 +4606,8 @@ final class AppModel: ObservableObject {
            model.reasoningEfforts.contains(saved),
            !model.reasoningMandatory || saved != "none" {
             reasoningEffort = saved
-        } else if model.reasoningMandatory {
-            reasoningEffort = preferredReasoningEffort(for: model)
         } else {
-            reasoningEffort = "none"
+            reasoningEffort = model.factoryReasoningEffort
         }
     }
 
@@ -4620,12 +4617,7 @@ final class AppModel: ObservableObject {
            model.reasoningEfforts.contains(saved) {
             return saved
         }
-        if let defaultEffort = model.defaultReasoningEffort,
-           defaultEffort != "none",
-           model.reasoningEfforts.contains(defaultEffort) {
-            return defaultEffort
-        }
-        return model.reasoningEfforts.first { $0 != "none" } ?? "none"
+        return model.factoryReasoningEffort
     }
 
     private func persistReasoningEffort(for model: ModelCatalogItem) {

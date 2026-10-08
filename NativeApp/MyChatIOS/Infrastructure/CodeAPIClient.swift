@@ -233,9 +233,8 @@ struct CodeAPIClient: CodeAPIServing {
     }
 
     private func validate(_ command: CodeChatCommand) throws {
-        guard ["plan", "code"].contains(command.mode),
-              command.branch.map({ !$0.isEmpty && $0.utf8.count <= 255 && !$0.hasPrefix("-") && !$0.contains("..") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true else {
-            throw CodeAPIError.invalidRequest("任务模式或目标分支无效")
+        guard command.branch.map({ !$0.isEmpty && $0.utf8.count <= 255 && !$0.hasPrefix("-") && !$0.contains("..") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true else {
+            throw CodeAPIError.invalidRequest("目标分支无效")
         }
         guard isRepository(command.repository, sessionID: command.sessionID) else {
             throw CodeAPIError.invalidRequest("GitHub 仓库标识无效")

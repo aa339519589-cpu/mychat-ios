@@ -1052,7 +1052,11 @@ struct ComposerTextInput: UIViewRepresentable {
     func updateUIView(_ view: ComposerTextView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.acceptModelText(text)
-        view.font = UIFontMetrics(forTextStyle: .body).scaledFont(for: MyChatSystemFont.appUIFont(size: 18))
+        view.font = MyChatSystemFont.scaledUIFont(
+            MyChatSystemFont.appUIFont(size: 18),
+            relativeTo: .body,
+            compatibleWith: view.traitCollection
+        )
         view.adjustsFontForContentSizeCategory = true
         view.textColor = UIColor(MyChatTheme.text)
         view.tintColor = UIColor(MyChatTheme.secondaryText)
