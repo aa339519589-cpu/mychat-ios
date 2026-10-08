@@ -434,6 +434,94 @@ struct CodeChatCommand: Equatable, Sendable {
     let taskID: UUID?
     let responseID: UUID
     let sessionID: UUID
+    var branch: String? = nil
+    var mode: String = "code"
+}
+
+struct CodeCapabilities: Decodable, Sendable {
+    struct Execution: Decodable, Sendable {
+        let backend: String
+        let location: String
+        let configured: Bool
+        let verified: Bool
+        let reason: String?
+    }
+    let schemaVersion: Int
+    let execution: Execution
+    let modes: [String]
+    let planReadOnly: Bool
+    let durableQueue: Bool
+}
+
+struct CodeTaskRecovery: Decodable, Sendable {
+    let admission: CodeAdmission?
+    var sessionId: String? = nil
+    var task: CodeTaskDetail? = nil
+    var operationAdmission: CodeAdmission? = nil
+}
+
+struct CodeBranches: Decodable, Sendable {
+    struct Branch: Decodable, Identifiable, Sendable {
+        let name: String
+        var id: String { name }
+    }
+    let branches: [Branch]
+    let defaultBranch: String?
+}
+
+struct CodeTaskDetail: Decodable, Sendable {
+    struct Tool: Decodable, Identifiable, Sendable {
+        let id: String
+        let toolName: String
+        let status: String
+        let output: [String: JSONValue]?
+        let error: String?
+        let durationMs: Int?
+    }
+    struct Artifact: Decodable, Identifiable, Sendable {
+        let id: String
+        let kind: String
+        let title: String?
+        let content: String?
+        let url: String?
+    }
+    let id: String
+    let status: String
+    let branch: String
+    let mode: String
+    let error: String?
+    let pullRequestUrl: String?
+    let toolCalls: [Tool]
+    let artifacts: [Artifact]
+}
+
+struct CodeDraftRecord: Codable, Equatable {
+    var prompt = ""
+    var repository: String? = nil
+    var branch = ""
+    var mode = "code"
+}
+
+enum CodeLocalState {
+    private static func key(owner: String, scope: String) -> String {
+        "mychat.code.v1." + Data(owner.utf8).base64EncodedString() + "." + Data(scope.utf8).base64EncodedString()
+    }
+    static func draft(owner: String, scope: String) -> CodeDraftRecord {
+        guard !owner.isEmpty, let data = UserDefaults.standard.data(forKey: key(owner: owner, scope: scope)),
+              let value = try? JSONDecoder().decode(CodeDraftRecord.self, from: data) else { return CodeDraftRecord() }
+        return value
+    }
+    static func containsDraft(owner: String, scope: String) -> Bool {
+        !owner.isEmpty && UserDefaults.standard.data(forKey: key(owner: owner, scope: scope)) != nil
+    }
+    static func save(_ value: CodeDraftRecord, owner: String, scope: String) {
+        guard !owner.isEmpty, let data = try? JSONEncoder().encode(value) else { return }
+        UserDefaults.standard.set(data, forKey: key(owner: owner, scope: scope))
+    }
+    static func clear(owner: String, scope: String) {
+        guard !owner.isEmpty else { return }
+        UserDefaults.standard.removeObject(forKey: key(owner: owner, scope: scope))
+    }
 }
 
 struct CodeAdmission: Codable, Equatable, Sendable {

@@ -68,8 +68,11 @@
 	<string>MyChat 使用语音识别将你的讲话转换为文字。</string>
 	<key>UIAppFonts</key>
 	<array>
-		<string>ResponseFonts/AnthropicSerif.ttf</string>
-		<string>ResponseFonts/AnthropicSerifItalic.ttf</string>
+		<string>ReadingFonts/Newsreader16pt-Regular.ttf</string>
+		<string>ReadingFonts/Newsreader16pt-Italic.ttf</string>
+		<string>ReadingFonts/Newsreader16pt-Medium.ttf</string>
+		<string>ReadingFonts/Newsreader16pt-SemiBold.ttf</string>
+		<string>ReadingFonts/Newsreader16pt-Bold.ttf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

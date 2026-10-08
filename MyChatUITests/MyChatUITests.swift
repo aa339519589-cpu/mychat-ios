@@ -1,6 +1,61 @@
 import XCTest
 
 final class MyChatUITests: XCTestCase {
+    @MainActor func testComposerTouchTargetsAndHapticPreferencePersist() {
+        let app = launch()
+        let input = app.textViews["composer.input"].firstMatch
+        XCTAssertTrue(input.waitForExistence(timeout: 5))
+        for label in ["添加内容和工具", "选择模型", "语音转文字"] {
+            let button = app.buttons[label].firstMatch
+            XCTAssertGreaterThanOrEqual(button.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(button.frame.height, 44)
+        }
+        input.tap(); input.typeText("hello")
+        let send = app.buttons["发送"].firstMatch
+        XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+        app.buttons["header.sidebar"].tap()
+        app.buttons["sidebar.accountSettings"].tap()
+        let toggle = app.switches["settings.haptics"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        if toggle.value as? String == "1" { toggle.tap() }
+        XCTAssertEqual(toggle.value as? String, "0")
+        app.terminate(); app.launch()
+        app.buttons["header.sidebar"].tap()
+        app.buttons["sidebar.accountSettings"].tap()
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "0", "Haptic preference must persist across relaunch")
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "1")
+    }
+
+    @MainActor func testManualReadingPositionSurvivesNewChatAndReturn() {
+        let app = launch(extra: ["--ui-test-long-chat", "--layout-audit"])
+        app.buttons["header.sidebar"].tap()
+        app.buttons["隔离测试对话"].firstMatch.tap()
+        let tail = app.descendants(matching: .any).matching(identifier: "message.row.50000000-0000-4000-8000-0000000003E8").firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 30))
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        for _ in 0..<2 {
+            origin.withOffset(CGVector(dx: app.frame.midX, dy: 220)).press(forDuration: 0.02,
+                thenDragTo: origin.withOffset(CGVector(dx: app.frame.midX, dy: 520)))
+        }
+        let rows = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.row.")).allElementsBoundByIndex
+        guard let anchor = rows.first(where: { $0.frame.minY > 140 && $0.frame.maxY < 600 && $0.isHittable }) else {
+            XCTFail("No visible reading anchor after scrolling into history"); return
+        }
+        let identifier = anchor.identifier, before = anchor.frame.minY
+        app.buttons["header.new-chat"].tap()
+        app.buttons["header.sidebar"].tap()
+        app.buttons["隔离测试对话"].firstMatch.tap()
+        let restored = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+        XCTAssertTrue(restored.waitForExistence(timeout: 10))
+        expectation(for: NSPredicate { _, _ in abs(restored.frame.minY - before) < 3 }, evaluatedWith: restored)
+        waitForExpectations(timeout: 8)
+        XCTAssertTrue(app.buttons["chat.jump-to-latest"].exists)
+        saveScreenshot(app, "reading-position-restored")
+    }
+
     @MainActor func testPaperPanelSlowFastAndRepeatedSwipes() {
         let app = launch(extra: ["--drawer-motion-audit"])
         let account = app.buttons["sidebar.accountSettings"]
@@ -174,8 +229,8 @@ final class MyChatUITests: XCTestCase {
         }
         for _ in 0..<5 {
             app.buttons["打开侧边栏"].firstMatch.tap()
-            XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
-            app.buttons["New chat"].firstMatch.tap()
+            XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
+            app.buttons["sidebar.newChat"].firstMatch.tap()
         }
         saveScreenshot(app, "sidebar-and-top-buttons")
     }
@@ -304,7 +359,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertEqual(bubble.frame.height, 98, accuracy: 2)
         saveScreenshot(app, "long-transcript-bottom-with-keyboard")
         app.buttons["打开侧边栏"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         app.buttons["隔离测试对话"].firstMatch.tap()
         XCTAssertTrue(input.waitForExistence(timeout: 5))
@@ -320,7 +375,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(history.waitForExistence(timeout: 5))
         XCTAssertTrue(history.isHittable)
         let historyY = history.frame.midY - app.frame.minY
-        app.buttons["New chat"].firstMatch.tap()
+        app.buttons["sidebar.newChat"].firstMatch.tap()
 
         let normalizedY = historyY / app.frame.height
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: normalizedY))
@@ -365,16 +420,19 @@ final class MyChatUITests: XCTestCase {
         let app = launch(extra: ["--ui-test-images", "-AppleInterfaceStyle", "Dark"])
         app.buttons["打开侧边栏"].firstMatch.tap()
         app.buttons["隔离测试对话"].firstMatch.tap()
-        let images = app.buttons.matching(identifier: "放大查看图片")
+        let images = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.image."))
         XCTAssertTrue(images.firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(images.count, 3)
         for thumbnail in images.allElementsBoundByIndex {
             XCTAssertEqual(thumbnail.frame.width, thumbnail.frame.height, accuracy: 1)
-            XCTAssertEqual(thumbnail.frame.width, 140, accuracy: 1)
+            XCTAssertEqual(thumbnail.frame.width, 104, accuracy: 1)
             XCTAssertGreaterThanOrEqual(thumbnail.frame.minX, 16)
             XCTAssertLessThanOrEqual(thumbnail.frame.maxX, app.frame.maxX - 16 + 1)
         }
-        XCTAssertEqual(images.allElementsBoundByIndex.map { $0.frame.minX }.min() ?? 0, app.frame.width - 16 - 288, accuracy: 1)
+        XCTAssertEqual(images.allElementsBoundByIndex.map { $0.frame.minX }.min() ?? 0, app.frame.width - 16 - 216, accuracy: 1)
+        let pair = images.allElementsBoundByIndex.suffix(2)
+        XCTAssertEqual(pair.first!.frame.midY, pair.last!.frame.midY, accuracy: 1,
+            "Multiple images occupy one horizontal row")
         XCTAssertTrue(app.staticTexts["图片加文字靠右"].firstMatch.exists)
         saveScreenshot(app, "dark-image-only-multi-image-text")
         images.firstMatch.tap()
@@ -386,7 +444,7 @@ final class MyChatUITests: XCTestCase {
         composer.typeText("keyboard drawer")
         XCTAssertTrue(app.keyboards.firstMatch.exists)
         app.buttons["打开侧边栏"].firstMatch.tap()
-        XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         saveScreenshot(app, "dark-drawer-dismisses-keyboard")
     }
@@ -656,7 +714,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertLessThan(surface.frame.height, 240,
                 "Long drafts must scroll inside the composer instead of expanding it into a screen-sized box")
             app.buttons["打开侧边栏"].firstMatch.tap()
-            XCTAssertTrue(app.buttons["New chat"].firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["sidebar.newChat"].firstMatch.waitForExistence(timeout: 5))
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             let menuButtons = ["Chats", "Projects", "Code", "Artifacts"].map { app.buttons[$0].firstMatch }
             for pair in zip(menuButtons, menuButtons.dropFirst()) {

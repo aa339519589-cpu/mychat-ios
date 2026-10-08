@@ -6,6 +6,19 @@ protocol CodeAPIServing: Sendable {
     func fetchRepositories(accessToken: String) async throws -> [GitHubRepositoryRecord]
     func enqueue(_ command: CodeChatCommand, accessToken: String) async throws -> CodeAdmission
     func apply(_ command: CodeApplyCommand, accessToken: String) async throws -> CodeApplyResponse
+    func capabilities(accessToken: String) async throws -> CodeCapabilities
+    func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery
+    func taskRecovery(taskID: UUID, accessToken: String) async throws -> CodeTaskRecovery
+    func reject(_ request: CodeConfirmationRequest, accessToken: String) async throws
+    func branches(repository: String, accessToken: String) async throws -> CodeBranches
+}
+
+extension CodeAPIServing {
+    func capabilities(accessToken: String) async throws -> CodeCapabilities { throw CodeAPIError.invalidResponse }
+    func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery { throw CodeAPIError.invalidResponse }
+    func taskRecovery(taskID: UUID, accessToken: String) async throws -> CodeTaskRecovery { throw CodeAPIError.invalidResponse }
+    func reject(_ request: CodeConfirmationRequest, accessToken: String) async throws { throw CodeAPIError.invalidResponse }
+    func branches(repository: String, accessToken: String) async throws -> CodeBranches { throw CodeAPIError.invalidResponse }
 }
 
 enum CodeAPIError: LocalizedError, Equatable, Sendable {
@@ -86,6 +99,57 @@ struct CodeAPIClient: CodeAPIServing {
             throw CodeAPIError.invalidResponse
         }
         return url
+    }
+
+    func capabilities(accessToken: String) async throws -> CodeCapabilities {
+        try await get("api/code/capabilities", accessToken: accessToken)
+    }
+
+    func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery {
+        guard UUID(uuidString: sessionID) != nil else { throw CodeAPIError.invalidRequest("会话标识无效") }
+        let value: CodeTaskRecovery = try await get("api/code/tasks?sessionId=\(sessionID)", accessToken: accessToken)
+        return CodeTaskRecovery(admission: try value.admission.map(normalized), sessionId: value.sessionId,
+            task: value.task, operationAdmission: try value.operationAdmission.map(normalized))
+    }
+
+    private func normalized(_ admission: CodeAdmission) throws -> CodeAdmission {
+        guard admission.schemaVersion == 1 else { throw CodeAPIError.invalidResponse }
+        return CodeAdmission(schemaVersion: admission.schemaVersion,
+            jobID: admission.jobID, taskID: admission.taskID, responseID: admission.responseID,
+            status: admission.status, created: admission.created,
+            streamURL: try resolvedURL(admission.streamURL.relativeString),
+            trialRemaining: admission.trialRemaining, trialLimit: admission.trialLimit)
+    }
+
+    func taskRecovery(taskID: UUID, accessToken: String) async throws -> CodeTaskRecovery {
+        try await get("api/code/tasks/\(taskID.uuidString.lowercased())", accessToken: accessToken)
+    }
+
+    func branches(repository: String, accessToken: String) async throws -> CodeBranches {
+        guard isRepository(repository, sessionID: UUID()),
+              let query = repository.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            throw CodeAPIError.invalidRequest("仓库标识无效")
+        }
+        return try await get("api/code/branches?repo=\(query)", accessToken: accessToken)
+    }
+
+    func reject(_ confirmation: CodeConfirmationRequest, accessToken: String) async throws {
+        let url = baseURL.appendingPathComponent("api/agent/tasks/\(confirmation.taskID.uuidString.lowercased())/confirm")
+        var request = try authorizedRequest(url: url, accessToken: accessToken)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["action": "reject",
+            "operation": confirmation.operation, "confirmationId": confirmation.confirmationID.uuidString.lowercased(),
+            "confirmationToken": confirmation.confirmationToken])
+        let (data, response) = try await perform(request: request)
+        guard (200..<300).contains(response.statusCode) else { throw serverError(status: response.statusCode, data: data) }
+    }
+
+    private func get<T: Decodable>(_ path: String, accessToken: String) async throws -> T {
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else { throw CodeAPIError.unsafeURL }
+        let (data, response) = try await perform(request: authorizedRequest(url: url, accessToken: accessToken))
+        guard (200..<300).contains(response.statusCode) else { throw serverError(status: response.statusCode, data: data) }
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch { throw CodeAPIError.invalidResponse }
     }
 
     func fetchGitHubStatus(accessToken: String) async throws -> GitHubConnectionStatus {
@@ -169,6 +233,10 @@ struct CodeAPIClient: CodeAPIServing {
     }
 
     private func validate(_ command: CodeChatCommand) throws {
+        guard ["plan", "code"].contains(command.mode),
+              command.branch.map({ !$0.isEmpty && $0.utf8.count <= 255 && !$0.hasPrefix("-") && !$0.contains("..") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true else {
+            throw CodeAPIError.invalidRequest("任务模式或目标分支无效")
+        }
         guard isRepository(command.repository, sessionID: command.sessionID) else {
             throw CodeAPIError.invalidRequest("GitHub 仓库标识无效")
         }
@@ -295,6 +363,8 @@ struct CodeAPIClient: CodeAPIServing {
 }
 
 private struct CodeChatBody: Encodable {
+    let branch: String?
+    let mode: String
     let repo: String
     let modelId: String
     let endpointId: String?
@@ -305,6 +375,8 @@ private struct CodeChatBody: Encodable {
     let sessionId: String
 
     init(command: CodeChatCommand) {
+        branch = command.branch
+        mode = command.mode
         repo = command.repository
         modelId = command.modelID
         endpointId = command.endpointID?.uuidString.lowercased()

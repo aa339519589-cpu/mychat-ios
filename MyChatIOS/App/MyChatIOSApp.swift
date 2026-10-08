@@ -31,6 +31,7 @@ struct MyChatIOSApp: App {
     var body: some Scene {
         WindowGroup {
             MyChatApplicationSurface(appModel: appModel)
+                .onOpenURL { appModel.openCodeLink($0) }
                 .font(MyChatTypography.appDefault)
                 #if DEBUG
                 .preferredColorScheme(Self.runtimeTestColorScheme)

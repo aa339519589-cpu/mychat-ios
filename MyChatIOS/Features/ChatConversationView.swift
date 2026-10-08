@@ -15,6 +15,9 @@ struct ChatConversationView: View, Equatable {
     @State private var sourceMessageID: UUID?
     // Reference storage, without observing its button publisher in this tree.
     @State private var scrollController = ChatScrollController()
+    @State private var nativeViewport: CGRect?
+    @State private var reservedReadingPadding: CGFloat?
+    @State private var paddingReleaseTask: Task<Void, Never>?
 
     init(appModel: AppModel) {
         self.appModel = appModel
@@ -51,6 +54,9 @@ struct ChatConversationView: View, Equatable {
                 )
                 .equatable()
             }
+            .background(ReadingAnchorMarker(messageID: message.id, controller: scrollController))
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("message.row." + message.id.uuidString)
             .background {
                 if ProcessInfo.processInfo.arguments.contains("--keyboard-layout-probe"),
                    (message.role == .user && message.id == updates.snapshot.messages.first?.id
@@ -79,8 +85,9 @@ struct ChatConversationView: View, Equatable {
 
     var body: some View {
         GeometryReader { viewport in
-        let readingPadding = ChatReadingAnchor.bottomPadding(viewport: viewport.frame(in: .global),
+        let readingPadding = ChatReadingAnchor.bottomPadding(viewport: nativeViewport ?? viewport.frame(in: .global),
             composerTop: canvasLayout.composerTopInWindow, minimum: canvasLayout.bottomOcclusion)
+        let laidOutPadding = max(readingPadding, reservedReadingPadding ?? readingPadding)
         ScrollView {
             transcriptStack
             // Keep every row at the scroll viewport width, then inset the
@@ -95,7 +102,7 @@ struct ChatConversationView: View, Equatable {
             }
             // Keep real scrollable breathing room below the reading anchor;
             // the floating input must not pull a completed reply to the bottom.
-            .padding(.bottom, readingPadding)
+            .padding(.bottom, laidOutPadding)
         }
         .containerRelativeFrame(.horizontal)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -120,7 +127,10 @@ struct ChatConversationView: View, Equatable {
         .modifier(ChatScrollActivity(controller: scrollController))
         .environment(\.chatScrollController, scrollController)
         .onAppear {
+            scrollController.useReadingPositions(canvasLayout.readingPositions, remembersPosition: !appModel.isPrivateChat)
             scrollController.resumeFollowAnimation()
+            scrollController.onViewportChanged = { nativeViewport = $0 }
+            nativeViewport = scrollController.viewportInWindow
             scrollController.presentedComposerTop = { [weak canvasLayout] in canvasLayout?.presentedComposerTop?() }
             scrollController.onInteractionChanged = { updates.setInteracting($0) }
             scrollController.setGenerationActive(updates.snapshot.isGenerating)
@@ -128,7 +138,10 @@ struct ChatConversationView: View, Equatable {
         .onChange(of: updates.snapshot.isGenerating) { _, active in
             scrollController.setGenerationActive(active)
         }
-        .onChange(of: ChatComposerGeometry(bottomPadding: readingPadding,
+        .onChange(of: readingPadding, initial: true) { _, padding in
+            reserveReadingSpace(padding)
+        }
+        .onChange(of: ChatComposerGeometry(bottomPadding: laidOutPadding,
             topInWindow: canvasLayout.composerTopInWindow), initial: true) { _, geometry in
             scrollController.setComposerGeometry(geometry)
         }
@@ -139,6 +152,8 @@ struct ChatConversationView: View, Equatable {
             updates.setModalVisible(note.object as? Bool ?? false)
         }
         .onDisappear {
+            paddingReleaseTask?.cancel()
+            scrollController.onViewportChanged = { _ in }
             scrollController.onInteractionChanged = { _ in }
             scrollController.setInteractionActive(false)
             scrollController.setDrawerInteractionActive(false)
@@ -167,6 +182,19 @@ struct ChatConversationView: View, Equatable {
                     .presentationBackground(MyChatTheme.canvas)
             }
         }
+        }
+    }
+
+    private func reserveReadingSpace(_ padding: CGFloat) {
+        paddingReleaseTask?.cancel()
+        guard let current = reservedReadingPadding, padding < current,
+              scrollController.keyboardIsMoving else { reservedReadingPadding = padding; return }
+        // Retain the old range until the keyboard finishes, so UIKit cannot
+        // clamp an in-flight offset into a prematurely shortened transcript.
+        paddingReleaseTask = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(canvasLayout.keyboardTiming.duration + 0.06)) }
+            catch { return }
+            reservedReadingPadding = padding
         }
     }
 
@@ -423,6 +451,44 @@ struct ChatComposerGeometry: Equatable {
     let topInWindow: CGFloat?
 }
 
+/// Ephemeral, account-scoped UI state only. It never changes a generation,
+/// persists message text or stores a private conversation's reading position.
+@MainActor final class ChatReadingPositionStore {
+    struct Position {
+        let offset: CGFloat
+        let anchorID: UUID?
+        let anchorDistance: CGFloat
+        let following: Bool
+        let explicitBottom: Bool
+    }
+    private var owner: String?
+    private var positions: [UUID: Position] = [:]
+    private var recency: [UUID] = []
+    func setOwner(_ owner: String?) {
+        guard self.owner != owner else { return }
+        self.owner = owner; positions.removeAll(); recency.removeAll()
+    }
+    func position(for id: UUID) -> Position? { positions[id] }
+    func save(_ position: Position, for id: UUID) {
+        positions[id] = position
+        recency.removeAll { $0 == id }; recency.append(id)
+        if recency.count > 64 { positions.removeValue(forKey: recency.removeFirst()) }
+    }
+}
+
+private struct ReadingAnchorMarker: UIViewRepresentable {
+    let messageID: UUID
+    let controller: ChatScrollController
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(); view.isUserInteractionEnabled = false
+        controller.registerReadingAnchor(view, id: messageID)
+        return view
+    }
+    func updateUIView(_ view: UIView, context: Context) {
+        controller.registerReadingAnchor(view, id: messageID)
+    }
+}
+
 /// The transcript reserves keyboard space in its content. Its real last row
 /// must end above the input exactly once, even if a navigation controller also
 /// changes the scroll viewport or installs a keyboard content inset.
@@ -440,7 +506,7 @@ enum ChatBottomAnchor {
 enum ChatReadingAnchor {
     static func readingHeight(viewport: CGRect, composerTop: CGFloat?) -> CGFloat {
         let visibleBottom = min(viewport.maxY, composerTop.map { max(viewport.minY, $0 - 8) } ?? viewport.maxY)
-        return max(0, visibleBottom - viewport.minY) * 0.45
+        return max(0, visibleBottom - viewport.minY) * (2.0 / 3.0)
     }
 
     static func bottomPadding(viewport: CGRect, composerTop: CGFloat?, minimum: CGFloat) -> CGFloat {
@@ -477,8 +543,85 @@ enum ChatReadingAnchor {
     var presentedComposerTop: (() -> CGFloat?)?
     private let companions = NSHashTable<UIView>.weakObjects()
     var onInteractionChanged: (Bool) -> Void = { _ in }
+    var onViewportChanged: (CGRect) -> Void = { _ in }
+    private var lastPublishedViewport: CGRect?
+    private var viewportPublicationScheduled = false
+    var keyboardIsMoving: Bool { CACurrentMediaTime() < keyboardMotionUntil }
+    var viewportInWindow: CGRect? {
+        guard let scrollView, let window = scrollView.window else { return nil }
+        let measured = scrollView.convert(scrollView.bounds, to: window)
+        return CGRect(x: 0, y: measured.minY, width: measured.width, height: measured.height)
+    }
     private var deferredPublications: [UUID: () -> Void] = [:]
     private var legacyIdleTask: Task<Void, Never>?
+    private var readingPositions = ChatReadingPositionStore()
+    private var remembersPosition = true
+    private var pendingRestoration: ChatReadingPositionStore.Position?
+    private var restorationScheduled = false
+    private final class WeakAnchor { weak var view: UIView?; init(_ view: UIView) { self.view = view } }
+    private var readingAnchors: [UUID: WeakAnchor] = [:]
+
+    func useReadingPositions(_ store: ChatReadingPositionStore, remembersPosition: Bool) {
+        guard readingPositions !== store || self.remembersPosition != remembersPosition else { return }
+        readingPositions = store; self.remembersPosition = remembersPosition
+        restoreConversationPosition()
+    }
+
+    func registerReadingAnchor(_ view: UIView, id: UUID) {
+        readingAnchors[id] = WeakAnchor(view)
+        if pendingRestoration?.anchorID == id { scheduleRestoration() }
+    }
+
+    private func rememberReadingPosition() {
+        guard remembersPosition, let conversationID, let scrollView,
+              scrollView.contentSize.height > 0, pendingRestoration == nil else { return }
+        readingAnchors = readingAnchors.filter { $0.value.view != nil }
+        let top = scrollView.contentOffset.y + scrollView.adjustedContentInset.top + 74
+        let anchor = readingAnchors.compactMap { id, weakAnchor -> (UUID, CGRect)? in
+            guard let view = weakAnchor.view, view.window != nil, view.bounds.height > 0 else { return nil }
+            let frame = view.convert(view.bounds, to: scrollView)
+            return frame.maxY > top && frame.minY < scrollView.contentOffset.y + scrollView.bounds.height ? (id, frame) : nil
+        }.min { $0.1.minY < $1.1.minY }
+        readingPositions.save(.init(offset: scrollView.contentOffset.y, anchorID: anchor?.0,
+            anchorDistance: (anchor?.1.minY ?? scrollView.contentOffset.y) - scrollView.contentOffset.y,
+            following: followingLatest, explicitBottom: explicitBottomFollow), for: conversationID)
+    }
+
+    private func restoreConversationPosition() {
+        guard remembersPosition, let conversationID,
+              let position = readingPositions.position(for: conversationID) else { return }
+        followingLatest = position.following
+        explicitBottomFollow = position.explicitBottom
+        if !position.following {
+            initialPositionPending = false
+            stopSmoothFollow()
+            pendingRestoration = position
+            scheduleRestoration()
+        }
+    }
+
+    private func scheduleRestoration() {
+        guard pendingRestoration != nil, !restorationScheduled else { return }
+        restorationScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.restorationScheduled = false
+            guard let position = self.pendingRestoration, !self.nativeInteractionActive,
+                  let scroll = self.scrollView, scroll.window != nil, scroll.contentSize.height > 0 else { return }
+            let anchor = position.anchorID.flatMap { self.readingAnchors[$0]?.view }
+            let anchorReady = anchor?.window != nil && (anchor?.bounds.height ?? 0) > 0
+            let target = anchorReady
+                ? anchor!.convert(anchor!.bounds, to: scroll).minY - position.anchorDistance : position.offset
+            let maximum = max(-scroll.adjustedContentInset.top,
+                scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+            let offset = min(maximum, max(-scroll.adjustedContentInset.top, target))
+            if abs(scroll.contentOffset.y - offset) > 0.5 {
+                scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: offset), animated: false)
+            }
+            if anchorReady || position.anchorID == nil { self.pendingRestoration = nil }
+            self.publishVisibility()
+        }
+    }
 
     override init() {
         super.init()
@@ -525,6 +668,7 @@ enum ChatReadingAnchor {
     }
 
     func attach(_ scrollView: UIScrollView, conversationID: UUID?) {
+        publishViewportAfterLayout()
         if self.scrollView !== scrollView {
             initialPositionPending = true
             stopSmoothFollow()
@@ -538,7 +682,12 @@ enum ChatReadingAnchor {
                 scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in MainActor.assumeIsolated { self?.offsetChanged() } },
                 scrollView.observe(\.bounds, options: [.old, .new]) { [weak self] _, change in
                     guard change.oldValue?.size != change.newValue?.size else { return }
-                    MainActor.assumeIsolated { self?.contentGeometryChanged() }
+                    MainActor.assumeIsolated {
+                        if change.oldValue?.width != change.newValue?.width, self?.followingLatest == false {
+                            self?.restoreConversationPosition()
+                        }
+                        self?.contentGeometryChanged()
+                    }
                 }
             ]
             DispatchQueue.main.async { [weak self, weak scrollView] in
@@ -549,6 +698,7 @@ enum ChatReadingAnchor {
             scheduleFollow()
         }
         if self.conversationID != conversationID {
+            pendingRestoration = nil
             laidOutBodyBottom = nil
             stopSmoothFollow()
             scrollView.setContentOffset(scrollView.contentOffset, animated: false)
@@ -557,6 +707,7 @@ enum ChatReadingAnchor {
             self.conversationID = conversationID
             followingLatest = true
             setInteractionActive(false)
+            restoreConversationPosition()
             scheduleFollow()
         }
     }
@@ -583,6 +734,7 @@ enum ChatReadingAnchor {
         interactionActive = active
         onInteractionChanged(active || drawerInteractionActive)
         if active {
+            pendingRestoration = nil
             followingLatest = false
             explicitBottomFollow = false
             stopSmoothFollow()
@@ -592,6 +744,7 @@ enum ChatReadingAnchor {
             // the explicit latest-message action resumes automatic following.
             DispatchQueue.main.async { [weak self] in
                 self?.flushDeferredPublications()
+                self?.rememberReadingPosition()
                 self?.publishVisibility()
                 self?.resumeFollowIfNeeded()
             }
@@ -647,10 +800,13 @@ enum ChatReadingAnchor {
             ?? CGRect(origin: .zero, size: scrollView.bounds.size)
         // Measure the body without padding in its own layout transaction;
         // mixing a new reservation with an old contentSize made targets jump.
-        return ChatReadingAnchor.offset(contentHeight: laidOutBodyBottom ?? scrollView.contentSize.height,
+        let desired = ChatReadingAnchor.offset(contentHeight: laidOutBodyBottom ?? scrollView.contentSize.height,
             bottomPadding: laidOutBodyBottom == nil ? composerGeometry.bottomPadding : 0,
             viewport: viewport,
             composerTop: composerTop, topInset: scrollView.adjustedContentInset.top)
+        let physicalMaximum = max(-scrollView.adjustedContentInset.top,
+            scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+        return min(desired, physicalMaximum)
     }
 
     private var followOffset: CGFloat {
@@ -677,7 +833,9 @@ enum ChatReadingAnchor {
     private func offsetChanged() {
         updateCompanions()
         if nativeInteractionActive {
-            followingLatest = false
+            // The drawer also pauses scrolling, but its inset/layout changes
+            // are not a request to abandon reading follow. Vertical intent is
+            // owned exclusively by setInteractionActive / the native pan.
             stopSmoothFollow()
             // UIKit owns drag and deceleration. Do not enqueue SwiftUI work
             // for every offset tick or change transcript height mid-fling.
@@ -702,12 +860,29 @@ enum ChatReadingAnchor {
     }
 
     private func contentGeometryChanged() {
+        publishViewportAfterLayout()
+        if pendingRestoration != nil { scheduleRestoration(); return }
         guard followingLatest else {
             publishVisibility()
             return
         }
         if generationActive { startSmoothFollow() }
         else { scheduleFollow() }
+    }
+
+    private func publishViewportAfterLayout() {
+        guard !viewportPublicationScheduled else { return }
+        viewportPublicationScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.viewportPublicationScheduled = false
+            guard let viewport = self.viewportInWindow, viewport != self.lastPublishedViewport else { return }
+            if let previous = self.lastPublishedViewport, previous.width != viewport.width, !self.followingLatest {
+                self.restoreConversationPosition()
+            }
+            self.lastPublishedViewport = viewport
+            self.onViewportChanged(viewport)
+        }
     }
 
     private func scheduleFollow() {
@@ -794,6 +969,7 @@ enum ChatReadingAnchor {
     }
 
     func pauseFollowAnimation() {
+        rememberReadingPosition()
         followPaused = true
         stopSmoothFollow()
     }
@@ -805,6 +981,7 @@ enum ChatReadingAnchor {
 
     func jumpToLatest(animated: Bool = true) {
         guard let scrollView else { return }
+        pendingRestoration = nil
         stopSmoothFollow()
         scrollView.setContentOffset(scrollView.contentOffset, animated: false)
         // End the same interaction transaction used by scrolling. Directly
@@ -821,6 +998,7 @@ enum ChatReadingAnchor {
         scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: bottom),
             animated: animated && !UIAccessibility.isReduceMotionEnabled)
         publishVisibility()
+        rememberReadingPosition()
     }
 }
 
@@ -1063,7 +1241,7 @@ private struct MessageBlock: View, Equatable {
     private var copyButton: some View {
         Button {
             UIPasteboard.general.string = message.content
-            HapticFeedback.impact()
+            HapticFeedback.play(.success)
             copyResetTask?.cancel()
             withAnimation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.7)) { copied = true }
             copyResetTask = Task { @MainActor in
@@ -2088,22 +2266,24 @@ private struct UserMessageCard: View {
     let message: ChatMessage
     @State private var selectedImage: ChatImagePreviewItem?
 
-    private var imageColumns: [GridItem] {
-        let count = min(max(message.sourceImages?.count ?? 1, 1), 2)
-        return Array(repeating: GridItem(.fixed(140), spacing: 8, alignment: .trailing), count: count)
-    }
-
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             if let images = message.sourceImages, !images.isEmpty {
-                LazyVGrid(columns: imageColumns, alignment: .trailing, spacing: 8) {
-                    ForEach(Array(images.prefix(4).enumerated()), id: \.offset) { _, source in
-                        ChatSourceImage(source: source, square: images.count > 1) {
-                            selectedImage = ChatImagePreviewItem(source: source)
+                ScrollView(.horizontal) {
+                    LazyHStack(spacing: 8) {
+                        ForEach(Array(images.enumerated()), id: \.offset) { index, source in
+                            ChatSourceImage(source: source) {
+                                selectedImage = ChatImagePreviewItem(source: source)
+                            }
+                            .accessibilityLabel("查看第 \(index + 1) 张图片，共 \(images.count) 张")
+                            .accessibilityIdentifier("message.image.\(message.id).\(index)")
                         }
                     }
                 }
-                .frame(width: CGFloat(min(images.count, 2)) * 140 + (images.count > 1 ? 8 : 0), alignment: .trailing)
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(maxWidth: min(360, CGFloat(images.count) * 104 + CGFloat(images.count - 1) * 8))
+                .frame(height: 104)
             }
 
             if let files = message.filePreviews, !files.isEmpty {
@@ -2153,14 +2333,10 @@ private struct ChatImagePreviewItem: Identifiable {
 
 private struct ChatSourceImage: View {
     let source: String
-    var square = false
     let open: () -> Void
     @State private var localImage: UIImage?
-
-    private var height: CGFloat {
-        guard !square, let image = localImage, image.size.width > 0 else { return 140 }
-        return min(max(140 * image.size.height / image.size.width, 100), 220)
-    }
+    @State private var localLoadFinished = false
+    @State private var reloadID = UUID()
 
     var body: some View {
         Button(action: open) {
@@ -2177,21 +2353,28 @@ private struct ChatSourceImage: View {
                         default: ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
-                } else if source.hasPrefix("data:image/") {
+                    .id(reloadID)
+                } else if source.hasPrefix("data:image/"), !localLoadFinished {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     imageFailure
                 }
             }
-            .frame(width: 140, height: height)
+            // Fixed geometry before and after decoding prevents the transcript
+            // moving when a portrait photo replaces its loading placeholder.
+            .frame(width: 104, height: 104)
             .background(MyChatTheme.selected)
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("放大查看图片")
+        .contextMenu {
+            Button("重新加载图片", systemImage: "arrow.clockwise") { reloadID = UUID() }
+        }
         .task(id: source) {
             let image = await Task.detached(priority: .userInitiated) { ChatImageThumbnailCache.image(source) }.value
-            guard !Task.isCancelled else { return }; localImage = image
+            guard !Task.isCancelled else { return }
+            localImage = image; localLoadFinished = true
         }
     }
 
@@ -2255,7 +2438,7 @@ private struct ChatImagePreview: View {
                 Image(systemName: "xmark")
                     .font(MyChatSystemFont.appFont(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 44, height: 44)
                     .background(.ultraThinMaterial, in: Circle())
             }
             .buttonStyle(.plain)

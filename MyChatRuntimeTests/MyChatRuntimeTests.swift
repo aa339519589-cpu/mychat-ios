@@ -10,6 +10,144 @@ import CoreText
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
 
+    func testHapticSemanticsRespectPreferenceAndReducedMotion() {
+        let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
+        for event in events {
+            XCTAssertNil(HapticFeedback.pattern(for: event, enabled: false, reduceMotion: false))
+            XCTAssertNil(HapticFeedback.pattern(for: event, enabled: false, reduceMotion: true))
+        }
+        XCTAssertEqual(HapticFeedback.pattern(for: .selection, enabled: true, reduceMotion: false), .selection)
+        XCTAssertEqual(HapticFeedback.pattern(for: .send, enabled: true, reduceMotion: false), .impact(.medium, 0.65))
+        XCTAssertEqual(HapticFeedback.pattern(for: .stop, enabled: true, reduceMotion: false), .impact(.rigid, 0.55))
+        XCTAssertEqual(HapticFeedback.pattern(for: .success, enabled: true, reduceMotion: false), .notification(.success))
+        XCTAssertEqual(HapticFeedback.pattern(for: .error, enabled: true, reduceMotion: false), .notification(.error))
+        XCTAssertEqual(HapticFeedback.pattern(for: .surface, enabled: true, reduceMotion: true), .impact(.soft, 0.45))
+        XCTAssertEqual(HapticFeedback.pattern(for: .send, enabled: true, reduceMotion: true), .impact(.medium, 0.45))
+    }
+
+    func testReadingPositionSurvivesConversationSwitchRotationAndUserTakeover() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 600, height: 900))
+        let scroll = UIScrollView(frame: CGRect(x: 0, y: 60, width: 390, height: 800))
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: 390, height: 3_000)
+        window.addSubview(scroll)
+        let row = UIView(frame: CGRect(x: 0, y: 1_000, width: 390, height: 180))
+        scroll.addSubview(row)
+        let controller = ChatScrollController()
+        let first = UUID(), second = UUID()
+        controller.setComposerGeometry(.init(bottomPadding: 300, topInWindow: 760))
+        controller.registerReadingAnchor(row, id: UUID())
+        controller.attach(scroll, conversationID: first)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.setInteractionActive(true)
+        scroll.contentOffset.y = 900
+        controller.setInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.attach(scroll, conversationID: second)
+        try await Task.sleep(for: .milliseconds(40))
+        controller.attach(scroll, conversationID: first)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 900, accuracy: 0.5)
+        row.frame.origin.y = 1_100
+        scroll.frame.size.width = 600
+        scroll.contentSize.width = 600
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 1_000, accuracy: 0.5,
+            "Reflow retains the same row and relative position, not a percentage of the whole document")
+        controller.attach(scroll, conversationID: second)
+        controller.attach(scroll, conversationID: first)
+        controller.setInteractionActive(true)
+        scroll.contentOffset.y = 200
+        controller.setInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(scroll.contentOffset.y, 200, accuracy: 0.5,
+            "A touch after scheduling restoration must cancel the old scroll intent")
+        controller.pauseFollowAnimation()
+    }
+
+    func testReadingPositionsAreBoundedAndClearedOnAccountChange() {
+        let store = ChatReadingPositionStore()
+        store.setOwner("account-a")
+        let ids = (0..<65).map { _ in UUID() }
+        for id in ids {
+            store.save(.init(offset: 100, anchorID: nil, anchorDistance: 0,
+                following: false, explicitBottom: false), for: id)
+        }
+        XCTAssertNil(store.position(for: ids[0]))
+        XCTAssertNotNil(store.position(for: ids[64]))
+        store.setOwner("account-b")
+        XCTAssertNil(store.position(for: ids[64]))
+    }
+
+    func testDrawerLayoutChangesDoNotBecomeManualReadingIntent() async throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        let scroll = UIScrollView(frame: window.bounds)
+        scroll.contentInsetAdjustmentBehavior = .never
+        scroll.contentSize = CGSize(width: 390, height: 2_000)
+        window.addSubview(scroll)
+        let controller = ChatScrollController()
+        controller.setComposerGeometry(.init(bottomPadding: 400, topInWindow: 760))
+        controller.setDrawerInteractionActive(true)
+        controller.attach(scroll, conversationID: UUID())
+        scroll.contentOffset.y = 10
+        controller.setDrawerInteractionActive(false)
+        try await Task.sleep(for: .milliseconds(60))
+        XCTAssertGreaterThan(scroll.contentOffset.y, 1_000,
+            "Opening a history conversation while closing the drawer must still perform initial positioning")
+        controller.pauseFollowAnimation()
+    }
+
+    func testLicensedReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
+        for name in ["Newsreader16pt-Regular", "Newsreader16pt-Italic", "Newsreader16pt-Bold"] {
+            XCTAssertNotNil(UIFont(name: name, size: 17))
+        }
+        XCTAssertTrue(MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true).fontName.hasPrefix("Newsreader"))
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/ttf"))
+        func luminance(_ color: Color, style: UIUserInterfaceStyle) -> CGFloat {
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&r, green: &g, blue: &b, alpha: &a)
+            func linear(_ v: CGFloat) -> CGFloat { v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
+            return linear(r) * 0.2126 + linear(g) * 0.7152 + linear(b) * 0.0722
+        }
+        for style: UIUserInterfaceStyle in [.light, .dark] {
+            for surface in [MyChatTheme.canvas, MyChatTheme.composer, MyChatTheme.controlSurface, MyChatTheme.userBubble] {
+                let values = [luminance(surface, style: style), luminance(MyChatTheme.secondaryText, style: style)]
+                XCTAssertGreaterThanOrEqual((values.max()! + 0.05) / (values.min()! + 0.05), 4.5)
+            }
+        }
+    }
+
+    func testImageOnlyAndMixedDraftsSubmitActualAttachmentsExactlyOnce() async throws {
+        for (count, text) in [(1, ""), (3, ""), (2, "请比较这两张图片")] {
+            let transport = ControlledChatTransport()
+            let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+            await model.restoreAuthenticationIfNeeded()
+            await model.reloadModels()
+            model.beginNewChat()
+            model.draft = " \n\t"
+            XCTAssertFalse(model.canSendCurrentDraft)
+            for index in 0..<count {
+                model.addPendingAttachment(ChatPendingAttachment(kind: .image, name: "photo-\(index).png",
+                    imageDataURL: NativeRuntimeFixture.imageSource))
+            }
+            model.draft = text
+            XCTAssertTrue(model.canSendCurrentDraft)
+            model.sendDraft()
+            try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+            let command = try XCTUnwrap(transport.commands.first)
+            XCTAssertEqual(command.userMessage.content, text)
+            XCTAssertEqual(command.userMessage.sourceImages?.count, count)
+            XCTAssertTrue(command.userMessage.sourceImages?.allSatisfy { $0.hasPrefix("data:image/") } == true)
+            XCTAssertTrue(model.pendingAttachments.isEmpty)
+            XCTAssertTrue(model.draft.isEmpty)
+            model.sendDraft()
+            XCTAssertEqual(transport.commands.count, 1, "A rapid second tap cannot create an empty duplicate turn")
+            transport.complete(command, text: "已收到图片", sequence: 1)
+            try await waitUntil { !model.isCurrentConversationGenerating }
+            XCTAssertEqual(model.messages.filter { $0.role == .user }.count, 1)
+        }
+    }
+
     func testHealthConnectorRequestsHeartSleepAndWorkoutAlongsideActivity() {
         let types = Set(HealthConnector.readTypes.map(\.identifier))
         for identifier in [HKQuantityTypeIdentifier.heartRate.rawValue, HKQuantityTypeIdentifier.restingHeartRate.rawValue,
@@ -1670,7 +1808,7 @@ import CoreText
         XCTAssertGreaterThan(padding, 148)
         let offset = ChatReadingAnchor.offset(contentHeight: 1_000 + padding,
             bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 0)
-        XCTAssertEqual(1_000 - offset, 692 * 0.45, accuracy: 0.001)
+        XCTAssertEqual(1_000 - offset, 692 * (2.0 / 3.0), accuracy: 0.001)
         XCTAssertEqual(ChatReadingAnchor.offset(contentHeight: 200 + padding,
             bottomPadding: padding, viewport: viewport, composerTop: 760, topInset: 60), -60)
     }

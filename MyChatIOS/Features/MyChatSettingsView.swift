@@ -8,6 +8,7 @@ struct MyChatSettingsView: View {
     @StateObject private var account: SettingsAccountUpdates
     @State private var path: [Destination] = []
     @AppStorage("mychat.profile.avatarJPEG") private var avatarData = Data()
+    @AppStorage(HapticFeedback.preferenceKey) private var hapticsEnabled = true
     @State private var avatar: UIImage?
     @State private var signingOut = false
     init(appModel: AppModel, close: @escaping () -> Void) {
@@ -28,6 +29,17 @@ struct MyChatSettingsView: View {
                     }
                     NativeSettingsSection(title: "应用") {
                         row("功能", icon: "slider.vertical.3", destination: .capabilities)
+                        divider
+                        Toggle(isOn: $hapticsEnabled) {
+                            Label("触觉反馈", systemImage: "hand.tap")
+                                .font(MyChatTypography.navigation)
+                        }
+                        .tint(MyChatTheme.brand)
+                        .padding(.horizontal, 20).padding(.vertical, 12)
+                        .accessibilityIdentifier("settings.haptics")
+                        .onChange(of: hapticsEnabled) { _, enabled in
+                            if enabled { HapticFeedback.play(.selection) }
+                        }
                         if appModel.authSession != nil {
                             divider
                             row("连接器", icon: "square.on.square", destination: .connectors)
@@ -109,9 +121,10 @@ struct MyChatSettingsView: View {
         Button { path.append(destination) } label: { NativeSettingsRow(title: title, icon: icon) }.buttonStyle(.plain)
     }
     private var licenseText: String {
-        guard let url = Bundle.main.url(forResource: "THREE-LICENSE", withExtension: "txt", subdirectory: "DotMotion"),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return "MyChat" }
-        return text
+        [("THREE-LICENSE", "DotMotion"), ("Newsreader-OFL", "ReadingFonts")].compactMap { name, directory in
+            guard let url = Bundle.main.url(forResource: name, withExtension: "txt", subdirectory: directory) else { return nil }
+            return try? String(contentsOf: url, encoding: .utf8)
+        }.joined(separator: "\n\n")
     }
     private enum Destination: Hashable { case profile, password, privacy, capabilities, connectors, licenses }
 }
