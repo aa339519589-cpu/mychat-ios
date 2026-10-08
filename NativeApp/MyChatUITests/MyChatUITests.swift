@@ -579,8 +579,8 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(waitForHittable(close, timeout: 10))
             dragFromLeadingEdge(width * 0.33)
             XCTContext.runActivity(named: "Artifact edge return geometry") { activity in
-                let remainingFrame = close.exists ? String(describing: close.frame) : "removed"
-                let attachment = XCTAttachment(string: "screenWidth=\(width); requestedTravel=\(width * 0.33); originalCloseMinX=\(originalCloseMinX); closeAfterDrag=\(remainingFrame)")
+                let closeStillExists = close.exists
+                let attachment = XCTAttachment(string: "screenWidth=\(width); requestedTravel=\(width * 0.33); originalCloseMinX=\(originalCloseMinX); closeExistsAfterDrag=\(closeStillExists)")
                 attachment.lifetime = .keepAlways
                 activity.add(attachment)
             }
