@@ -287,6 +287,29 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "sidebar-and-top-buttons")
     }
 
+    @MainActor func testSidebarSelectionTraitTracksDestination() {
+        let app = launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
+
+        sidebar.tap()
+        let projects = app.buttons["项目"].firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 5))
+        projects.tap()
+
+        sidebar.tap()
+        let selectedProjects = app.buttons["项目"].firstMatch
+        XCTAssertTrue(selectedProjects.waitForExistence(timeout: 5))
+        XCTAssertTrue(selectedProjects.isSelected)
+
+        selectedProjects.tap()
+        sidebar.tap()
+        let selectedCode = app.buttons["编程"].firstMatch
+        XCTAssertTrue(selectedCode.waitForExistence(timeout: 5))
+        XCTAssertTrue(selectedCode.isSelected)
+        XCTAssertFalse(app.buttons["项目"].firstMatch.isSelected)
+    }
+
     @MainActor func testArtifactLibraryOpensAndDismissesPreviewRepeatedly() {
         let app = launch(extra: ["--ui-test-artifacts"])
         app.buttons["打开侧边栏"].firstMatch.tap()

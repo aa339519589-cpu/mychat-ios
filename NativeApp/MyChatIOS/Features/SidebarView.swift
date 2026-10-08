@@ -612,6 +612,7 @@ struct ConversationHistorySheet: View {
 private struct SidebarDestinationButtonStyle: ButtonStyle {
     let isSelected: Bool
     let highlightsWhilePressed: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -621,7 +622,8 @@ private struct SidebarDestinationButtonStyle: ButtonStyle {
                        ? MyChatTheme.selected.opacity(0.62) : Color.clear),
                 in: RoundedRectangle(cornerRadius: 14, style: .continuous)
             )
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isSelected)
     }
 }
 
