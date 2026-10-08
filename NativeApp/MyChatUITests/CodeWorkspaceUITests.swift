@@ -104,7 +104,10 @@ final class CodeWorkspaceUITests: XCTestCase {
             openNewCode(in: app)
             let input = app.descendants(matching: .any).matching(identifier: "code.draft").firstMatch
             XCTAssertTrue(input.waitForExistence(timeout: 10))
-            XCTAssertFalse(app.staticTexts["Cloud · 已验证"].exists,
+            let status = app.descendants(matching: .any)
+                .matching(identifier: "code.execution-status").firstMatch
+            XCTAssertTrue(status.waitForExistence(timeout: 10))
+            XCTAssertEqual(status.label, "执行状态：云端不可用",
                 "The isolated fixture must not claim a verified Cloud environment")
             let send = app.buttons["code.send"]
             XCTAssertGreaterThanOrEqual(send.frame.width, 44)
@@ -126,6 +129,108 @@ final class CodeWorkspaceUITests: XCTestCase {
         }
     }
 
+    @MainActor func testCodeDetailAndNewSessionRequireExplicitBackNavigation() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-claude-models"]
+        app.launch()
+
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
+        sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000064"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+
+        let title = app.staticTexts["code.session.title"]
+        let send = app.buttons["code.session.send"]
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertTrue(send.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["停止 Code 任务"].exists)
+        XCTAssertFalse(app.buttons["编程会话操作"].exists)
+        XCTAssertGreaterThanOrEqual(send.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(send.frame.height, 44)
+
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let start = origin.withOffset(CGVector(dx: 1, dy: app.frame.height * 0.5))
+        let end = origin.withOffset(CGVector(dx: app.frame.width * 0.78, dy: app.frame.height * 0.5))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "Code detail must stay until the explicit back button is tapped")
+        app.buttons["code.session.back"].tap()
+
+        let newSession = app.buttons["新建会话"].firstMatch
+        XCTAssertTrue(newSession.waitForExistence(timeout: 10))
+        newSession.tap()
+        let draft = app.descendants(matching: .any).matching(identifier: "code.draft").firstMatch
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        let newBack = app.buttons["code.new.back"]
+        XCTAssertTrue(newBack.exists)
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertTrue(draft.waitForExistence(timeout: 5), "New Code session must not be dismissed by an edge swipe")
+        newBack.tap()
+        app.terminate()
+    }
+
+    @MainActor func testGitHubRepositorySelectionRestoresWithoutManualWebConnection() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-connected-github"]
+        app.launch()
+        openNewCode(in: app)
+
+        let repositoryName = "aa339519589-cpu/mychat-ios"
+        let selector = app.buttons["code.repository-selector"]
+        XCTAssertTrue(selector.waitForExistence(timeout: 10))
+        let connectedLabel = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "选择仓库"),
+            object: selector
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [connectedLabel], timeout: 10), .completed)
+        selector.tap()
+
+        let repository = app.buttons["code.github.repository." + repositoryName]
+        XCTAssertTrue(repository.waitForExistence(timeout: 10))
+        repository.tap()
+        let selectedLabel = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", repositoryName),
+            object: selector
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [selectedLabel], timeout: 10), .completed)
+        app.buttons["code.new.back"].tap()
+
+        openNewCode(in: app)
+        let restored = app.buttons["code.repository-selector"]
+        XCTAssertTrue(restored.waitForExistence(timeout: 10))
+        let restoredLabel = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", repositoryName),
+            object: restored
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [restoredLabel], timeout: 10), .completed)
+        XCTAssertFalse(app.staticTexts["请先在 MyChat 网页版连接 GitHub，然后刷新此页面。"].exists)
+        app.terminate()
+    }
+
+    @MainActor func testUnconnectedCodeShowsNativeGitHubEntryWithoutWebInstructions() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode"]
+        app.launch()
+        openNewCode(in: app)
+
+        let connect = app.buttons["code.repository-selector"]
+        XCTAssertTrue(connect.waitForExistence(timeout: 10))
+        let disconnectedLabel = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "连接 GitHub"),
+            object: connect
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [disconnectedLabel], timeout: 10), .completed)
+        XCTAssertTrue(connect.isEnabled)
+        XCTAssertFalse(app.staticTexts["请先在 MyChat 网页版连接 GitHub，然后刷新此页面。"].exists)
+        let status = app.descendants(matching: .any)
+            .matching(identifier: "code.execution-status").firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
+        XCTAssertEqual(status.label, "执行状态：云端不可用")
+        app.terminate()
+    }
+
     @MainActor private func screenshot(_ app: XCUIApplication, name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
@@ -145,3 +250,4 @@ final class CodeWorkspaceUITests: XCTestCase {
         newSession.tap()
     }
 }
+
