@@ -2498,11 +2498,12 @@ final class AppModel: ObservableObject {
                     media: recovery.media
                 ))
             ))
-            accumulator.apply(ChatJobEvent(
+            let terminalEvent = ChatJobEvent(
                 jobID: recovery.admission.jobID,
                 sequence: terminal.sequence,
                 payload: .terminal(terminal)
-            ))
+            )
+            let acceptedTerminal = accumulator.apply(terminalEvent)
             streamAccumulators[conversationID] = accumulator
             updateAssistant(
                 id: recovery.admission.assistantMessageID,
@@ -2525,6 +2526,7 @@ final class AppModel: ObservableObject {
                 title: conversation.title,
                 projectID: conversation.projectID.flatMap(UUID.init(uuidString:))
             )
+            if acceptedTerminal { recordProcessEvent(terminalEvent, command: command) }
             startQueuedCommand(after: command, allowDuringReconnect: true)
             Task { [weak self] in await self?.reloadConversations() }
             return
@@ -3580,11 +3582,14 @@ final class AppModel: ObservableObject {
                 )
                 flushAssistantUpdate(conversationID)
                 if let terminal = recovery.terminal {
-                    accumulator.apply(ChatJobEvent(
+                    let terminalEvent = ChatJobEvent(
                         jobID: admission.jobID,
                         sequence: terminal.sequence,
                         payload: .terminal(terminal)
-                    ))
+                    )
+                    if accumulator.apply(terminalEvent) {
+                        recordProcessEvent(terminalEvent, command: command)
+                    }
                     streamAccumulators[conversationID] = accumulator
                     updateAssistant(
                         id: command.assistantMessageID,
@@ -4031,11 +4036,13 @@ final class AppModel: ObservableObject {
                     tokenUsage: terminal.tokenUsage,
                     codeReceipt: terminal.codeReceipt
                 )
-                guard accumulator.apply(ChatJobEvent(
+                let terminalEvent = ChatJobEvent(
                     jobID: jobID,
                     sequence: resolved.sequence,
                     payload: .terminal(resolved)
-                )) else { continue }
+                )
+                guard accumulator.apply(terminalEvent) else { continue }
+                recordProcessEvent(terminalEvent, command: command)
                 streamAccumulators[conversationID] = accumulator
                 updateAssistant(
                     id: command.assistantMessageID,

@@ -2548,6 +2548,165 @@ import Combine
         try await waitUntil { !model.isCurrentConversationGenerating }
     }
 
+    func testTerminalSummaryUsesOnlyTaggedValuesAndIsIdempotent() throws {
+        let job = UUID()
+        var entries: [ChatProcessEntry] = []
+        let tool = ChatToolActivity(toolCallID: "terminal-tool", toolName: "search", isComplete: true)
+        let before: [ChatJobEventPayload] = [.reasoningSummaryDelta("Checking inputs."), .toolActivity(tool), .textDelta("A")]
+        for (index, payload) in before.enumerated() {
+            ChatProcessEntry.record(ChatJobEvent(jobID: job, sequence: index + 1, payload: payload), into: &entries)
+        }
+        let summary = "Checked the inputs and compared the results."
+        let terminal = ChatJobEvent(jobID: job, sequence: 4, payload: .terminal(ChatTerminalSnapshot(
+            status: .completed, content: "A", thinking: try XCTUnwrap(ChatReasoningSummaryStorage.encode(summary)),
+            sequence: 4, errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)))
+        ChatProcessEntry.record(terminal, into: &entries)
+        XCTAssertEqual(entries.map(\.content), [.reasoningSummary(summary), .tool(tool), .text("A")])
+        let settled = entries
+        ChatProcessEntry.record(terminal, into: &entries)
+        XCTAssertEqual(entries, settled, "A repeated terminal cannot add another summary row or tool")
+        let privateTerminal = ChatJobEvent(jobID: job, sequence: 5, payload: .terminal(ChatTerminalSnapshot(
+            status: .completed, content: "A", thinking: "PRIVATE_REASONING", sequence: 5,
+            errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)))
+        ChatProcessEntry.record(privateTerminal, into: &entries)
+        XCTAssertEqual(entries, settled, "Unmarked terminal thinking cannot overwrite a public summary")
+        var accumulator = ChatStreamAccumulator()
+        XCTAssertTrue(accumulator.apply(terminal))
+        XCTAssertFalse(accumulator.apply(terminal))
+        XCTAssertFalse(accumulator.apply(privateTerminal))
+        XCTAssertEqual(accumulator.reasoningSummary, summary)
+
+        var recovered: [ChatProcessEntry] = []
+        let checkpoint = ChatJobEvent(jobID: job, sequence: 8, payload: .snapshot(ChatJobSnapshot(
+            content: "A", thinking: try XCTUnwrap(ChatReasoningSummaryStorage.encode("Checking")), media: [])))
+        ChatProcessEntry.record(checkpoint, into: &recovered)
+        let sameCursorTerminal = ChatJobEvent(jobID: job, sequence: 8, payload: .terminal(ChatTerminalSnapshot(
+            status: .completed, content: "A", thinking: try XCTUnwrap(ChatReasoningSummaryStorage.encode("Checking inputs.")),
+            sequence: 8, errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)))
+        ChatProcessEntry.record(sameCursorTerminal, into: &recovered)
+        XCTAssertEqual(recovered.compactMap {
+            if case let .reasoningSummary(value) = $0.content { return value }; return nil
+        }.joined(), "Checking inputs.")
+        XCTAssertEqual(Set(recovered.map(\.id)).count, recovered.count,
+            "A same-cursor terminal extension needs a different ID from the checkpoint summary")
+    }
+
+    func testTerminalPublicSummaryReachesExistingTranscriptBeforeFinish() async throws {
+        let oldSummary = "Checking inputs."
+        let finalSummary = "Checked the inputs and compared the results."
+        for (thinking, expected) in [
+            (try XCTUnwrap(ChatReasoningSummaryStorage.encode(finalSummary)), finalSummary),
+            ("PRIVATE_REASONING", oldSummary)
+        ] {
+            let transport = ControlledChatTransport()
+            let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+            await model.restoreAuthenticationIfNeeded()
+            await model.reloadModels()
+            model.beginNewChat()
+            model.draft = "Synthetic terminal summary"
+            model.sendDraft()
+            try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+            let command = try XCTUnwrap(transport.commands.first)
+            defer { transport.continuations[command.generationID]?.finish() }
+            let updates = ChatTranscriptUpdates(model)
+            updates.setInteracting(true)
+            updates.setModalVisible(true)
+            func visibleSummary() -> String {
+                updates.snapshot.processEntries[command.assistantMessageID, default: []].compactMap {
+                    if case let .reasoningSummary(value) = $0.content { return value }; return nil
+                }.joined()
+            }
+            var summaryWhileGenerating: [String] = []
+            let observation = updates.$snapshot.sink { snapshot in
+                guard model.isCurrentConversationGenerating else { return }
+                let summary = snapshot.processEntries[command.assistantMessageID, default: []].compactMap {
+                    if case let .reasoningSummary(value) = $0.content { return value }; return nil
+                }.joined()
+                summaryWhileGenerating.append(summary)
+            }
+            defer { observation.cancel() }
+            transport.emit(.reasoningSummaryDelta(oldSummary), for: command, sequence: 1)
+            transport.emit(.textDelta("A"), for: command, sequence: 2)
+            try await waitUntil { model.messages.last?.content == "A" && visibleSummary() == oldSummary }
+            transport.emit(.terminal(ChatTerminalSnapshot(status: .completed, content: "A", thinking: thinking,
+                sequence: 3, errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)), for: command, sequence: 3)
+            transport.continuations[command.generationID]?.finish()
+            try await waitUntil { !model.isCurrentConversationGenerating }
+            XCTAssertEqual(visibleSummary(), expected)
+            XCTAssertTrue(summaryWhileGenerating.contains(expected))
+            XCTAssertFalse(summaryWhileGenerating.contains { $0.contains("PRIVATE_REASONING") })
+            XCTAssertEqual(ChatReasoningSummaryStorage.decode(model.messages.last?.thinking), expected)
+            XCTAssertEqual(model.messages.last?.content, "A")
+        }
+    }
+
+    func testTerminalObserverPublishesFinalPublicSummaryWithoutSSETerminal() async throws {
+        let transport = ControlledChatTransport()
+        let model = NativeRuntimeFixture.makeModel(chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic terminal observer summary"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.continuations.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        transport.emit(.reasoningSummaryDelta("Checking inputs."), for: command, sequence: 1)
+        transport.emit(.textDelta("A"), for: command, sequence: 2)
+        try await waitUntil { model.messages.last?.content == "A" }
+        let summary = "Checked the inputs and compared the results."
+        transport.terminalSnapshots[command.generationID] = ChatTerminalSnapshot(status: .completed,
+            content: "A", thinking: try XCTUnwrap(ChatReasoningSummaryStorage.encode(summary)), sequence: 3,
+            errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)
+        // No terminal enters the held SSE continuation. Exercise the existing
+        // production terminal observer with a synthetic status response instead.
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+            if case let .reasoningSummary(value) = $0.content { return value }; return nil
+        }.joined(), summary)
+        XCTAssertEqual(ChatReasoningSummaryStorage.decode(model.messages.last?.thinking), summary)
+        XCTAssertEqual(transport.commands.count, 1)
+    }
+
+    func testCompletedForegroundRecoveryReconcilesExistingPublicSummary() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic completed recovery summary"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+            title: "Terminal recovery", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        transport.emit(.reasoningSummaryDelta("Checking inputs."), for: command, sequence: 1)
+        transport.emit(.textDelta("A"), for: command, sequence: 2)
+        try await waitUntil { model.messages.last?.content == "A" }
+        let summary = "Checked the inputs and compared the results."
+        let thinking = try XCTUnwrap(ChatReasoningSummaryStorage.encode(summary))
+        let terminal = ChatTerminalSnapshot(status: .completed, content: "A", thinking: thinking,
+            sequence: 3, errorCode: nil, media: [], tokenUsage: nil, codeReceipt: nil)
+        transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+            jobID: command.generationID, generationID: command.generationID,
+            userMessageID: command.userMessageID, assistantMessageID: command.assistantMessageID,
+            status: "completed", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/events")!,
+            trialRemaining: nil, trialLimit: nil), sequence: 3, content: "A", thinking: thinking, media: [], terminal: terminal)
+        await model.resumeAuthentication()
+        try await waitUntil {
+            model.processEntriesByMessageID[command.assistantMessageID, default: []].compactMap {
+                if case let .reasoningSummary(value) = $0.content { return value }; return nil
+            }.joined() == summary
+        }
+        XCTAssertFalse(model.isCurrentConversationGenerating)
+        XCTAssertEqual(ChatReasoningSummaryStorage.decode(model.messages.last?.thinking), summary)
+        XCTAssertEqual(transport.commands.count, 1, "Completed recovery must not submit a new generation")
+        XCTAssertEqual(transport.streamStarts.count, 1, "A completed checkpoint needs no replacement SSE stream")
+    }
+
     func testNonemptySnapshotReconcilesProcessTextAndOnlyPublicSummaries() throws {
         let job = UUID()
         var entries: [ChatProcessEntry] = []
@@ -3014,6 +3173,7 @@ private actor ControlledConversationStore: SupabaseDataServing {
     var holdRecovery = false
     var heldRecovery: CheckedContinuation<Void, Never>?
     var recoveryReadCount = 0
+    var terminalSnapshots: [UUID: ChatTerminalSnapshot] = [:]
     var admissionStatuses: [UUID: ChatAdmissionJobStatus] = [:]
     var admissionStatusCalls: [UUID] = []
     var streamStarts: [(jobID: UUID, fromSequence: Int)] = []
@@ -3049,7 +3209,7 @@ private actor ControlledConversationStore: SupabaseDataServing {
         admissionStatusCalls.append(command.generationID)
         return admissionStatuses[command.generationID]
     }
-    func terminalSnapshot(conversationID: UUID, jobID: UUID, accessToken: String) async throws -> ChatTerminalSnapshot? { nil }
+    func terminalSnapshot(conversationID: UUID, jobID: UUID, accessToken: String) async throws -> ChatTerminalSnapshot? { terminalSnapshots[jobID] }
     func cancel(jobID: UUID, accessToken: String, reason: String?) async throws -> ChatCancelResponse {
         cancelCalls.append(jobID)
         return ChatCancelResponse(jobID: jobID, accepted: true, replayed: false, status: "cancelled", eventSequence: 1)

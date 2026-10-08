@@ -433,6 +433,14 @@ struct ChatProcessEntry: Equatable, Sendable, Identifiable {
             reconcile(snapshot.content, id: id + ":text", into: &entries,
                 value: { if case let .text(text) = $0 { return text }; return nil },
                 content: Content.text)
+        case let .terminal(snapshot):
+            // A terminal may refine the public summary even when the final
+            // body is unchanged and the UI keeps the process timeline visible.
+            // Unmarked private thinking must never become a visible summary.
+            guard let summary = ChatReasoningSummaryStorage.decode(snapshot.thinking) else { return }
+            reconcile(summary, id: id + ":terminal-summary", into: &entries,
+                value: { if case let .reasoningSummary(text) = $0 { return text }; return nil },
+                content: Content.reasoningSummary)
         case let .textDelta(delta):
             guard !delta.isEmpty else { return }
             if let last = entries.last, case let .text(text) = last.content {
