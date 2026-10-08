@@ -198,6 +198,7 @@ private struct CodeSessionDetailView: View {
     @State private var cancellationReconciliation: Task<Void, Never>?
     @State private var cancellationReconciliationToken: UUID?
     @State private var cancellationPending = false
+    @State private var cancellationRetryAllowed = false
     @State private var streamedResponseID: UUID?
     @State private var streamedContent = ""
     @State private var steps: [CodeAgentStep] = []
@@ -416,13 +417,19 @@ private struct CodeSessionDetailView: View {
                         .frame(width: 44, height: 44)
                     }
                     .buttonStyle(CodeSendButtonStyle())
-                    .disabled(isCancelling || (activeAdmission == nil && (isAdmitting || isApplying || !canSend)))
+                    .disabled(isCancelling || (cancellationPending && !cancellationRetryAllowed)
+                        || (activeAdmission == nil && (isAdmitting || isApplying || !canSend)))
                     .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
                     .accessibilityLabel(activeAdmission != nil
-                        ? (isCancelling ? "正在停止 Code 任务" : (cancellationPending ? "重试停止 Code 任务" : "停止 Code 任务"))
+                        ? (isCancelling ? "正在停止 Code 任务"
+                            : (cancellationPending
+                                ? (cancellationRetryAllowed ? "重试停止 Code 任务" : "等待停止确认")
+                                : "停止 Code 任务"))
                         : ((isAdmitting || isApplying) ? "正在处理 Code 任务" : "发送编程消息"))
                     .accessibilityHint(activeAdmission != nil
-                        ? (cancellationPending ? "取消状态待确认；可安全重试同一任务" : "取消正在运行的云端任务")
+                        ? (cancellationPending
+                            ? (cancellationRetryAllowed ? "取消状态待确认；可重试同一任务" : "云端正在确认取消")
+                            : "取消正在运行的云端任务")
                         : "发送 Code 任务")
                     .accessibilityIdentifier("code.session.send")
                 }
@@ -529,6 +536,7 @@ private struct CodeSessionDetailView: View {
                     activeAdmission = nil
                     isCancelling = false
                     cancellationPending = false
+                    cancellationRetryAllowed = false
                 } else {
                     activeAdmission = admission
                     startConsuming(admission)
@@ -795,6 +803,7 @@ private struct CodeSessionDetailView: View {
                     || isTerminalCodeStatus(recoveredAdmission?.status) {
                     activeAdmission = nil
                     cancellationPending = false
+                    cancellationRetryAllowed = false
                     errorMessage = nil
                     cancellationReconciliation?.cancel()
                     cancellationReconciliation = nil
@@ -802,6 +811,7 @@ private struct CodeSessionDetailView: View {
                     await load()
                 } else if let recoveredAdmission, recoveredAdmission.jobID == admission.jobID {
                     activeAdmission = recoveredAdmission
+                    cancellationRetryAllowed = recoveredAdmission.status.lowercased() != "cancelling"
                     startConsuming(recoveredAdmission)
                 }
             } catch {
@@ -818,6 +828,7 @@ private struct CodeSessionDetailView: View {
         activeAdmission = nil
         isCancelling = false
         cancellationPending = false
+        cancellationRetryAllowed = false
         cancellationReconciliation?.cancel()
         cancellationReconciliation = nil
         cancellationReconciliationToken = nil
@@ -842,8 +853,11 @@ private struct CodeSessionDetailView: View {
     }
 
     @MainActor private func stop(_ admission: CodeAdmission) async {
-        guard !isCancelling, activeAdmission?.jobID == admission.jobID else { return }
+        guard !isCancelling,
+              (!cancellationPending || cancellationRetryAllowed),
+              activeAdmission?.jobID == admission.jobID else { return }
         isCancelling = true
+        cancellationRetryAllowed = false
         errorMessage = nil
         do {
             let response = try await appModel.cancelCodeRun(admission)
@@ -857,6 +871,7 @@ private struct CodeSessionDetailView: View {
             } else {
                 isCancelling = false
                 cancellationPending = true
+                cancellationRetryAllowed = !(response.accepted || response.replayed)
                 errorMessage = response.accepted || response.replayed
                     ? "取消请求已提交，正在等待云端状态"
                     : "取消请求尚未确认，可以重试"
@@ -866,6 +881,7 @@ private struct CodeSessionDetailView: View {
             errorMessage = error.localizedDescription
             isCancelling = false
             cancellationPending = true
+            cancellationRetryAllowed = true
             scheduleCancellationReconciliation(for: admission)
         }
     }
@@ -907,6 +923,7 @@ private struct CodeSessionDetailView: View {
                 activeAdmission = nil
                 isCancelling = false
                 cancellationPending = false
+                cancellationRetryAllowed = false
                 errorMessage = nil
                 cancellationReconciliation = nil
                 cancellationReconciliationToken = nil
@@ -925,6 +942,7 @@ private struct CodeSessionDetailView: View {
             isCancelling = false
             cancellationPending = true
             let status = currentAdmission?.status ?? recovery.task?.status ?? "未知"
+            cancellationRetryAllowed = status.lowercased() != "cancelling"
             errorMessage = status.lowercased() == "cancelling"
                 ? "云端仍在处理取消，状态将继续同步"
                 : "任务仍在运行（\(status)），可重试停止"
@@ -935,6 +953,7 @@ private struct CodeSessionDetailView: View {
                 activeAdmission = nil
                 isCancelling = false
                 cancellationPending = false
+                cancellationRetryAllowed = false
                 cancellationReconciliation = nil
                 cancellationReconciliationToken = nil
                 let oldSubscription = eventSubscription
@@ -948,6 +967,7 @@ private struct CodeSessionDetailView: View {
             }
             isCancelling = false
             cancellationPending = true
+            cancellationRetryAllowed = true
             errorMessage = "无法确认 Code 任务状态：\(error.localizedDescription)"
             return false
         }
