@@ -8,6 +8,11 @@ enum NativeRuntimeFixture {
     static let userID = "10000000-0000-4000-8000-000000000064"
     static let conversationID = "20000000-0000-4000-8000-000000000064"
     static let projectID = "30000000-0000-4000-8000-000000000064"
+    // Opt-in UI stress fixture only; a large style payload keeps the DOM small.
+    static let largeArtifactHTML =
+        "<html><head><style>" +
+        String(repeating: "/* Artifact swipe fixture payload */", count: 4096) +
+        "</style></head><body><main><h1>Artifact preview</h1><p>Large return fixture.</p></main></body></html>"
 
     @MainActor static func makeModel(dataClient: (any SupabaseDataServing)? = nil,
         workspaceClient: (any WorkspaceDataServing)? = nil,
@@ -484,11 +489,14 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                     "message_id": "60000000-0000-4000-8000-000000000065",
                     "project_id": NSNull(), "created_at": date, "updated_at": date]])
             }
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") {
+            let largeArtifactFixture = ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts-large")
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") || largeArtifactFixture {
                 return (200, [[
                     "id": "70000000-0000-4000-8000-000000000064",
                     "title": "动画咖啡杯",
-                    "raw": "<html><body><h1>Artifact preview</h1><p>Fixture artifact.</p></body></html>",
+                    "raw": largeArtifactFixture
+                        ? NativeRuntimeFixture.largeArtifactHTML
+                        : "<html><body><h1>Artifact preview</h1><p>Fixture artifact.</p></body></html>",
                     "conversation_id": NativeRuntimeFixture.conversationID,
                     "message_id": "60000000-0000-4000-8000-000000000064",
                     "project_id": NSNull(),
