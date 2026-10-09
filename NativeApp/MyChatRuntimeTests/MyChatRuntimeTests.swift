@@ -1271,6 +1271,48 @@ import Combine
         catch { XCTAssertTrue(model.memories.contains { $0.topic == "Food" && $0.content == "喜欢苹果" }) }
     }
 
+    func testOfflineFixtureRejectsUnknownOriginsAndUnconfiguredRESTPaths() async throws {
+        let network = NativeRuntimeFixture.makeSession()
+        defer { network.invalidateAndCancel() }
+        do {
+            _ = try await network.data(from: URL(string: "https://never-networked.example.invalid/api/models")!)
+            XCTFail("An unknown origin must fail inside the offline URL protocol")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .unsupportedURL)
+        }
+        let (_, response) = try await network.data(from:
+            URL(string: "https://isolated.mychat.invalid/rest/v1/unconfigured_table")!)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 503,
+            "An undeclared REST table must not silently return an empty successful result")
+    }
+
+    func testFixtureModelUsesExplicitOfflineSessionsWithoutGlobalRegistration() async throws {
+        let network = NativeRuntimeFixture.makeSession()
+        defer { network.invalidateAndCancel() }
+        XCTAssertTrue(network.configuration.protocolClasses?.contains {
+            ObjectIdentifier($0) == ObjectIdentifier(NativeAuditURLProtocol.self)
+        } == true)
+        let model = NativeRuntimeFixture.makeModel()
+        // Removing the process-wide fallback must not switch an existing fixture
+        // to real URLs, shared configuration tasks, or a persisted network cache.
+        URLProtocol.unregisterClass(NativeAuditURLProtocol.self)
+        defer { URLProtocol.registerClass(NativeAuditURLProtocol.self) }
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        await model.reloadConversations()
+        await model.reloadWorkspaceData()
+        try await waitUntil {
+            model.catalogPhase == .loaded && model.conversationPhase == .loaded && model.workspacePhase == .loaded
+        }
+        XCTAssertNotNil(model.authSession)
+        XCTAssertTrue(model.models.contains { $0.id == "audit-model" })
+        XCTAssertTrue(model.conversations.contains { $0.id == NativeRuntimeFixture.conversationID })
+        XCTAssertEqual(model.catalogPhase, .loaded)
+        XCTAssertEqual(model.conversationPhase, .loaded)
+        XCTAssertEqual(model.workspacePhase, .loaded)
+        XCTAssertNil(model.workspaceError)
+    }
+
     func testHistoricalArtifactRecoverySavesMissingPackageWithoutOpeningChat() async throws {
         let source = "<inline-artifact><svg viewBox=\"0 0 100 100\"><circle r=\"20\"/></svg></inline-artifact>"
         NativeAuditURLProtocol.historicalTestContent = source

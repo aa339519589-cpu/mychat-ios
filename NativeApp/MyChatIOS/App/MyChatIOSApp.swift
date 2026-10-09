@@ -7,7 +7,7 @@ struct MyChatIOSApp: App {
 
     @MainActor private static func makeModel() -> AppModel {
         #if DEBUG
-        if ProcessInfo.processInfo.arguments.contains("--ui-test-mode") {
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-mode") || runsOfflineRuntimeTests {
             return NativeRuntimeFixture.makeModel()
         }
         #endif
@@ -18,6 +18,11 @@ struct MyChatIOSApp: App {
     private static var runsLiveAPIProbe: Bool {
         ProcessInfo.processInfo.environment["MYCHAT_LIVE_NETWORK_PROBE"] != nil
             || ProcessInfo.processInfo.arguments.contains("--live-api-probe")
+    }
+    private static var runsOfflineRuntimeTests: Bool {
+        guard !runsLiveAPIProbe else { return false }
+        return ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
     }
     private static var runtimeTestColorScheme: ColorScheme? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -38,7 +43,7 @@ struct MyChatIOSApp: App {
                 #endif
                 .onChange(of: scenePhase) { _, phase in
                     #if DEBUG
-                    guard !Self.runsLiveAPIProbe else { return }
+                    guard !Self.runsLiveAPIProbe, !Self.runsOfflineRuntimeTests else { return }
                     #endif
                     if phase == .active { Task {
                         await BackendReadinessPrewarmer.shared.start()
@@ -48,6 +53,10 @@ struct MyChatIOSApp: App {
                 }
                 .task {
                     #if DEBUG
+                    // Hosted offline tests create their own explicitly isolated
+                    // models. The host must not prewarm production or read login
+                    // state before the test bundle registers its URL protocols.
+                    if Self.runsOfflineRuntimeTests { return }
                     // API probes own authentication; host startup must not rotate
                     // the same stored refresh token concurrently with the test.
                     if Self.runsLiveAPIProbe {

@@ -11,7 +11,7 @@ enum NativeRuntimeFixture {
 
     @MainActor static func makeModel(dataClient: (any SupabaseDataServing)? = nil,
         workspaceClient: (any WorkspaceDataServing)? = nil,
-        chatClient: any ChatAPIServing = ChatAPIClient(), stream: any ChatEventStreaming = JobEventStream()) -> AppModel {
+        chatClient: (any ChatAPIServing)? = nil, stream: (any ChatEventStreaming)? = nil) -> AppModel {
         if ProcessInfo.processInfo.arguments.contains("--ui-test-mode") {
             UserDefaults.standard.removeObject(forKey: "mychat.account-settings-cache.v1." + userID)
             if let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
@@ -19,10 +19,30 @@ enum NativeRuntimeFixture {
             }
         }
         URLProtocol.registerClass(NativeAuditURLProtocol.self)
-        return AppModel(authenticationClient: SupabaseAuthClient(sessionStore: AuditSessionStore()),
-            dataClient: dataClient ?? SupabaseDataClient(),
-            workspaceClient: workspaceClient ?? WorkspaceDataClient(),
-            chatClient: chatClient, jobEventStream: stream)
+        // Every fixture-owned client uses a session whose protocol list is fixed
+        // before its first request. Global URLProtocol registration alone cannot
+        // isolate URLSession.shared or an already-running shared config fetch.
+        let network = makeSession()
+        let configuration = MobileConfigurationClient(session: network)
+        return AppModel(
+            catalogClient: ModelCatalogClient(session: network),
+            authenticationClient: SupabaseAuthClient(configurationClient: configuration,
+                sessionStore: AuditSessionStore(), networkSession: network),
+            dataClient: dataClient ?? SupabaseDataClient(configurationClient: configuration, session: network),
+            workspaceClient: workspaceClient ?? WorkspaceDataClient(configurationClient: configuration, session: network),
+            accountSettingsClient: AccountSettingsClient(configurationClient: configuration, session: network),
+            chatClient: chatClient ?? ChatAPIClient(session: network),
+            codeClient: CodeAPIClient(session: network),
+            jobEventStream: stream ?? JobEventStream(session: network)
+        )
+    }
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeAuditURLProtocol.self]
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        return URLSession(configuration: configuration)
     }
 
     static var imageSource: String {
@@ -240,6 +260,15 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         guard let url = request.url else { return }
+        // Capture every request at the protocol boundary, but only answer the
+        // fixture's declared origins. Unknown requests fail here; they never
+        // fall through to a real network or receive a fabricated success.
+        guard url.scheme == "https", url.port == nil || url.port == 443,
+              ["isolated.mychat.invalid", "mychat-nm6x.onrender.com"].contains(url.host ?? "") else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL,
+                userInfo: [NSLocalizedDescriptionKey: "Offline fixture rejected an unconfigured origin"]))
+            return
+        }
         let path = url.path
         let body = Self.body(request)
         Self.lock.lock()
@@ -485,7 +514,11 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             if path.hasPrefix("/api/conversations/"), method == "DELETE" {
                 deletedConversations.insert(url.lastPathComponent); return (200, ["ok": true])
             }
-            if path.hasPrefix("/rest/v1/") { return (200, []) }
+            let emptyReadTables = ["jobs", "job_events", "project_files", "project_memories",
+                "code_messages", "code_memories", "agent_tasks"]
+            if method == "GET", emptyReadTables.contains(where: { path == "/rest/v1/" + $0 }) {
+                return (200, [])
+            }
             if path == "/auth/v1/user" { return (200, ["id": NativeRuntimeFixture.userID, "email": "runtime-audit@example.invalid"]) }
             return (503, ["error": "隔离测试未配置这个请求路径：\(path)"])
         }
