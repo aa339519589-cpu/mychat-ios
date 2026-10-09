@@ -371,7 +371,7 @@ jobs:
             -only-testing:MyChatUITests/MyChatUITests/testVerticalChatScrollMovesContentWithoutOpeningDrawer \
             test
       - name: Run original font restoration runtime tests on an installed iOS 27 simulator
-        if: ${{ inputs.run_font_restoration_tests }}
+        if: ${{ inputs.run_font_restoration_tests && !cancelled() }}
         working-directory: NativeApp
         run: |
           set -euo pipefail

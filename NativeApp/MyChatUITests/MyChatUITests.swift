@@ -1284,7 +1284,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(waitForHittable(history, timeout: 10))
             history.tap()
             let user = app.staticTexts[prompt].firstMatch
-            let reply = app.staticTexts[response].firstMatch
+            let reply = app.staticTexts.matching(NSPredicate(format: "label == %@", response)).firstMatch
             let row = app.buttons["document.thinking"].firstMatch
             guard user.waitForExistence(timeout: 10), reply.waitForExistence(timeout: 10),
                   waitForHittable(row, timeout: 10), row.value as? String == summary else {
