@@ -2466,8 +2466,11 @@ final class AppModel: ObservableObject {
         guard let conversationID = UUID(uuidString: conversation.id),
               recovery.admission.jobID == recovery.admission.generationID,
               recovery.admission.userMessageID != recovery.admission.assistantMessageID else { return }
-        let current = conversationMessageCache[conversationID]
-            ?? (activeConversationID == conversationID ? messages : [])
+        // A history prefetch may lag behind an admitted visible turn. Use the
+        // current transcript only for this exact conversation; another open
+        // conversation must never supply the recovered job's user message.
+        let current = activeConversationID == conversationID
+            ? messages : conversationMessageCache[conversationID] ?? []
         guard let userMessage = current.first(where: {
             $0.id == recovery.admission.userMessageID && $0.role == .user
         }) else {

@@ -2271,6 +2271,115 @@ import Combine
         XCTAssertEqual(transport.commands.count, 1)
     }
 
+    func testForegroundRecoveryKeepsVisibleUserWhenPrefetchCachesEmptyHistory() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic visible turn with stale history"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+        let command = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[command.generationID]?.finish() }
+        transport.emit(.textDelta("A"), for: command, sequence: 1)
+        try await waitUntil { model.messages.last?.content == "A" }
+
+        // The server list knows this conversation, while its history replica
+        // still returns no messages. Verify the actual prefetch cache write
+        // before recovering; a fixed delay would not establish that ordering.
+        await data.addConversation(ConversationRecord(id: command.conversationID.uuidString,
+            title: "Synthetic stale cache", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        let support = try XCTUnwrap(FileManager.default.urls(for: .applicationSupportDirectory,
+            in: .userDomainMask).first)
+        let fixtureCache = support.appendingPathComponent("MyChatConversationCache")
+            .appendingPathComponent(NativeRuntimeFixture.userID + ".json")
+        func emptyHistoryWasCached() -> Bool {
+            guard let bytes = try? Data(contentsOf: fixtureCache),
+                  let snapshot = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+                  let messages = snapshot["messagesByConversation"] as? [String: Any],
+                  let cached = messages[command.conversationID.uuidString.lowercased()] as? [Any] else { return false }
+            return cached.isEmpty
+        }
+        try await waitUntil { emptyHistoryWasCached() }
+        XCTAssertTrue(model.messages.contains { $0.id == command.userMessageID && $0.role == .user })
+        XCTAssertEqual(model.messages.last?.content, "A")
+        transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+            jobID: command.generationID, generationID: command.generationID,
+            userMessageID: command.userMessageID, assistantMessageID: command.assistantMessageID,
+            status: "running", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/events")!,
+            trialRemaining: nil, trialLimit: nil), sequence: 2, content: "AB", thinking: "", media: [], terminal: nil)
+        await model.resumeAuthentication()
+        try await waitUntil { transport.streamStarts.count == 2 || model.currentConversationError != nil }
+        XCTAssertNil(model.currentConversationError, "A stale empty cache must not hide the visible user message")
+        XCTAssertEqual(transport.streamStarts.count, 2)
+        XCTAssertEqual(transport.commands.count, 1, "Recovery must reuse the admitted job")
+        try await waitUntil { model.messages.last?.content == "AB" }
+        XCTAssertTrue(model.messages.contains { $0.id == command.userMessageID && $0.role == .user })
+        transport.complete(command, text: "ABC", sequence: 3)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.messages.last?.content, "ABC")
+    }
+
+    func testConversationSwitchDuringRecoveryCannotUseAnotherVisibleTurn() async throws {
+        let transport = ControlledChatTransport()
+        let data = ControlledConversationStore()
+        let model = NativeRuntimeFixture.makeModel(dataClient: data, chatClient: transport, stream: transport)
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        model.beginNewChat()
+        model.draft = "Synthetic conversation A"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 1 && transport.streamStarts.count == 1 }
+        let first = try XCTUnwrap(transport.commands.first)
+        defer { transport.continuations[first.generationID]?.finish() }
+        await data.addConversation(ConversationRecord(id: first.conversationID.uuidString,
+            title: "Synthetic A", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        transport.emit(.textDelta("A"), for: first, sequence: 1)
+        try await waitUntil { model.messages.last?.content == "A" }
+        transport.recovery = ChatGenerationRecovery(admission: ChatAdmission(schemaVersion: 1,
+            jobID: first.generationID, generationID: first.generationID,
+            userMessageID: first.userMessageID, assistantMessageID: first.assistantMessageID,
+            status: "running", created: false, streamURL: URL(string: "https://isolated.mychat.invalid/events")!,
+            trialRemaining: nil, trialLimit: nil), sequence: 2, content: "A recovered", thinking: "", media: [], terminal: nil)
+        transport.holdRecovery = true
+        defer { transport.heldRecovery?.resume(); transport.heldRecovery = nil }
+        await model.resumeAuthentication()
+        try await waitUntil { transport.heldRecovery != nil }
+
+        model.beginNewChat()
+        model.draft = "Synthetic conversation B"
+        model.sendDraft()
+        try await waitUntil { transport.commands.count == 2 && transport.streamStarts.count == 2 }
+        let second = transport.commands[1]
+        defer { transport.continuations[second.generationID]?.finish() }
+        transport.emit(.textDelta("B"), for: second, sequence: 1)
+        try await waitUntil { model.messages.last?.content == "B" }
+        transport.holdRecovery = false
+        transport.recovery = nil
+        transport.heldRecovery?.resume()
+        transport.heldRecovery = nil
+        await data.addConversation(ConversationRecord(id: second.conversationID.uuidString,
+            title: "Synthetic B", updatedAt: "", projectID: nil, starred: false, pinned: false))
+        await model.reloadConversations()
+        await model.resumeAuthentication()
+        try await waitUntil { transport.recoveryReadCount >= 2 }
+        XCTAssertEqual(model.activeConversationID, second.conversationID)
+        XCTAssertTrue(model.messages.contains { $0.id == second.userMessageID })
+        XCTAssertFalse(model.messages.contains { $0.id == first.userMessageID || $0.id == first.assistantMessageID })
+        XCTAssertEqual(model.messages.last?.content, "B")
+        XCTAssertEqual(transport.streamStarts.count, 2, "A's late checkpoint must not attach against B's transcript")
+        XCTAssertEqual(transport.commands.count, 2)
+        XCTAssertTrue(transport.cancelCalls.isEmpty)
+        transport.complete(first, text: "A finished", sequence: 3)
+        transport.complete(second, text: "B finished", sequence: 2)
+        try await waitUntil { !model.isCurrentConversationGenerating }
+        XCTAssertEqual(model.messages.last?.content, "B finished")
+    }
+
     func testRecoveryNeverRelabelsPrivateThinkingAsPublicSummary() async throws {
         let publicSummary = "Checking the available evidence."
         let tagged = try XCTUnwrap(ChatReasoningSummaryStorage.encode(publicSummary))
@@ -3378,10 +3487,10 @@ import Combine
         }
     }
 
-    private func waitUntil(_ predicate: () -> Bool) async throws {
+    private func waitUntil(file: StaticString = #filePath, line: UInt = #line, _ predicate: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(1)
         while !predicate(), Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(predicate(), "Expected state did not arrive within one second")
+        XCTAssertTrue(predicate(), "Expected state did not arrive within one second", file: file, line: line)
         if !predicate() { throw CancellationError() }
     }
 
