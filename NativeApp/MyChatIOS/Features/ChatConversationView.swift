@@ -3895,6 +3895,15 @@ struct MarkdownBody: View {
                     UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)),
                     UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .semibold))
                 ]
+            case .reasoningSummary:
+                bodySize = MyChatTypography.reasoningSummaryBodySize
+                baseFonts = [
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .bold, serif: true), relativeTo: .body),
+                    MyChatSystemFont.scaledUIFont(MyChatSystemFont.uiFont(size: bodySize, weight: .regular, serif: true, italic: true), relativeTo: .body),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .regular)),
+                    UIFontMetrics(forTextStyle: .body).scaledFont(for: UIFont.monospacedSystemFont(ofSize: 16, weight: .semibold))
+                ]
             case .thought:
                 bodySize = MyChatTypography.thoughtBodySize
                 baseFonts = [
