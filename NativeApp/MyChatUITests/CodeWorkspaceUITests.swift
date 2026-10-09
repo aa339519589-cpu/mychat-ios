@@ -362,6 +362,33 @@ final class CodeWorkspaceUITests: XCTestCase {
         app.terminate()
     }
 
+    @MainActor func testOldRecoveryResponseCannotReplaceTheCurrentTaskEvidence() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-code-stale-recovery"]
+        app.launch()
+        defer { app.terminate() }
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10)); sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000064"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10)); row.tap()
+        let started = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "任务正在运行")).firstMatch
+        XCTAssertTrue(started.waitForExistence(timeout: 10))
+        let composer = app.buttons["code.session.send"]
+        composer.tap()
+        expectCodeComposer(composer, label: "发送编程消息")
+        // A's post-terminal GET is held. A fresh pull-to-refresh restores B first.
+        app.scrollViews.firstMatch.swipeDown()
+        let delivered = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "旧恢复响应已交付")).firstMatch
+        XCTAssertTrue(delivered.waitForExistence(timeout: 15), "The stale GET must really finish after B owns the stream")
+        let currentStatus = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == %@ AND label == %@", "code.task.status", "running · feature/current-task")).firstMatch
+        XCTAssertTrue(currentStatus.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "code.task.artifact.current-recovery-evidence").firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "code.task.artifact.previous-recovery-evidence").firstMatch.exists)
+        expectCodeComposer(composer, label: "停止 Code 任务", enabled: true)
+    }
+
     @MainActor func testLateCancelResponseKeepsTheIdleComposerUsable() {
         for fails in [false, true] {
             let app = openLateCodeCancelFixture(fails: fails)

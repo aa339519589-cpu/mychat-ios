@@ -238,6 +238,10 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     private static var lateCodeEndedA = false
     private static var lateCodeReplyScheduled = false
     private static var lateCodeReplyDelivered = false
+    private static var staleRecoveryEndedA = false
+    private static var staleRecoveryHeldRequest: NativeAuditURLProtocol?
+    private static var staleRecoveryHeldOnce = false
+    private static var staleRecoveryStreams: [String: NativeAuditURLProtocol] = [:]
     static var historicalTestContent: String?
     private static var addedMemories: [[String: Any]] = []
     private static var savedArtifacts: [[String: Any]] = []
@@ -251,6 +255,7 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         guard let url = request.url else { return }
+        if handleStaleCodeRecovery(url) { return }
         if handleLateCodeCancellation(url) { return }
         let path = url.path
         if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay"),
@@ -328,6 +333,77 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         let json = try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
         let text = String(data: json, encoding: .utf8)!
         client?.urlProtocol(self, didLoad: Data("id: \(sequence)\nevent: \(kind)\ndata: \(text)\n\n".utf8))
+    }
+
+    private func handleStaleCodeRecovery(_ url: URL) -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-stale-recovery") else { return false }
+        let jobID = url.pathComponents.dropLast().last ?? ""
+        if url.path == "/api/code/tasks", request.httpMethod == "GET" {
+            Self.lock.lock()
+            let endedA = Self.staleRecoveryEndedA
+            if endedA && !Self.staleRecoveryHeldOnce {
+                Self.staleRecoveryHeldOnce = true
+                Self.staleRecoveryHeldRequest = self
+                Self.lock.unlock()
+                return true
+            }
+            Self.lock.unlock()
+            _ = codeFixtureJSON(status: 200, payload: Self.staleRecoveryPayload(successor: endedA))
+            return true
+        }
+        guard url.path.hasPrefix("/api/v1/jobs/") else { return false }
+        if url.path.hasSuffix("/events") {
+            Self.lock.lock()
+            Self.staleRecoveryStreams[jobID] = self
+            let held = jobID == Self.lateCodeJobB ? Self.staleRecoveryHeldRequest : nil
+            if held != nil { Self.staleRecoveryHeldRequest = nil }
+            Self.lock.unlock()
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            codeFixtureFrame(1, kind: "text.delta", payload: ["text": jobID == Self.lateCodeJobB ? "新任务已接管" : "任务正在运行"])
+            if let held {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+                    guard held.codeFixtureJSON(status: 200,
+                        payload: Self.staleRecoveryPayload(successor: false, completed: true)) else { return }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                        self.codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；旧恢复响应已交付"])
+                    }
+                }
+            }
+            return true
+        }
+        guard url.path.hasSuffix("/cancel"), request.httpMethod == "POST", jobID == Self.lateCodeJobA else { return false }
+        Self.lock.lock()
+        Self.staleRecoveryEndedA = true
+        let stream = Self.staleRecoveryStreams[jobID]
+        Self.lock.unlock()
+        _ = codeFixtureJSON(status: 202, payload: ["jobId": jobID, "accepted": true,
+            "replayed": false, "status": "cancelling", "eventSeq": 1])
+        stream?.codeFixtureFrame(2, kind: "job.terminal", payload: ["status": "completed", "content": "旧任务已结束"])
+        if let stream { stream.client?.urlProtocolDidFinishLoading(stream) }
+        return true
+    }
+
+    private static func staleRecoveryPayload(successor: Bool, completed: Bool = false) -> [String: Any] {
+        let jobID = successor ? lateCodeJobB : lateCodeJobA
+        let responseID = successor ? "88000000-0000-4000-8000-000000000068" : "88000000-0000-4000-8000-000000000066"
+        let status = completed ? "completed" : "running"
+        let evidenceID = successor ? "current-recovery-evidence" : "previous-recovery-evidence"
+        let task: [String: Any] = ["id": lateCodeTask, "status": status,
+            "branch": successor ? "feature/current-task" : "main", "error": NSNull(), "pullRequestUrl": NSNull(),
+            "toolCalls": [], "artifacts": [["id": evidenceID, "kind": "summary",
+                "title": successor ? "当前任务记录" : "旧任务记录", "content": "隔离测试持久记录"]]]
+        let admission: Any
+        if completed {
+            admission = NSNull()
+        } else {
+            admission = ["schemaVersion": 1, "jobId": jobID,
+                "taskId": lateCodeTask, "responseId": responseID, "status": status, "created": false,
+                "streamUrl": "/api/v1/jobs/\(jobID)/events", "trialRemaining": NSNull(), "trialLimit": NSNull()] as [String: Any]
+        }
+        return ["sessionId": "80000000-0000-4000-8000-000000000064", "task": task,
+            "admission": admission, "operationAdmission": NSNull()]
     }
 
     private func handleLateCodeCancellation(_ url: URL) -> Bool {
@@ -559,7 +635,8 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "80000000-0000-4000-8000-000000000066", "repo": "mychat/test-app", "title": "修复登录边界", "created_at": date, "updated_at": date],
             ])
         case "/rest/v1/code_messages":
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel") {
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel")
+                || ProcessInfo.processInfo.arguments.contains("--ui-test-code-stale-recovery") {
                 return (200, ["88000000-0000-4000-8000-000000000066", "88000000-0000-4000-8000-000000000068"].map { id in
                     ["id": id, "session_id": "80000000-0000-4000-8000-000000000064", "role": "assistant",
                      "content": "隔离任务记录", "meta": NSNull(), "created_at": date] as [String: Any]
