@@ -377,8 +377,11 @@ final class CodeWorkspaceUITests: XCTestCase {
         let composer = app.buttons["code.session.send"]
         composer.tap()
         expectCodeComposer(composer, label: "发送编程消息")
-        // A's post-terminal GET is held. A fresh pull-to-refresh restores B first.
-        app.scrollViews.firstMatch.swipeDown()
+        // A's post-terminal GET is held. Foreground recovery must restore B first.
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        let successor = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "新任务已接管")).firstMatch
+        XCTAssertTrue(successor.waitForExistence(timeout: 15), "Foreground recovery must establish B before the stale-result assertion")
         let delivered = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "旧恢复响应已交付")).firstMatch
         XCTAssertTrue(delivered.waitForExistence(timeout: 15), "The stale GET must really finish after B owns the stream")
         let currentStatus = app.descendants(matching: .any).matching(NSPredicate(
