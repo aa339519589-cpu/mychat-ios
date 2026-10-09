@@ -31,7 +31,7 @@ enum MyChatTheme {
     static let sendActionSurface = thinking
     static let sendActionForeground = Color.white
     static let composerActionForeground = Color.dynamic(light: 0xFFFFFF, dark: 0x202020)
-    static let newChatSurface = Color.dynamic(light: 0x242424, dark: 0xF9F9F8)
+    static let newChatSurface = Color.dynamic(light: 0x6E6D67, dark: 0xAAA9A1)
     static let newChatForeground = Color.dynamic(light: 0xFFFFFF, dark: 0x242424)
     static let headerControlSurface = Color.dynamic(light: 0xFFFFFF, dark: 0x292929)
     static let settingsControlSurface = Color.dynamic(light: 0xF0EFEB, dark: 0x292929)

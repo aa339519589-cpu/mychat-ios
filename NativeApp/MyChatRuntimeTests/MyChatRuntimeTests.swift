@@ -11,6 +11,18 @@ import Combine
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
 
+    func testNewChatButtonUsesNeutralGraySurfaceInBothAppearances() {
+        func rgbBytes(_ color: Color, style: UIUserInterfaceStyle) -> [Int] {
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+                .getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            return [red, green, blue].map { Int(($0 * 255).rounded()) }
+        }
+
+        XCTAssertEqual(rgbBytes(MyChatTheme.newChatSurface, style: .light), [0x6E, 0x6D, 0x67])
+        XCTAssertEqual(rgbBytes(MyChatTheme.newChatSurface, style: .dark), [0xAA, 0xA9, 0xA1])
+    }
+
     func testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence() {
         XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。"), "正在核对资料。")
         XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果"), "开始整理结果")
