@@ -2153,7 +2153,46 @@ final class AppModel: ObservableObject {
 
     func codeCapabilities() async throws -> CodeCapabilities {
         let auth = try await refreshedSession()
-        return try await codeClient.capabilities(accessToken: auth.accessToken)
+        let value = try await codeClient.capabilities(accessToken: auth.accessToken)
+        try Task.checkCancellation()
+        guard authSession?.user.id == auth.user.id else { throw CancellationError() }
+        return value
+    }
+
+    func codeWorkspaceSnapshot(taskID: UUID, capability: CodeWorkspaceDiffCapability) async throws -> CodeWorkspaceReadSnapshot {
+        guard capability.isSupported else { throw CodeAPIError.workspaceDiffUnavailable }
+        let auth = try await refreshedSession()
+        guard let owner = UUID(uuidString: auth.user.id) else { throw CodeAPIError.invalidAccessToken }
+        async let state = codeClient.workspace(taskID: taskID, accessToken: auth.accessToken)
+        async let changes = codeClient.workspaceChanges(taskID: taskID, accessToken: auth.accessToken)
+        let (workspace, summary) = try await (state, changes)
+        try Task.checkCancellation()
+        guard authSession?.user.id == auth.user.id else { throw CancellationError() }
+        guard let binding = workspace.binding(taskID: taskID, userID: owner) else {
+            throw CodeAPIError.invalidRequest("工作区尚未保存可读取的快照")
+        }
+        guard summary.matches(binding) else {
+            throw CodeAPIError.invalidRequest("工作区已更新，请刷新后再查看差异")
+        }
+        return CodeWorkspaceReadSnapshot(binding: binding, changes: summary)
+    }
+
+    func codeWorkspaceDiff(snapshot: CodeWorkspaceReadSnapshot, path: String,
+                           capability: CodeWorkspaceDiffCapability) async throws -> CodeWorkspaceDiffResponse {
+        guard capability.isSupported else { throw CodeAPIError.workspaceDiffUnavailable }
+        let auth = try await refreshedSession()
+        guard UUID(uuidString: auth.user.id) == snapshot.binding.userID else { throw CancellationError() }
+        guard snapshot.changes.matches(snapshot.binding), snapshot.changes.changedFiles.contains(where: { $0.path == path }) else {
+            throw CodeAPIError.invalidRequest("文件不属于当前更改快照")
+        }
+        let value = try await codeClient.workspaceDiff(binding: snapshot.binding, path: path,
+            capability: capability, accessToken: auth.accessToken)
+        try Task.checkCancellation()
+        guard authSession?.user.id == auth.user.id else { throw CancellationError() }
+        guard value.isValid(for: snapshot.binding, path: path, capability: capability) else {
+            throw CodeAPIError.mismatchedResponse
+        }
+        return value
     }
 
     func openCodeLink(_ url: URL) {
@@ -2195,9 +2234,9 @@ final class AppModel: ObservableObject {
         return try await codeClient.apply(command, accessToken: session.accessToken)
     }
 
-    func cancelCodeRun(_ admission: CodeAdmission) async throws {
+    func cancelCodeRun(_ admission: CodeAdmission) async throws -> ChatCancelResponse {
         let session = try await refreshedSession()
-        _ = try await chatClient.cancel(
+        return try await chatClient.cancel(
             jobID: admission.jobID,
             accessToken: session.accessToken,
             reason: "user_requested"

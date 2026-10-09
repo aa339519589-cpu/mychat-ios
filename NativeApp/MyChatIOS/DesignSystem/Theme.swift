@@ -24,6 +24,8 @@ enum MyChatTheme {
     static let bubbleMidtone = Color.dynamic(light: 0xFDFDFB, dark: 0x181818)
     static let bubbleShade = Color.dynamic(light: 0xFAFAF8, dark: 0x151515)
     static let controlSurface = Color.dynamic(light: 0xF0EFED, dark: 0x303030)
+    static let composerControlSurface = Color.dynamic(light: 0xF0EFED, dark: 0x353535)
+    static let composerControlBorder = Color.dynamic(light: 0xF0EFED, dark: 0x464648)
     static let composerActionSurface = Color.dynamic(light: 0x171717, dark: 0xF8F8F6)
     static let thinking = Color.dynamic(light: 0xC86F4E, dark: 0xC86F4E)
     static let sendActionSurface = thinking
@@ -74,6 +76,8 @@ enum MyChatTypography {
     static let thoughtBody = MyChatSystemFont.serif(size: thoughtBodySize, weight: .regular, relativeTo: .body)
     static let thoughtStrong = MyChatSystemFont.serif(size: thoughtBodySize, weight: .bold, relativeTo: .body)
     static let thoughtItalic = MyChatSystemFont.italic(size: thoughtBodySize, relativeTo: .body)
+    static let reasoningSummaryBodySize: CGFloat = 19
+    static let reasoningSummaryBody = MyChatSystemFont.serif(size: reasoningSummaryBodySize, weight: .regular, relativeTo: .body)
     static let thoughtPreview = MyChatSystemFont.font(size: 17, weight: .regular, relativeTo: .body)
 
     static let userMessage = MyChatSystemFont.userMessageFont(size: 17.5, weight: .regular)
@@ -106,6 +110,8 @@ enum MyChatTypography {
     static let responseHanTracking: CGFloat = -0.55
     static let responseHanLineSpacing: CGFloat = 9.8
     static let thoughtBodyLineSpacing = responseBodyLineSpacing
+    static let reasoningSummaryBodyLineSpacing: CGFloat = 8
+    static let reasoningSummaryHanLineSpacing: CGFloat = 11
     static let thoughtHanLineSpacing = responseHanLineSpacing
     static let sidebarTracking: CGFloat = 0
     static let responseH1LineSpacing: CGFloat = 3
@@ -151,11 +157,10 @@ enum MyChatSystemFont {
     private static let weightAxis = NSNumber(value: 0x77676874)
 
     static let responseWebFontCSS: String = {
-        [("Newsreader16pt-Regular", "normal", 400), ("Newsreader16pt-Italic", "italic", 400),
-         ("Newsreader16pt-Bold", "normal", 700)].compactMap { name, style, weight in
-            guard let url = Bundle.main.url(forResource: name, withExtension: "ttf", subdirectory: "ReadingFonts"),
+        [("AnthropicSerif", "normal"), ("AnthropicSerifItalic", "italic")].compactMap { name, style in
+            guard let url = Bundle.main.url(forResource: name, withExtension: "woff2", subdirectory: "ResponseFonts"),
                   let data = try? Data(contentsOf: url) else { return nil }
-            return "@font-face { font-family: MyChatResponseSerif; src: url(data:font/ttf;base64,\(data.base64EncodedString())) format('truetype'); font-weight: \(weight); font-style: \(style); font-display: block; }"
+            return "@font-face { font-family: MyChatResponseSerif; src: url(data:font/woff2;base64,\(data.base64EncodedString())) format('woff2'); font-weight: 300 800; font-style: \(style); font-display: block; }"
         }.joined(separator: "\n")
     }()
     // Keep native font descriptors cached. Typography never loads or registers
@@ -256,7 +261,16 @@ enum MyChatSystemFont {
 
     static func appSerifUIFont(size: CGFloat, relativeTo textStyle: UIFont.TextStyle,
                               weight: UIFont.Weight = .regular) -> UIFont {
-        let serif = licensedSerif(size: size, weight: weight)
+        let reference = UIFont(name: "AnthropicSerifWebWeb-TextLight", size: size)
+            ?? UIFont.systemFont(ofSize: size, weight: weight)
+        let variations: [NSNumber: NSNumber] = [
+            weightAxis: NSNumber(value: weight.rawValue >= UIFont.Weight.semibold.rawValue ? 700 : 400),
+            NSNumber(value: 0x6F70737A): NSNumber(value: 16)
+        ]
+        let descriptor = reference.fontDescriptor.addingAttributes([
+            UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): variations
+        ])
+        let serif = UIFont(descriptor: descriptor, size: size)
         let withHan = appHan.map { serif.fontDescriptor.addingAttributes([.cascadeList: [$0]]) }
             .map { UIFont(descriptor: $0, size: size) } ?? serif
         return scaledUIFont(withHan, relativeTo: textStyle)
@@ -292,7 +306,15 @@ enum MyChatSystemFont {
     static func uiFont(size: CGFloat, weight: UIFont.Weight, serif: Bool = false, italic: Bool = false) -> UIFont {
         let base: UIFont
         if serif {
-            base = licensedSerif(size: size, weight: weight, italic: italic)
+            let bold = weight.rawValue >= UIFont.Weight.semibold.rawValue
+            let face = italic ? "AnthropicSerifWebWeb-TextLightItalic" : "AnthropicSerifWebWeb-TextLight"
+            let reference = UIFont(name: face, size: size) ?? UIFont.systemFont(ofSize: size, weight: weight)
+            let variations: [NSNumber: CGFloat] = [NSNumber(value: 0x77676874): bold ? 700 : 400,
+                                                   NSNumber(value: 0x6F70737A): 16]
+            let descriptor = reference.fontDescriptor.addingAttributes([
+                UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String): variations
+            ])
+            base = UIFont(descriptor: descriptor, size: size)
         } else {
             let system = UIFont.systemFont(ofSize: size, weight: weight)
             let descriptor = italic ? (system.fontDescriptor.withSymbolicTraits(.traitItalic) ?? system.fontDescriptor) : system.fontDescriptor
@@ -310,16 +332,6 @@ enum MyChatSystemFont {
 
     static func italic(size: CGFloat, relativeTo textStyle: UIFont.TextStyle) -> Font {
         Font(scaledUIFont(uiFont(size: size, weight: .medium, serif: true, italic: true), relativeTo: textStyle))
-    }
-
-    private static func licensedSerif(size: CGFloat, weight: UIFont.Weight, italic: Bool = false) -> UIFont {
-        let face = italic ? "Newsreader16pt-Italic"
-            : weight >= .bold ? "Newsreader16pt-Bold"
-            : weight >= .semibold ? "Newsreader16pt-SemiBold"
-            : weight >= .medium ? "Newsreader16pt-Medium" : "Newsreader16pt-Regular"
-        if let font = UIFont(name: face, size: size) { return font }
-        let system = UIFont.systemFont(ofSize: size, weight: weight)
-        return UIFont(descriptor: system.fontDescriptor.withDesign(.serif) ?? system.fontDescriptor, size: size)
     }
 
     static func rounded(size: CGFloat, weight: UIFont.Weight, relativeTo textStyle: UIFont.TextStyle) -> Font {

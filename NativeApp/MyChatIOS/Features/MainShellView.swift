@@ -46,8 +46,7 @@ struct MainShellView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var sidebarVisible = ProcessInfo.processInfo.arguments.contains("--sidebar")
-    @State private var modelPickerVisible = false
-    @State private var toolsVisible = false
+    @State private var activeComposerSheet: SheetTarget?
     @State private var settingsVisible = false
     @State private var historyVisible = false
     @State private var historyConversationVisible = false
@@ -64,7 +63,7 @@ struct MainShellView: View {
             NativeDrawerHost(
                 width: drawerWidth,
                 isOpen: $sidebarVisible,
-                blocked: settingsVisible || modelPickerVisible || toolsVisible,
+                blocked: settingsVisible || activeComposerSheet != nil,
                 reduceMotion: reduceMotion,
                 canvasLayout: canvasLayout,
                 navigationKey: CanvasNavigationKey(appModel: appModel, historyVisible: historyVisible,
@@ -100,30 +99,24 @@ struct MainShellView: View {
             ChatDocumentPreview(document: document).presentationDetents([.large])
                 .presentationCornerRadius(42).presentationBackground(MyChatTheme.canvas)
         }
-        .onChange(of: modelPickerVisible) { _, presented in
-            if presented { dismissKeyboard(); setChatRenderSuspended(true) }
-        }
-        .onChange(of: toolsVisible) { _, presented in
-            if presented { dismissKeyboard(); setChatRenderSuspended(true) }
-        }
-        .sheet(isPresented: $modelPickerVisible, onDismiss: {
+        .sheet(item: $activeComposerSheet, onDismiss: {
             setChatRenderSuspended(false)
-        }) {
-            ModelPickerSheet(close: { modelPickerVisible = false })
-                .environmentObject(appModel)
-                .presentationDetents([.fraction(0.62), .large])
-                .presentationContentInteraction(.resizes)
-                .presentationDragIndicator(.hidden)
-                .modifier(StableSheetPageSizing())
-                .modifier(MyChatSheetSurface())
-        }
-        .sheet(isPresented: $toolsVisible, onDismiss: {
-            setChatRenderSuspended(false)
-        }) {
-            ToolsSheet(close: { toolsVisible = false })
-                .environmentObject(appModel)
-                .presentationDragIndicator(.hidden)
-                .modifier(MyChatSheetSurface())
+        }) { target in
+            switch target {
+            case .models:
+                ModelPickerSheet(close: { activeComposerSheet = nil })
+                    .environmentObject(appModel)
+                    .presentationDetents([.fraction(0.62), .large])
+                    .presentationContentInteraction(.resizes)
+                    .presentationDragIndicator(.hidden)
+                    .modifier(StableSheetPageSizing())
+                    .modifier(MyChatSheetSurface())
+            case .tools:
+                ToolsSheet(close: { activeComposerSheet = nil })
+                    .environmentObject(appModel)
+                    .presentationDragIndicator(.hidden)
+                    .modifier(MyChatSheetSurface())
+            }
         }
         .fullScreenCover(item: $appModel.artifactPreview, onDismiss: {
             setChatRenderSuspended(false)
@@ -135,7 +128,7 @@ struct MainShellView: View {
     }
 
     private func presentPendingDocument() {
-        guard !settingsVisible, !sidebarVisible, !historyVisible, !toolsVisible, !modelPickerVisible,
+        guard !settingsVisible, !sidebarVisible, !historyVisible, activeComposerSheet == nil,
               automaticDocument == nil, appModel.selectedDestination == .chats,
               let document = appModel.pendingDocumentPreview else { return }
         NativeDocumentModalActivity.set(documentModalID, active: true)
@@ -205,17 +198,19 @@ struct MainShellView: View {
         settingsVisible = true
     }
 
-    private enum SheetTarget: Equatable { case models, tools }
+    private enum SheetTarget: String, Identifiable {
+        case models, tools
+        var id: String { rawValue }
+    }
 
     private func requestSheet(_ target: SheetTarget) {
-        guard !settingsVisible, !modelPickerVisible, !toolsVisible,
+        guard !settingsVisible, activeComposerSheet == nil,
               automaticDocument == nil, appModel.artifactPreview == nil else { return }
         dismissKeyboard()
-        // Suspend before presentation so a streaming layout cannot compete
-        // with the native sheet, dimming and interactive transition.
+        // One item-backed presenter serializes model/tools routes. Suspend before
+        // presentation so streaming layout cannot compete with the transition.
         setChatRenderSuspended(true)
-        if target == .models { modelPickerVisible = true }
-        else { toolsVisible = true }
+        activeComposerSheet = target
     }
 
     private func presentArtifact(_ artifact: ArtifactRecord) {
@@ -318,6 +313,11 @@ private struct MainCanvasView: View {
                     .background {
                         if !appModel.messages.isEmpty {
                             Rectangle().fill(.regularMaterial)
+                                .overlay {
+                                    if colorScheme == .dark {
+                                        MyChatTheme.canvas.opacity(0.9)
+                                    }
+                                }
                                 .mask {
                                     LinearGradient(stops: [
                                         .init(color: .black, location: 0),
@@ -671,7 +671,8 @@ enum DrawerMotion {
     static func intent(_ delta: CGPoint) -> Intent {
         let x = abs(delta.x), y = abs(delta.y)
         if y >= 8, y * 1.8 > x { return .vertical }
-        if x >= 12, x >= y * 1.8 { return .horizontal }
+        // Ignore small horizontal finger drift so compact controls keep their tap.
+        if x >= 24, x >= y * 1.8 { return .horizontal }
         return .undecided
     }
     static func shadeOpacity(progress: CGFloat) -> CGFloat {
@@ -2717,7 +2718,7 @@ private struct ArtifactLibraryDetail: View {
                         ConversationFilesSheet(documents: documents, showsHeader: false)
                     } else if let document = documents.first, document.isMarkdown {
                         DocumentTextContent(document: document)
-                    } else if blocks.contains(where: { ChatDocument.from($0) == nil }) {
+                    } else if documents.count < blocks.count {
                         ScrollView {
                             VStack(spacing: 18) {
                                 ForEach(blocks) { block in
@@ -2749,15 +2750,20 @@ private struct ArtifactLibraryDetail: View {
             Color.clear
                 .frame(width: 22)
                 .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 12)
+                .gesture(DragGesture(minimumDistance: 12, coordinateSpace: .global)
                     .onChanged { value in
                         guard !returning, value.translation.width > abs(value.translation.height) else { return }
+                        if returnOffset == 0 {
+                            auditReturn("begin", value: value, width: viewport.size.width, completes: false)
+                        }
                         returnOffset = max(0, value.translation.width)
                     }
                     .onEnded { value in
                         guard !returning else { return }
-                        if returnOffset > viewport.size.width * 0.28 ||
-                            (returnOffset > 45 && value.predictedEndTranslation.width > viewport.size.width * 0.55) {
+                        let completes = returnOffset > viewport.size.width * 0.28 ||
+                            (returnOffset > 45 && value.predictedEndTranslation.width > viewport.size.width * 0.55)
+                        auditReturn("end", value: value, width: viewport.size.width, completes: completes)
+                        if completes {
                             finishReturn(width: viewport.size.width)
                         } else {
                             withAnimation(.smooth(duration: 0.25)) { returnOffset = 0 }
@@ -2789,6 +2795,13 @@ private struct ArtifactLibraryDetail: View {
             }
         }
         }
+    }
+
+    private func auditReturn(_ phase: String, value: DragGesture.Value, width: CGFloat, completes: Bool) {
+        #if DEBUG
+        guard ProcessInfo.processInfo.arguments.contains("--artifact-motion-audit") else { return }
+        MyChatDebugLog.event("artifact return \(phase) start=\(value.startLocation) translation=\(value.translation) offset=\(returnOffset) width=\(width) threshold=\(width * 0.28) predicted=\(value.predictedEndTranslation.width) completes=\(completes)")
+        #endif
     }
 
     private func finishReturn(width: CGFloat) {
@@ -3048,19 +3061,49 @@ private struct ChatModelSelectionSheet: View {
     private func modelRows(_ models: [ModelCatalogItem], raised: Bool = true) -> some View {
         VStack(spacing: 0) {
             ForEach(models) { model in
+                let isSelected = model.id == appModel.selectedModelID
                 Button {
-                    if model.id != appModel.selectedModelID { HapticFeedback.play(.selection) }
+                    if !isSelected { HapticFeedback.play(.selection) }
                     appModel.selectModel(model); closeSheet()
                 } label: {
-                    HStack {
+                    HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(model.chatDisplayName).font(MyChatTypography.navigation)
-                            Text(description(model)).font(MyChatTypography.metadata).foregroundStyle(MyChatTheme.secondaryText)
+                            Text(model.chatDisplayName)
+                                .font(MyChatTypography.navigation)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(description(model))
+                                .font(MyChatTypography.metadata)
+                                .foregroundStyle(MyChatTheme.secondaryText)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Spacer()
-                        if model.id == appModel.selectedModelID { Image(systemName: "checkmark").foregroundStyle(selectionColor).font(.system(size: 20, weight: .medium)) }
-                    }.frame(minHeight: raised ? 70 : 62).contentShape(Rectangle())
-                }.buttonStyle(ModelSelectionPressStyle()).disabled(!model.isSelectable).opacity(model.isSelectable ? 1 : 0.5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(1)
+
+                        Group {
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(selectionColor)
+                                    .font(.system(size: 20, weight: .medium))
+                            } else {
+                                Color.clear
+                            }
+                        }
+                        .frame(width: 28, height: 28, alignment: .center)
+                        .frame(maxHeight: .infinity, alignment: .center)
+                        .accessibilityHidden(true)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: raised ? 70 : 62, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(ModelSelectionPressStyle())
+                .disabled(!model.isSelectable)
+                .opacity(model.isSelectable ? 1 : 0.5)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(model.chatDisplayName), \(description(model))")
+                .accessibilityValue(isSelected ? "已选择" : "未选择")
+                .accessibilityHint(model.isSelectable ? "双击选择此模型" : "此模型当前不可用")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .accessibilityIdentifier("model.option.\(model.id)")
                 if raised && model.id != models.last?.id { Divider() }
             }
         }

@@ -206,33 +206,78 @@ struct ArtifactLibraryCard: View {
     }
 }
 
+/// A preview of provider-returned public summary text. The complete summary
+/// remains available in the sheet; never pass unmarked private thinking here.
+enum PublicReasoningSummaryPreview {
+    static func text(_ summary: String?) -> String? {
+        guard let summary else { return nil }
+        let paragraphs = summary.split(whereSeparator: \.isNewline)
+        guard let paragraph = paragraphs.reversed().lazy.map({
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }).first(where: { !$0.isEmpty }) else { return nil }
+
+        // A stream may append new paragraphs or sentences to the same entry.
+        // Preview the latest real sentence (including its in-progress tail),
+        // rather than leaving the oldest first line on screen indefinitely.
+        var latest = paragraph
+        paragraph.enumerateSubstrings(in: paragraph.startIndex..<paragraph.endIndex,
+                                      options: [.bySentences, .reverse]) { sentence, _, _, stop in
+            guard let text = sentence?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else { return }
+            latest = text
+            stop = true
+        }
+        return latest
+    }
+}
+
 struct DocumentThoughtRow: View {
     let summary: String?
     let reasoningSummary: String?
     let isGenerating: Bool
     @State private var detailPresented = false
+
+    private var detailText: String {
+        for candidate in [reasoningSummary, summary] {
+            if let text = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                return text
+            }
+        }
+        return ""
+    }
+
+    private var previewText: String {
+        PublicReasoningSummaryPreview.text(detailText)
+            ?? (isGenerating ? "正在思考…" : "思考完成")
+    }
+
     var body: some View {
         Button { detailPresented = true } label: {
             HStack(spacing: 8) {
-                DotThinkingView(isGenerating: isGenerating, isSuspended: detailPresented)
-                    .frame(width: 32, height: 32)
-                Text(summary ?? (isGenerating ? "正在思考…" : "思考完成"))
-                    .font(MyChatTypography.caption).lineLimit(1)
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(MyChatSystemFont.appFont(size: 15))
+                    .accessibilityHidden(true)
+                Text(previewText)
+                    .font(MyChatTypography.appStatus).lineLimit(1)
                 Image(systemName: "chevron.right").font(MyChatSystemFont.appFont(size: 12))
             }
             .foregroundStyle(MyChatTheme.secondaryText)
             .frame(minHeight: 40, alignment: .leading).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).accessibilityLabel("查看思考摘要").accessibilityIdentifier("document.thinking")
+        .buttonStyle(.plain).disabled(detailText.isEmpty)
+        .accessibilityLabel("查看思考摘要").accessibilityValue(previewText)
+        .accessibilityIdentifier("document.thinking")
         .sheet(isPresented: $detailPresented) {
             VStack(spacing: 0) {
                 ChatSheetHeader(title: "思考摘要")
                 ScrollView {
-                    MarkdownBody(reasoningSummary ?? summary ?? "", typography: .response)
+                    MarkdownBody(detailText, typography: .reasoningSummary)
                         .padding(20).frame(maxWidth: .infinity, alignment: .leading)
                         .accessibilityIdentifier("document.thinking.content")
                 }
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("document.thinking.sheet")
             .background(MyChatTheme.canvas)
             .presentationDetents([.medium, .large]).presentationCornerRadius(34)
         }

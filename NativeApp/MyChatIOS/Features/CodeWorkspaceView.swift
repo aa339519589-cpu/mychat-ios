@@ -7,14 +7,9 @@ struct CodeLanding: View {
     @State private var newSessionPresented = false
     @State private var selectedSession: CodeSessionRecord?
     @State private var deletionError: String?
-    @State private var toolsPresented = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { toolsPresented = true } label: {
-                Label("工具与连接器", systemImage: "wrench.and.screwdriver")
-                    .frame(minHeight: 44)
-            }.padding(.horizontal, 20).accessibilityIdentifier("code.tools")
             if appModel.codeSessions.isEmpty {
                 Spacer()
                 VStack(spacing: 20) {
@@ -128,13 +123,6 @@ struct CodeLanding: View {
             CodeNewSessionView()
                 .environmentObject(appModel)
         }
-        .sheet(isPresented: $toolsPresented) {
-            NavigationStack {
-                MCPConnectorsSettingsView().environmentObject(appModel)
-                    .navigationTitle("Code 工具")
-                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { toolsPresented = false } } }
-            }
-        }
         .fullScreenCover(item: $selectedSession) { session in
             CodeSessionDetailView(session: session)
                 .environmentObject(appModel)
@@ -182,59 +170,6 @@ struct CodeLanding: View {
     }
 }
 
-private struct CodeSwipeBackModifier: ViewModifier {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var horizontalOffset: CGFloat = 0
-    @State private var isTracking = false
-
-    func body(content: Content) -> some View {
-        GeometryReader { proxy in
-            content
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .offset(x: horizontalOffset)
-                .shadow(
-                    color: .black.opacity(horizontalOffset > 0 ? 0.12 : 0),
-                    radius: 10,
-                    x: -4
-                )
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 10, coordinateSpace: .global)
-                        .onChanged { value in
-                            guard value.startLocation.x <= 44 else { return }
-                            let horizontal = value.translation.width
-                            let vertical = abs(value.translation.height)
-                            guard isTracking || (horizontal > 0 && horizontal > vertical * 1.15) else { return }
-                            isTracking = true
-                            horizontalOffset = min(proxy.size.width, max(0, horizontal))
-                        }
-                        .onEnded { value in
-                            guard isTracking else { return }
-                            isTracking = false
-                            let projected = max(value.translation.width, value.predictedEndTranslation.width)
-                            let completes = projected >= max(88, proxy.size.width * 0.26)
-                            if completes {
-                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
-                                    horizontalOffset = proxy.size.width
-                                }
-                                DispatchQueue.main.asyncAfter(deadline: .now() + (reduceMotion ? 0 : 0.18)) {
-                                    var transaction = Transaction()
-                                    transaction.disablesAnimations = true
-                                    withTransaction(transaction) { dismiss() }
-                                    horizontalOffset = 0
-                                }
-                            } else {
-                                withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.88)) {
-                                    horizontalOffset = 0
-                                }
-                            }
-                        }
-                )
-        }
-    }
-}
-
 private struct CodeSendButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -256,11 +191,23 @@ private struct CodeSessionDetailView: View {
     @State private var errorMessage: String?
     @State private var draft = ""
     @State private var activeAdmission: CodeAdmission?
+    @State private var isCancelling = false
+    @State private var eventSubscription: Task<Void, Never>?
+    @State private var eventSubscriptionJobID: UUID?
+    @State private var eventSubscriptionToken: UUID?
+    // Keep ownership while a finished stream refreshes its persisted task evidence.
+    @State private var latestEventSubscriptionToken: UUID?
+    @State private var cancellationReconciliation: Task<Void, Never>?
+    @State private var cancellationReconciliationToken: UUID?
+    @State private var cancellationPending = false
+    @State private var cancellationRetryAllowed = false
     @State private var streamedResponseID: UUID?
     @State private var streamedContent = ""
     @State private var steps: [CodeAgentStep] = []
     @State private var toolActivities: [ChatToolActivity] = []
     @State private var taskDetail: CodeTaskDetail?
+    @State private var isReplayingTerminalRecovery = false
+    @State private var terminalReplayFailed = false
     @State private var branch = ""
     @State private var isRecovering = false
     @State private var hasSavedSettings = false
@@ -313,39 +260,9 @@ private struct CodeSessionDetailView: View {
                                 .frame(width: 44, height: 44)
                         }
                         .buttonStyle(MyChatIconButtonStyle())
+                        .accessibilityLabel("返回 Code")
+                        .accessibilityIdentifier("code.session.back")
                         Spacer()
-                        if let activeAdmission {
-                            Button {
-                                Task { await stop(activeAdmission) }
-                            } label: {
-                                Image(systemName: "stop.fill")
-                                    .font(MyChatSystemFont.appFont(size: 14, weight: .bold))
-                                    .frame(width: 44, height: 44)
-                            }
-                            .buttonStyle(MyChatIconButtonStyle())
-                            .accessibilityLabel("停止 Code 任务")
-                        }
-                        Menu {
-                            Button(role: .destructive) {
-                                Task {
-                                    do {
-                                        try await appModel.deleteCodeSession(session)
-                                        dismiss()
-                                    } catch {
-                                        errorMessage = error.localizedDescription
-                                    }
-                                }
-                            } label: {
-                                Label("删除会话", systemImage: "trash")
-                            }
-                        } label: {
-                            Image(systemName: "ellipsis")
-                                .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(MyChatIconButtonStyle())
-                        .disabled(activeAdmission != nil || isAdmitting)
-                        .accessibilityLabel("编程会话操作")
                     }
                 }
                 .padding(.horizontal, 16)
@@ -360,7 +277,11 @@ private struct CodeSessionDetailView: View {
                         Text(PresentationText.plain(errorMessage))
                             .foregroundStyle(MyChatTheme.secondaryText)
                             .multilineTextAlignment(.center)
-                        Button("重试") { Task { await load() } }
+                        if terminalReplayFailed {
+                            terminalReplayRetryButton
+                        } else {
+                            Button("重试") { Task { await load() } }
+                        }
                     }
                     .padding(24)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -376,10 +297,18 @@ private struct CodeSessionDetailView: View {
                                     activeAdmission != nil && message.id.lowercased() == streamedResponseID?.uuidString.lowercased())
                             }
 
-                            if isAdmitting || activeAdmission != nil {
+                            if isAdmitting || (activeAdmission != nil && !isTerminalCodeStatus(activeAdmission?.status)) {
                                 DotThinkingView(isGenerating: true)
                                     .frame(width: 48, height: 48)
                                     .accessibilityLabel("编程任务正在处理")
+                            }
+
+                            if isReplayingTerminalRecovery {
+                                Label("正在恢复任务记录", systemImage: "arrow.clockwise")
+                                    .font(MyChatTypography.caption)
+                                    .foregroundStyle(MyChatTheme.secondaryText)
+                                    .accessibilityLabel("正在恢复已完成任务的记录")
+                                    .accessibilityIdentifier("code.terminal-replay")
                             }
 
                             if !steps.isEmpty {
@@ -399,6 +328,7 @@ private struct CodeSessionDetailView: View {
                                 Label(activity.toolName, systemImage: activity.isComplete ? "checkmark.circle" : "gearshape")
                                     .font(MyChatTypography.appStatus)
                                     .accessibilityLabel("\(activity.toolName)，\(activity.isComplete ? "已完成" : "正在执行")")
+                                    .accessibilityIdentifier("code.live-tool.\(activity.toolCallID)")
                             }
                             ForEach(Array(memoryChanges.enumerated()), id: \.offset) { _, change in
                                 HStack(spacing: 8) {
@@ -420,6 +350,7 @@ private struct CodeSessionDetailView: View {
                                     ForEach(plans) { action in
                                         Label(PresentationText.plain(action.summary), systemImage: planSymbol(action.kind))
                                             .font(MyChatSystemFont.appFont(size: 14, design: .monospaced, weight: .regular))
+                                            .accessibilityIdentifier("code.plan.\(action.id.uuidString.lowercased())")
                                     }
                                 }
                                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -431,10 +362,14 @@ private struct CodeSessionDetailView: View {
                             if let taskDetail { CodeTaskEvidenceView(detail: taskDetail) }
 
                             if let errorMessage, !errorMessage.isEmpty {
-                                Text(PresentationText.plain(errorMessage))
-                                    .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
-                                    .foregroundStyle(Color.red)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(PresentationText.plain(errorMessage))
+                                        .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
+                                        .foregroundStyle(Color.red)
+                                        .accessibilityIdentifier("code.session.error")
+                                    if terminalReplayFailed { terminalReplayRetryButton }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             }
 
                             if canRequestPublish {
@@ -470,6 +405,7 @@ private struct CodeSessionDetailView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("打开编程操作")
+                    .disabled(isReplayingTerminalRecovery || terminalReplayFailed)
 
                     TextField("向 MyChat 编程发送消息", text: $draft, axis: .vertical)
                         .font(MyChatTypography.composerText)
@@ -478,22 +414,48 @@ private struct CodeSessionDetailView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 10)
                         .accessibilityIdentifier("code.session.draft")
+                        .disabled(isReplayingTerminalRecovery || terminalReplayFailed)
                     Button {
-                        Task { await send() }
+                        if let activeAdmission {
+                            Task { await stop(activeAdmission) }
+                        } else {
+                            Task { await send() }
+                        }
                     } label: {
                         ZStack {
                             Circle()
                                 .fill(MyChatTheme.brand)
                                 .frame(width: 40, height: 40)
-                            Image(systemName: "arrow.up")
-                                .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
-                                .foregroundStyle(MyChatTheme.onBrand)
+                            if isCancelling || (activeAdmission == nil && (isAdmitting || isApplying)) {
+                                ProgressView().tint(MyChatTheme.onBrand)
+                            } else if activeAdmission != nil {
+                                Image(systemName: "stop.fill")
+                                    .font(MyChatSystemFont.appFont(size: 15, weight: .bold))
+                                    .foregroundStyle(MyChatTheme.onBrand)
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(MyChatSystemFont.appFont(size: 17, weight: .bold))
+                                    .foregroundStyle(MyChatTheme.onBrand)
+                            }
                         }
                         .frame(width: 44, height: 44)
                     }
                     .buttonStyle(CodeSendButtonStyle())
-                    .disabled(!canSend)
-                    .opacity(canSend ? 1 : 0.45)
+                    .disabled(isCancelling || (cancellationPending && !cancellationRetryAllowed)
+                        || (activeAdmission == nil && (isAdmitting || isApplying || isReplayingTerminalRecovery || !canSend)))
+                    .opacity(activeAdmission != nil || canSend ? 1 : 0.45)
+                    .accessibilityLabel(activeAdmission != nil
+                        ? (isCancelling ? "正在停止 Code 任务"
+                            : (cancellationPending
+                                ? (cancellationRetryAllowed ? "重试停止 Code 任务" : "等待停止确认")
+                                : "停止 Code 任务"))
+                        : ((isAdmitting || isApplying) ? "正在处理 Code 任务"
+                            : (isReplayingTerminalRecovery ? "正在恢复任务记录" : "发送编程消息")))
+                    .accessibilityHint(activeAdmission != nil
+                        ? (cancellationPending
+                            ? (cancellationRetryAllowed ? "取消状态待确认；可重试同一任务" : "云端正在确认取消")
+                            : "取消正在运行的云端任务")
+                        : "发送 Code 任务")
                     .accessibilityIdentifier("code.session.send")
                 }
                 .padding(.horizontal, 6)
@@ -518,7 +480,7 @@ private struct CodeSessionDetailView: View {
                 consumedInitialTurn = true
                 prepare(initialTurn)
                 isLoading = false
-                await consume(initialTurn.admission)
+                startConsuming(initialTurn.admission)
             } else {
                 await load()
                 await recover()
@@ -528,7 +490,10 @@ private struct CodeSessionDetailView: View {
             saveSessionDraft()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, activeAdmission == nil { Task { await load(); await recover() } }
+            if phase == .active, activeAdmission == nil,
+               !isReplayingTerminalRecovery, !terminalReplayFailed {
+                Task { await load(); await recover() }
+            }
         }
         .sheet(item: $commandDestination) { destination in
             actionSheet(destination)
@@ -556,7 +521,7 @@ private struct CodeSessionDetailView: View {
             .presentationDragIndicator(.visible)
             .presentationBackground(MyChatTheme.canvas)
         }
-        .modifier(CodeSwipeBackModifier())
+
     }
 
     private func load() async {
@@ -577,7 +542,7 @@ private struct CodeSessionDetailView: View {
     }
 
     private func recover() async {
-        guard activeAdmission == nil, !isRecovering else { return }
+        guard activeAdmission == nil, !isRecovering, !isReplayingTerminalRecovery else { return }
         isRecovering = true
         defer { isRecovering = false }
         do {
@@ -588,7 +553,6 @@ private struct CodeSessionDetailView: View {
             }
             if let admission = recovery.operationAdmission ?? recovery.admission {
                 lastTaskID = admission.taskID
-                activeAdmission = admission
                 streamedResponseID = recovery.admission?.responseID ?? admission.responseID ?? admission.taskID
                 // Replay from zero rebuilds tool plans, receipts and text as one
                 // consistent snapshot; the stream verifies monotonic sequence.
@@ -596,7 +560,25 @@ private struct CodeSessionDetailView: View {
                 steps = []
                 plans = []
                 toolActivities = []
-                await consume(admission)
+                memoryChanges = []
+                receipt = nil
+                if isTerminalCodeStatus(recovery.trackingStatus) {
+                    activeAdmission = nil
+                    isCancelling = false
+                    cancellationPending = false
+                    cancellationRetryAllowed = false
+                    errorMessage = nil
+                    terminalReplayFailed = false
+                    isReplayingTerminalRecovery = true
+                    startConsuming(admission, terminalReplay: true)
+                } else {
+                    activeAdmission = admission
+                    terminalReplayFailed = false
+                    isReplayingTerminalRecovery = false
+                    startConsuming(admission)
+                }
+            } else {
+                isReplayingTerminalRecovery = false
             }
         } catch { errorMessage = error.localizedDescription }
     }
@@ -611,6 +593,7 @@ private struct CodeSessionDetailView: View {
         CodeSendEligibility.canSubmit(
             draft: draft,
             isBusy: activeAdmission != nil || isAdmitting || isApplying
+                || isReplayingTerminalRecovery || terminalReplayFailed
         )
     }
 
@@ -620,9 +603,22 @@ private struct CodeSessionDetailView: View {
 
     private var canRequestPublish: Bool {
         activeAdmission == nil
+            && !isReplayingTerminalRecovery
+            && !terminalReplayFailed
             && lastTaskID != nil
             && (!isProvisionalRepository || !plans.isEmpty)
             && receipt == nil
+    }
+
+    private var terminalReplayRetryButton: some View {
+        Button("重新读取任务记录") {
+            Task {
+                terminalReplayFailed = false
+                errorMessage = nil
+                await recover()
+            }
+        }
+        .accessibilityIdentifier("code.terminal-replay.retry")
     }
 
     private func content(for message: CodeMessageRecord) -> String {
@@ -679,7 +675,7 @@ private struct CodeSessionDetailView: View {
                 branch: branch.isEmpty ? nil : branch)
             prepare(start)
             isAdmitting = false
-            await consume(start.admission)
+            startConsuming(start.admission)
         } catch {
             isAdmitting = false
             messages.removeAll { $0.id == localID }
@@ -778,8 +774,31 @@ private struct CodeSessionDetailView: View {
         }
     }
 
-    private func consume(_ admission: CodeAdmission) async {
+    @MainActor private func startConsuming(_ admission: CodeAdmission, terminalReplay: Bool = false) {
+        guard eventSubscriptionJobID != admission.jobID || eventSubscription == nil else { return }
+        eventSubscription?.cancel()
+        let token = UUID()
+        eventSubscriptionJobID = admission.jobID
+        eventSubscriptionToken = token
+        latestEventSubscriptionToken = token
+        eventSubscription = Task { @MainActor in
+            await consume(admission, subscriptionToken: token, terminalReplay: terminalReplay)
+            if eventSubscriptionToken == token {
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+                if terminalReplay { isReplayingTerminalRecovery = false }
+            }
+        }
+    }
+
+    @MainActor private func consume(
+        _ admission: CodeAdmission,
+        subscriptionToken: UUID,
+        terminalReplay: Bool = false
+    ) async {
         var terminalError: String?
+        var terminalReceived = false
         do {
             let events = try await appModel.codeEvents(for: admission)
             eventLoop: for try await event in events {
@@ -796,6 +815,7 @@ private struct CodeSessionDetailView: View {
                 case let .agentPlan(plan):
                     if !plans.contains(where: { samePlan($0, plan) }) { plans.append(plan) }
                 case let .terminal(terminal):
+                    terminalReceived = true
                     if !terminal.content.isEmpty { streamedContent = terminal.content }
                     receipt = terminal.codeReceipt
                     if terminal.status == .failed {
@@ -810,22 +830,234 @@ private struct CodeSessionDetailView: View {
                 }
             }
             errorMessage = terminalError
+        } catch is CancellationError {
+            if Task.isCancelled { return }
+            errorMessage = "Code 任务事件流已取消，请刷新恢复状态"
         } catch {
             errorMessage = error.localizedDescription
         }
+        guard eventSubscriptionToken == subscriptionToken,
+              eventSubscriptionJobID == admission.jobID else { return }
         if let id = streamedResponseID,
            let index = messages.firstIndex(where: { $0.id.lowercased() == id.uuidString.lowercased() }) {
             messages[index].content = streamedContent
         }
+        if terminalReplay {
+            if !terminalReceived {
+                terminalReplayFailed = true
+                if errorMessage == nil {
+                    errorMessage = "已完成任务的事件记录尚未完整，请重试读取"
+                }
+                streamedContent = ""
+                steps = []
+                plans = []
+                toolActivities = []
+                memoryChanges = []
+                receipt = nil
+            } else {
+                terminalReplayFailed = false
+            }
+            await load()
+            if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
+                taskDetail = recovery.task
+                if let task = recovery.task { branch = task.branch }
+            }
+            if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
+            return
+        }
+        // A terminal replay keeps its token until the owning Task clears the
+        // replay flag after the persisted state refresh. Live streams release
+        // their handle here so a still-running job can be resubscribed below.
+        eventSubscription = nil
+        eventSubscriptionJobID = nil
+        eventSubscriptionToken = nil
+        if cancellationPending && !terminalReceived {
+            activeAdmission = admission
+            isCancelling = false
+            await load()
+            do {
+                let recovery = try await appModel.recoverCodeTask(sessionID: session.id)
+                guard activeAdmission?.jobID == admission.jobID else { return }
+                taskDetail = recovery.task
+                if let task = recovery.task { branch = task.branch }
+                let recoveredAdmission = recovery.operationAdmission ?? recovery.admission
+                if isTerminalCodeStatus(recovery.trackingStatus) {
+                    activeAdmission = nil
+                    cancellationPending = false
+                    cancellationRetryAllowed = false
+                    errorMessage = nil
+                    cancellationReconciliation?.cancel()
+                    cancellationReconciliation = nil
+                    cancellationReconciliationToken = nil
+                    await load()
+                } else if let recoveredAdmission, recoveredAdmission.jobID == admission.jobID {
+                    activeAdmission = recoveredAdmission
+                    cancellationRetryAllowed = recoveredAdmission.status.lowercased() != "cancelling"
+                    startConsuming(recoveredAdmission)
+                }
+            } catch {
+                errorMessage = "无法确认 Code 任务状态：\(error.localizedDescription)"
+            }
+            if activeAdmission?.jobID == admission.jobID,
+               cancellationPending,
+               cancellationReconciliation == nil {
+                scheduleCancellationReconciliation(for: admission)
+            }
+            if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
+            return
+        }
         activeAdmission = nil
+        isCancelling = false
+        cancellationPending = false
+        cancellationRetryAllowed = false
+        cancellationReconciliation?.cancel()
+        cancellationReconciliation = nil
+        cancellationReconciliationToken = nil
         await load()
-        if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) { taskDetail = recovery.task }
+        if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
+            guard latestEventSubscriptionToken == subscriptionToken else { return }
+            taskDetail = recovery.task
+            if let task = recovery.task { branch = task.branch }
+            if let admission = recovery.operationAdmission ?? recovery.admission,
+               !isTerminalCodeStatus(recovery.trackingStatus) {
+                lastTaskID = admission.taskID
+                activeAdmission = admission
+                streamedResponseID = recovery.admission?.responseID ?? admission.responseID ?? admission.taskID
+                streamedContent = ""
+                steps = []
+                plans = []
+                toolActivities = []
+                startConsuming(admission)
+            }
+        }
         if !memoryChanges.isEmpty { await appModel.reloadMemoryData() }
     }
 
-    private func stop(_ admission: CodeAdmission) async {
-        do { try await appModel.cancelCodeRun(admission) }
-        catch { errorMessage = error.localizedDescription }
+    @MainActor private func stop(_ admission: CodeAdmission) async {
+        guard !isCancelling,
+              (!cancellationPending || cancellationRetryAllowed),
+              activeAdmission?.jobID == admission.jobID else { return }
+        isCancelling = true
+        cancellationRetryAllowed = false
+        errorMessage = nil
+        do {
+            let response = try await appModel.cancelCodeRun(admission)
+            guard activeAdmission?.jobID == admission.jobID else { return }
+            guard response.jobID == admission.jobID else {
+                isCancelling = false
+                errorMessage = "取消响应与当前 Code 任务不匹配"
+                return
+            }
+            if isTerminalCodeStatus(response.status) {
+                _ = await reconcileCancellation(admission, confirmedTerminalStatus: response.status)
+            } else {
+                isCancelling = false
+                cancellationPending = true
+                cancellationRetryAllowed = !(response.accepted || response.replayed)
+                errorMessage = response.accepted || response.replayed
+                    ? "取消请求已提交，正在等待云端状态"
+                    : "取消请求尚未确认，可以重试"
+                scheduleCancellationReconciliation(for: admission)
+            }
+        } catch {
+            guard activeAdmission?.jobID == admission.jobID else { return }
+            errorMessage = error.localizedDescription
+            isCancelling = false
+            cancellationPending = true
+            cancellationRetryAllowed = true
+            scheduleCancellationReconciliation(for: admission)
+        }
+    }
+
+    @MainActor private func scheduleCancellationReconciliation(for admission: CodeAdmission) {
+        guard cancellationReconciliation == nil else { return }
+        let token = UUID()
+        cancellationReconciliationToken = token
+        cancellationReconciliation = Task { @MainActor in
+            var delay: UInt64 = 2_000_000_000
+            while !Task.isCancelled, activeAdmission?.jobID == admission.jobID, cancellationPending {
+                do { try await Task.sleep(nanoseconds: delay) }
+                catch { break }
+                guard activeAdmission?.jobID == admission.jobID, cancellationPending else { break }
+                if isCancelling { continue }
+                if await reconcileCancellation(admission) { break }
+                delay = min(delay * 2, 15_000_000_000)
+            }
+            if cancellationReconciliationToken == token {
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+            }
+        }
+    }
+
+    @MainActor private func reconcileCancellation(_ admission: CodeAdmission, confirmedTerminalStatus: String? = nil) async -> Bool {
+        guard activeAdmission?.jobID == admission.jobID else { return true }
+        do {
+            let recovery = try await appModel.recoverCodeTask(sessionID: session.id)
+            guard activeAdmission?.jobID == admission.jobID else { return true }
+            taskDetail = recovery.task
+            if let task = recovery.task { branch = task.branch }
+            let currentAdmission = recovery.operationAdmission ?? recovery.admission
+            let terminal = isTerminalCodeStatus(confirmedTerminalStatus)
+                || isTerminalCodeStatus(recovery.trackingStatus)
+
+            if terminal {
+                activeAdmission = nil
+                isCancelling = false
+                cancellationPending = false
+                cancellationRetryAllowed = false
+                errorMessage = nil
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+                let oldSubscription = eventSubscription
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+                oldSubscription?.cancel()
+                await load()
+                return true
+            }
+
+            if let currentAdmission, currentAdmission.jobID == admission.jobID {
+                activeAdmission = currentAdmission
+            }
+            isCancelling = false
+            cancellationPending = true
+            let status = currentAdmission?.status ?? recovery.task?.status ?? "未知"
+            cancellationRetryAllowed = status.lowercased() != "cancelling"
+            errorMessage = status.lowercased() == "cancelling"
+                ? "云端仍在处理取消，状态将继续同步"
+                : "任务仍在运行（\(status)），可重试停止"
+            return false
+        } catch {
+            guard activeAdmission?.jobID == admission.jobID else { return true }
+            if isTerminalCodeStatus(confirmedTerminalStatus) {
+                activeAdmission = nil
+                isCancelling = false
+                cancellationPending = false
+                cancellationRetryAllowed = false
+                cancellationReconciliation = nil
+                cancellationReconciliationToken = nil
+                let oldSubscription = eventSubscription
+                eventSubscription = nil
+                eventSubscriptionJobID = nil
+                eventSubscriptionToken = nil
+                oldSubscription?.cancel()
+                await load()
+                errorMessage = "任务已结束，但无法刷新最新状态：\(error.localizedDescription)"
+                return true
+            }
+            isCancelling = false
+            cancellationPending = true
+            cancellationRetryAllowed = true
+            errorMessage = "无法确认 Code 任务状态：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func isTerminalCodeStatus(_ status: String?) -> Bool {
+        guard let status else { return false }
+        return ["completed", "failed", "cancelled", "canceled"].contains(status.lowercased())
     }
 
     private func requestPublish() async {
@@ -841,7 +1073,7 @@ private struct CodeSessionDetailView: View {
                 confirmation = request
             case let .accepted(admission):
                 activeAdmission = admission
-                await consume(admission)
+                startConsuming(admission)
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -861,7 +1093,7 @@ private struct CodeSessionDetailView: View {
             }
             confirmation = nil
             activeAdmission = admission
-            await consume(admission)
+            startConsuming(admission)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -899,34 +1131,259 @@ private struct CodeSessionDetailView: View {
 }
 
 private struct CodeTaskEvidenceView: View {
+    @EnvironmentObject private var appModel: AppModel
     let detail: CodeTaskDetail
+    @State private var diffCapability: CodeWorkspaceDiffCapability?
+    @State private var showsDiff = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("\(detail.status) · \(detail.branch)", systemImage: "cloud")
                 .font(MyChatTypography.caption)
+                .accessibilityIdentifier("code.task.status")
+            if let error = CodeTaskErrorPresentation.concise(detail.error) {
+                Text(error)
+                    .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("任务错误：\(error)")
+                    .accessibilityIdentifier("code.task.error")
+            }
             ForEach(detail.toolCalls) { tool in
                 DisclosureGroup("\(tool.toolName) · \(tool.status)") {
-                    if let error = tool.error { Text(error).foregroundStyle(.red) }
+                    if let error = CodeTaskErrorPresentation.concise(tool.error) {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .accessibilityLabel("工具错误：\(error)")
+                            .accessibilityIdentifier("code.task.tool.error.\(tool.id)")
+                    }
                     if let output = tool.output,
                        let data = try? JSONEncoder().encode(output),
                        let text = String(data: data, encoding: .utf8) {
-                        ScrollView(.horizontal) { Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) }
+                        ScrollView(.horizontal) {
+                            Text(text)
+                                .font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("code.task.tool.output.\(tool.id)")
+                        }
                     }
                     if let duration = tool.durationMs { Text("\(duration) ms").font(MyChatTypography.caption) }
-                }.padding(.vertical, 8)
+                }
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("code.task.tool.\(tool.id)")
             }
             ForEach(detail.artifacts) { artifact in
                 DisclosureGroup(artifact.title ?? artifact.kind) {
                     if let content = artifact.content {
-                        ScrollView(.horizontal) { Text(content).font(.system(size: 12, design: .monospaced)).textSelection(.enabled) }
+                        ScrollView(.horizontal) {
+                            Text(content)
+                                .font(.system(size: 12, design: .monospaced))
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("code.task.artifact.content.\(artifact.id)")
+                        }
                     }
-                }.padding(.vertical, 8)
+                }
+                .padding(.vertical, 8)
+                .accessibilityIdentifier("code.task.artifact.\(artifact.id)")
             }
             if let raw = detail.pullRequestUrl, let url = URL(string: raw),
                url.scheme == "https", url.host == "github.com", url.user == nil, url.password == nil {
                 Link("打开 GitHub PR", destination: url).frame(minHeight: 44)
             }
-        }.accessibilityIdentifier("code.evidence")
+            if diffCapability != nil, UUID(uuidString: detail.id) != nil {
+                Button("查看文件差异") { showsDiff = true }
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("code.diff.open")
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("code.evidence")
+        .task(id: (appModel.authSession?.user.id ?? "") + ":" + detail.id) {
+            diffCapability = nil
+            showsDiff = false
+            guard let capabilities = try? await appModel.codeCapabilities(), !Task.isCancelled else { return }
+            diffCapability = capabilities.supportedWorkspaceDiff
+        }
+        .sheet(isPresented: $showsDiff) {
+            if let capability = diffCapability, let taskID = UUID(uuidString: detail.id) {
+                CodeWorkspaceDiffSheet(taskID: taskID, capability: capability) { showsDiff = false }
+            }
+        }
+    }
+}
+
+private struct CodeWorkspaceDiffSheet: View {
+    @EnvironmentObject private var appModel: AppModel
+    let taskID: UUID
+    let capability: CodeWorkspaceDiffCapability
+    let close: () -> Void
+    @State private var snapshot: CodeWorkspaceReadSnapshot?
+    @State private var selectedPath: String?
+    @State private var response: CodeWorkspaceDiffResponse?
+    @State private var loadError: String?
+    @State private var fileError: String?
+    @State private var refreshRevision = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            SheetHeader(title: "文件差异", close: close)
+            if let snapshot {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("新增 \(snapshot.changes.summary.added) · 修改 \(snapshot.changes.summary.modified) · 删除 \(snapshot.changes.summary.deleted)")
+                            .font(MyChatTypography.caption)
+                            .foregroundStyle(MyChatTheme.secondaryText)
+                            .accessibilityIdentifier("code.diff.summary")
+                        if snapshot.changes.changedFiles.isEmpty {
+                            Text("当前快照没有文件更改")
+                        }
+                        ForEach(snapshot.changes.changedFiles) { file in
+                            Button {
+                                guard selectedPath != file.path else { return }
+                                selectedPath = file.path; response = nil; fileError = nil
+                            } label: {
+                                HStack {
+                                    Text(file.path).lineLimit(2)
+                                    Spacer(minLength: 8)
+                                    Text(file.status == "added" ? "新增" : file.status == "deleted" ? "删除" : "修改")
+                                        .foregroundStyle(MyChatTheme.secondaryText)
+                                    if selectedPath == file.path { Image(systemName: "checkmark") }
+                                }
+                                .frame(minHeight: 44)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("code.diff.file.\(file.path)")
+                        }
+                        if let selectedPath {
+                            Divider()
+                            Text(selectedPath).font(MyChatTypography.caption)
+                            if let response {
+                                if response.status == "ready", let patch = response.patch {
+                                    if patch.isEmpty { Text("文件内容没有文本差异") }
+                                    else {
+                                        ScrollView(.horizontal) {
+                                            Text(verbatim: patch)
+                                                .font(MyChatSystemFont.appFont(size: 12, design: .monospaced, weight: .regular))
+                                                .fixedSize(horizontal: true, vertical: false)
+                                                .textSelection(.enabled)
+                                                .accessibilityIdentifier("code.diff.patch")
+                                        }
+                                    }
+                                } else {
+                                    Text(omissionMessage(response.reason))
+                                        .foregroundStyle(MyChatTheme.secondaryText)
+                                        .accessibilityIdentifier("code.diff.omitted")
+                                }
+                            } else if let fileError {
+                                Text(fileError).foregroundStyle(.red).accessibilityIdentifier("code.diff.error")
+                                Button("刷新文件列表") { refreshRevision += 1 }
+                                    .frame(minHeight: 44).accessibilityIdentifier("code.diff.refresh")
+                            } else {
+                                ProgressView("正在读取差异").accessibilityIdentifier("code.diff.loading")
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                }
+            } else if let loadError {
+                Text(loadError).foregroundStyle(.red).padding(20).accessibilityIdentifier("code.diff.error")
+                Button("重试") { refreshRevision += 1 }.frame(minHeight: 44)
+                    .accessibilityIdentifier("code.diff.refresh")
+                Spacer()
+            } else {
+                ProgressView("正在读取文件列表").padding(24)
+                Spacer()
+            }
+        }
+        .foregroundStyle(MyChatTheme.text)
+        .background(MyChatTheme.canvas)
+        .task(id: refreshRevision) { await loadSnapshot() }
+        .task(id: selectedPath) { await loadFile() }
+        .onChange(of: appModel.authSession?.user.id) { _, _ in close() }
+    }
+
+    @MainActor private func loadSnapshot() async {
+        snapshot = nil; selectedPath = nil; response = nil; loadError = nil; fileError = nil
+        do {
+            let value = try await appModel.codeWorkspaceSnapshot(taskID: taskID, capability: capability)
+            try Task.checkCancellation()
+            snapshot = value
+        } catch {
+            guard !Task.isCancelled else { return }
+            loadError = CodeTaskErrorPresentation.concise(error.localizedDescription) ?? "无法读取文件列表"
+        }
+    }
+
+    @MainActor private func loadFile() async {
+        guard let snapshot, let path = selectedPath else { return }
+        response = nil; fileError = nil
+        do {
+            let value = try await appModel.codeWorkspaceDiff(snapshot: snapshot, path: path, capability: capability)
+            try Task.checkCancellation()
+            guard selectedPath == path, self.snapshot?.binding == snapshot.binding else { return }
+            response = value
+        } catch {
+            guard !Task.isCancelled, selectedPath == path else { return }
+            fileError = CodeTaskErrorPresentation.concise(error.localizedDescription) ?? "无法读取文件差异"
+        }
+    }
+
+    private func omissionMessage(_ reason: String?) -> String {
+        switch reason {
+        case "binary": return "二进制文件，不显示文本差异"
+        case "file_too_large": return "文件超过文本差异读取上限"
+        case "patch_too_large": return "差异超过显示上限，未返回不完整内容"
+        case "symlink": return "符号链接不提供文本差异"
+        default: return "当前文件暂不提供文本差异"
+        }
+    }
+}
+
+private enum CodeTaskErrorPresentation {
+    static func concise(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let firstLine = raw.split(whereSeparator: \.isNewline)
+            .map { String($0) }
+            .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        guard let firstLine else { return nil }
+        var message = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return nil }
+
+        message = message.replacingOccurrences(
+            of: #"(?i)(\b[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*\s*[:=]).*$"#,
+            with: "$1 [已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"\b([A-Z][A-Z0-9_]*\s*=).*$"#,
+            with: "$1[已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"\b([A-Za-z][A-Za-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@"#,
+            with: "$1[凭据已隐藏]@",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)\b(?:Bearer|Basic)\s+[A-Za-z0-9+/=_-]{8,}"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,}|sk-(?:ant-)?[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9_-]{16,}|eyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        message = message.replacingOccurrences(
+            of: #"(?i)(?:access_token|refresh_token|token|api[_-]?key|client_secret|password|secret|credential)=([^&#\s]+)"#,
+            with: "[凭据已隐藏]",
+            options: .regularExpression
+        )
+        if message.count > 240 {
+            message = String(message.prefix(240)) + "…"
+        }
+        return PresentationText.plain(message)
     }
 }
 
@@ -1326,11 +1783,13 @@ private struct CodeTasksSheet: View {
                                 Text(task.goal)
                                     .font(MyChatSystemFont.appFont(size: 16, weight: .regular))
                                     .lineLimit(3)
-                                if let error = task.error, !error.isEmpty {
-                                    Text(PresentationText.plain(error))
+                                if let error = CodeTaskErrorPresentation.concise(task.error) {
+                                    Text(error)
                                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
                                         .foregroundStyle(Color.red)
                                         .lineLimit(2)
+                                        .accessibilityLabel("任务错误：\(error)")
+                                        .accessibilityIdentifier("code.task-list.error.\(task.id)")
                                 }
                             }
                             .padding(14)
@@ -1374,11 +1833,15 @@ private struct CodeTasksSheet: View {
 private struct CodeNewSessionView: View {
     @EnvironmentObject private var appModel: AppModel
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var githubAuthenticator = GitHubWebAuthenticator()
     @FocusState private var composerFocused: Bool
     @State private var draft = ""
     @State private var repositoryPickerVisible = false
     @State private var modelPickerVisible = false
     @State private var selectedRepository: GitHubRepositoryRecord?
+    @State private var githubConnection: GitHubConnectionStatus?
+    @State private var isCheckingGitHub = true
+    @State private var isConnectingGitHub = false
     @State private var createNewRepository = false
     @State private var isStarting = false
     @State private var pendingPrompt: String?
@@ -1416,6 +1879,7 @@ private struct CodeNewSessionView: View {
                         }
                         .buttonStyle(MyChatIconButtonStyle())
                         .accessibilityLabel("返回 Code")
+                        .accessibilityIdentifier("code.new.back")
                         Spacer()
                     }
                 }
@@ -1460,11 +1924,18 @@ private struct CodeNewSessionView: View {
                         }
                         if let branchError { Text(branchError).font(MyChatTypography.caption).foregroundStyle(.red) }
                         if let capabilities {
-                            Label(capabilities.execution.location == "cloud" && capabilities.execution.configured
-                                ? (capabilities.execution.verified ? "云端执行已验证" : "云端执行待验收")
-                                : "云端执行不可用", systemImage: "cloud")
-                                .font(MyChatTypography.caption)
-                            if let reason = capabilities.execution.reason { Text(reason).font(MyChatTypography.caption) }
+                            let isConfigured = capabilities.execution.location == "cloud" && capabilities.execution.configured
+                            let isVerified = isConfigured && capabilities.execution.verified
+                            let statusLabel = isVerified ? "云端已验证" : (isConfigured ? "云端待验收" : "云端不可用")
+                            HStack(spacing: 7) {
+                                Circle()
+                                    .fill(isVerified ? Color.green : (isConfigured ? MyChatTheme.brand : MyChatTheme.secondaryText))
+                                    .frame(width: 6, height: 6)
+                                Text(statusLabel).font(MyChatTypography.caption)
+                            }
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("执行状态：\(statusLabel)")
+                            .accessibilityIdentifier("code.execution-status")
                         } else {
                             Text(capabilityError ?? "正在检查执行环境…").font(MyChatTypography.caption)
                         }
@@ -1480,16 +1951,27 @@ private struct CodeNewSessionView: View {
 
                     HStack(spacing: 10) {
                         Button {
-                            repositoryPickerVisible = true
+                            if githubConnection?.connected == true {
+                                repositoryPickerVisible = true
+                            } else {
+                                Task { await connectGitHub() }
+                            }
                         } label: {
-                            Text(repositoryLabel)
-                                .font(MyChatTypography.metadata)
-                                .lineLimit(1)
-                                .padding(.horizontal, 13)
-                                .frame(minHeight: 44)
-                                .background(MyChatTheme.selected, in: Capsule())
+                            HStack(spacing: 7) {
+                                if isConnectingGitHub || isCheckingGitHub {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text(repositoryLabel)
+                                    .font(MyChatTypography.metadata)
+                                    .lineLimit(1)
+                            }
+                            .padding(.horizontal, 13)
+                            .frame(minHeight: 44)
+                            .background(MyChatTheme.selected, in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        .disabled(isCheckingGitHub || isConnectingGitHub)
+                        .accessibilityIdentifier("code.repository-selector")
 
                         Button {
                             modelPickerVisible = true
@@ -1589,13 +2071,14 @@ private struct CodeNewSessionView: View {
                 .presentationDragIndicator(.visible)
                 .presentationBackground(MyChatTheme.canvas)
         }
-        .modifier(CodeSwipeBackModifier())
+
         }
     }
 
     private var repositoryLabel: String {
         if createNewRepository { return "新仓库" }
-        return selectedRepository?.fullName ?? "选择仓库"
+        if let selectedRepository { return selectedRepository.fullName }
+        return githubConnection?.connected == true ? "选择仓库" : "连接 GitHub"
     }
 
     private var canStart: Bool {
@@ -1613,13 +2096,62 @@ private struct CodeNewSessionView: View {
     private func restoreDraft() async {
         let value = CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: "new")
         draft = value.prompt; branch = value.branch
+
+        isCheckingGitHub = true
         do {
-            capabilities = try await appModel.codeCapabilities()
-            if let repo = value.repository {
+            githubConnection = try await appModel.githubConnectionStatus()
+        } catch {
+            githubConnection = nil
+            if value.repository != nil { errorMessage = error.localizedDescription }
+        }
+        isCheckingGitHub = false
+
+        do { capabilities = try await appModel.codeCapabilities() }
+        catch { capabilityError = error.localizedDescription }
+
+        if let repo = value.repository, githubConnection?.connected == true {
+            do {
                 selectedRepository = try await appModel.githubRepositories().first { $0.fullName == repo }
-                if selectedRepository == nil { errorMessage = "草稿仓库尚未授权，请重新选择" }
+                if selectedRepository == nil { errorMessage = "已选仓库不可用，请重新选择" }
+            } catch { errorMessage = error.localizedDescription }
+        } else if value.repository != nil {
+            errorMessage = "GitHub 未连接，请重新选择仓库"
+        }
+    }
+
+    private func connectGitHub() async {
+        guard !isConnectingGitHub, !isCheckingGitHub else { return }
+        isConnectingGitHub = true
+        errorMessage = nil
+        defer { isConnectingGitHub = false }
+
+        do {
+            let authorizationURL = try await appModel.githubAuthorizationURL()
+            let callbackURL = try await githubAuthenticator.authenticate(using: authorizationURL)
+            try GitHubMobileOAuthCallback.validateConnectedCallback(callbackURL)
+
+            let status = try await appModel.githubConnectionStatus()
+            guard status.connected else { throw GitHubWebAuthenticationError.connectionFailed }
+            githubConnection = status
+
+            let savedRepository = selectedRepository?.fullName
+                ?? CodeLocalState.draft(owner: appModel.authSession?.user.id ?? "", scope: "new").repository
+            if let savedRepository {
+                let repositories = try await appModel.githubRepositories()
+                if let match = repositories.first(where: { $0.fullName == savedRepository }) {
+                    selectedRepository = match
+                    createNewRepository = false
+                    return
+                }
+                errorMessage = "已选仓库不可用，请重新选择"
             }
-        } catch { capabilityError = error.localizedDescription }
+            repositoryPickerVisible = true
+        } catch let error as ASWebAuthenticationSessionError
+            where error.code == .canceledLogin {
+            // OAuth cancellation does not create a repository or workspace.
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func startSession() async {
@@ -1709,20 +2241,16 @@ private struct CodeRepositoryPickerView: View {
             .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
             .padding(.horizontal, 18)
 
-            Button {
-                select(nil)
-            } label: {
+            if connection?.connected == true {
+                Button {
+                    select(nil)
+                } label: {
                 HStack(spacing: 13) {
                     Image(systemName: "folder.badge.plus")
                         .frame(width: 38, height: 38)
                         .background(MyChatTheme.selected, in: RoundedRectangle(cornerRadius: 11))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("创建新仓库")
-                            .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
-                        Text("MyChat 编程会先准备文件")
-                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
-                            .foregroundStyle(MyChatTheme.secondaryText)
-                    }
+                    Text("创建新仓库")
+                        .font(MyChatSystemFont.appFont(size: 16, weight: .semibold))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(MyChatSystemFont.appFont(for: .caption1, weight: .semibold))
@@ -1734,6 +2262,7 @@ private struct CodeRepositoryPickerView: View {
             .buttonStyle(.plain)
             .padding(.horizontal, 18)
             .padding(.top, 14)
+            }
 
             if isLoading {
                 ProgressView()
@@ -1744,10 +2273,12 @@ private struct CodeRepositoryPickerView: View {
                         .font(MyChatSystemFont.appFont(size: 24, weight: .medium))
                     Text("GitHub 尚未连接")
                         .font(MyChatSystemFont.appFont(size: 18, weight: .semibold))
-                    Text(PresentationText.plain(errorMessage ?? "请先在 MyChat 网页版连接 GitHub，然后刷新此页面。"))
-                        .font(MyChatSystemFont.appFont(for: .subheadline, weight: .regular))
-                        .foregroundStyle(MyChatTheme.secondaryText)
-                        .multilineTextAlignment(.center)
+                    if let errorMessage {
+                        Text(PresentationText.plain(errorMessage))
+                            .font(MyChatSystemFont.appFont(for: .caption1, weight: .regular))
+                            .foregroundStyle(MyChatTheme.secondaryText)
+                            .multilineTextAlignment(.center)
+                    }
                     Button {
                         Task { await connectGitHub() }
                     } label: {
@@ -1761,8 +2292,7 @@ private struct CodeRepositoryPickerView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(isConnecting)
-                    Button("刷新") { Task { await load() } }
-                        .buttonStyle(.bordered)
+                    .accessibilityIdentifier("code.github.connect")
                 }
                 .padding(28)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1803,6 +2333,7 @@ private struct CodeRepositoryPickerView: View {
                                 .background(MyChatTheme.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("code.github.repository.\(repository.fullName)")
                         }
                     }
                     .padding(.horizontal, 18)
@@ -1848,7 +2379,7 @@ private struct CodeRepositoryPickerView: View {
         do {
             let authorizationURL = try await appModel.githubAuthorizationURL()
             let callbackURL = try await authenticator.authenticate(using: authorizationURL)
-            try GitHubWebAuthenticator.validateConnectedCallback(callbackURL)
+            try GitHubMobileOAuthCallback.validateConnectedCallback(callbackURL)
             await load()
         } catch let error as ASWebAuthenticationSessionError
             where error.code == .canceledLogin {
@@ -1906,6 +2437,9 @@ private final class GitHubWebAuthenticator: NSObject, ObservableObject,
         return UIWindow(frame: .zero)
     }
 
+}
+
+enum GitHubMobileOAuthCallback {
     static func validateConnectedCallback(_ url: URL) throws {
         guard url.scheme?.lowercased() == "mychat",
               url.host?.lowercased() == "oauth",
@@ -1914,11 +2448,11 @@ private final class GitHubWebAuthenticator: NSObject, ObservableObject,
               url.password == nil,
               url.fragment == nil,
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-              items.filter({ $0.name == "status" }).count == 1,
-              !items.contains(where: { $0.name.localizedCaseInsensitiveContains("token") }) else {
+              items.count == 1,
+              items[0].name == "status" else {
             throw GitHubWebAuthenticationError.invalidCallback
         }
-        guard items.first(where: { $0.name == "status" })?.value == "connected" else {
+        guard items[0].value == "connected" else {
             throw GitHubWebAuthenticationError.connectionFailed
         }
     }

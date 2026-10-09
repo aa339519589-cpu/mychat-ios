@@ -3,18 +3,65 @@ name: Build 102 NativeApp (manual)
 on:
   workflow_dispatch:
     inputs:
+      compile_offline_test_targets:
+        description: "Compile iOS Simulator app and test targets with build-for-testing only; do not launch the test host or run tests. No runtime download."
+        required: false
+        type: boolean
+        default: false
       run_offline_tests:
         description: "Run fixture-only runtime tests only if an iPhone 18 Pro with iOS 27 is already installed. No runtime download."
         required: false
         type: boolean
         default: false
+      run_offline_summary_tests:
+        description: "Run focused fixture-only public-summary, artifact, and SVG-cache runtime tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_offline_ui_tests:
+        description: "Run focused fixture-only UI tests only if an iPhone 18 Pro with iOS 27 is already installed. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_artifact_ui_tests:
+        description: "Run the two existing Artifact UI regressions plus the SVG preview swipe regression on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_drawer_tests:
+        description: "Run the three drawer runtime and three gesture UI regressions on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_header_connector_tests:
+        description: "Run the Light/Dark header fixture and two fixture-backed connector UI tests on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_offline_code_ui_tests:
+        description: "Run fixture-backed CodeWorkspace UI and runtime tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_stale_recovery_probe:
+        description: "Run one fixture-only stale Code recovery UI regression on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+      run_vertical_history_scroll_probe:
+        description: "Run only the long-history vertical transcript scroll UI regression on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        required: false
+        type: boolean
+        default: false
+
       run_dot_position_tests:
         description: "Run only the three synthetic DotCoordinatedTerminalUIKitTests on an already-installed iOS 27 iPhone 18 Pro. Takes precedence over run_offline_tests. No runtime download."
         required: false
         type: boolean
         default: false
-      compile_offline_test_targets:
-        description: "Compile iOS Simulator app and test targets with build-for-testing only; do not launch the test host or run tests. No runtime download."
+
+      run_font_restoration_tests:
+        description: "Verify original font registration, variation axes, Dynamic Type cascade sizing and Chinese heading weights on the already-installed iOS 27 iPhone 18 Pro. No runtime download."
         required: false
         type: boolean
         default: false
@@ -132,3 +179,380 @@ jobs:
           print("Verified all three DotCoordinatedTerminalUIKitTests passed.")
           PY
           fi
+
+      - name: Run focused summary, artifact, and SVG-cache runtime tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_offline_summary_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Public-summary runtime tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          # Boot only the runner-provided simulator; never install a runtime.
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewKeepsOnlyExplicitPublicTextAndHandlesEmptyValues \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testArtifactDocumentCountsPreserveNativeRenderingDecision \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testArtifactSourcePreparationCachePreservesPartialSVGAndCompletion \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactCachesSourceAcrossUnchangedUpdatesAndAppearanceChanges \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactPatchesSameCanvasWithoutDroppingDrawnNodes \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactRetainsAnimationAcrossUnkeyedInsertionAndCompletion \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testCompletedHTMLArtifactRunsInteractionInsideOpaqueSandbox \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Run focused offline UI tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_offline_ui_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. UI tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          # Boot only the runner-provided simulator; never install a runtime.
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerButtonsAcceptSmallHorizontalTouchDrift \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsReopenAfterSelectingConversation \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard \
+            -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
+            -only-testing:MyChatUITests/MyChatUITests/testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testArtifactLibraryOpensAndDismissesPreviewRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testSidebarSelectionTraitTracksDestination \
+            -only-testing:MyChatUITests/MyChatUITests/testPasswordAndPrivacyShareOneSettingsEntry \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerTouchTargetsAndHapticPreferencePersist \
+            -only-testing:MyChatUITests/MyChatUITests/testReasoningSummaryShowsProviderPreviewAndReopensInBothAppearances \
+            test
+      - name: Run focused Artifact and SVG UI tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_artifact_ui_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Artifact UI tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/MyChatUITests/testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testArtifactLibraryOpensAndDismissesPreviewRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
+            test
+
+      - name: Run focused drawer runtime and UI tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_drawer_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Drawer tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testDrawerRequiresHorizontalIntentWithoutRaisingShortSwipeThreshold \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testDrawerShortSwipeWorksWhenReleaseVelocityIsZero \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testDrawerIgnoresSmallMovementAndHonorsAReversedRelease \
+            -only-testing:MyChatUITests/MyChatUITests/testComposerButtonsAcceptSmallHorizontalTouchDrift \
+            -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
+            -only-testing:MyChatUITests/MyChatUITests/testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer \
+            test
+
+      - name: Run focused header, font and connector UI tests on an installed iOS 27 simulator
+        id: header_connector_tests
+        if: ${{ inputs.run_header_connector_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Header and connector fixture UI tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          echo "device_id=$device_id" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/MyChatUITests/testChatHeaderMatchesCanvasInLightAndDarkAppearance \
+            -only-testing:MyChatUITests/MyChatUITests/testOriginalEnglishReadingFontKeepsSummarySansSerif \
+            -only-testing:MyChatUITests/MyChatUITests/testConnectorDirectoryPushesAndPreservesEachPriorScreen \
+            -only-testing:MyChatUITests/MyChatUITests/testConnectorEditorSaveCancelAndRepeatedOpenResetState \
+            test | tee "$RUNNER_TEMP/mychat-fixture-ui-evidence.log"
+
+      - name: Verify bounded fixture screenshot files on the runner
+        id: fixture_evidence
+        if: ${{ !cancelled() && inputs.run_header_connector_tests && steps.header_connector_tests.outputs.device_id != '' }}
+        working-directory: NativeApp
+        run: |
+          python3 scripts/collect_fixture_ui_evidence.py \
+            --device "${{ steps.header_connector_tests.outputs.device_id }}" \
+            --log "$RUNNER_TEMP/mychat-fixture-ui-evidence.log" \
+            --test-outcome "${{ steps.header_connector_tests.outcome }}" \
+            --output "$RUNNER_TEMP/mychat-fixture-ui-evidence"
+
+      - name: Retain verified fixture screenshots
+        if: ${{ !cancelled() && inputs.run_header_connector_tests && steps.fixture_evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mychat-fixture-ui-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/mychat-fixture-ui-evidence
+          retention-days: 3
+          if-no-files-found: error
+      - name: Run fixture-backed CodeWorkspace UI and runtime tests on installed iOS 27 simulator
+        if: ${{ inputs.run_offline_code_ui_tests }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. CodeWorkspace UI and runtime tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          # Start only the runner-provided simulator; never install a runtime.
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/CodeWorkspaceUITests \
+            -only-testing:MyChatRuntimeTests/CodeWorkspaceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+      - name: Run fixture-backed stale Code recovery UI regression on installed iOS 27 simulator
+        if: ${{ inputs.run_stale_recovery_probe }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Stale-recovery UI test skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/CodeWorkspaceUITests/testOldRecoveryResponseCannotReplaceTheCurrentTaskEvidence \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+      - name: Run long-history vertical scroll UI regression on an installed iOS 27 simulator
+        if: ${{ inputs.run_vertical_history_scroll_probe }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Long-history scroll UI test skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatUITests/MyChatUITests/testVerticalChatScrollMovesContentWithoutOpeningDrawer \
+            test
+
+      - name: Run original font restoration runtime tests on an installed iOS 27 simulator
+        if: ${{ inputs.run_font_restoration_tests && !cancelled() }}
+        working-directory: NativeApp
+        run: |
+          set -euo pipefail
+          device_id="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          payload = json.loads(subprocess.check_output(
+              ["xcrun", "simctl", "list", "devices", "available", "--json"],
+              text=True,
+          ))
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-0"
+          for device in payload.get("devices", {}).get(runtime, []):
+              if device.get("isAvailable") and device.get("name") == "iPhone 18 Pro":
+                  print(device["udid"])
+                  break
+          PY
+          )"
+          if [[ -z "$device_id" ]]; then
+            echo "::notice::No already-installed iOS 27 iPhone 18 Pro simulator. Original font restoration runtime tests skipped; no runtime download was attempted."
+            exit 0
+          fi
+          xcrun simctl boot "$device_id" || true
+          xcrun simctl bootstatus "$device_id" -b
+          xcodebuild \
+            -project MyChatIOS.xcodeproj \
+            -scheme MyChatIOS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$device_id" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testOriginalReadingFacesAreRegisteredAndSecondaryTextKeepsContrast \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testChinesePageHeadingPreservesItsRequestedWeight \
+            test

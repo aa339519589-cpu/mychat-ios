@@ -11,6 +11,133 @@ import Combine
 @MainActor final class MyChatRuntimeTests: XCTestCase {
     override func setUp() { super.setUp(); URLProtocol.registerClass(NativeAuditURLProtocol.self) }
 
+    func testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence() {
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。"), "正在核对资料。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果"), "开始整理结果")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果并检查引用。"), "开始整理结果并检查引用。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("Checked the files. Now verifying the references"),
+            "Now verifying the references")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("核对已完成。开始整理结论。"), "开始整理结论。")
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("One step.\n\nLatest public update.\n  \n"),
+            "Latest public update.")
+
+        let job = UUID()
+        var entries: [ChatProcessEntry] = []
+        let deltas = ["正在核对资料。", "\n\n开始整理", "结果并检查引用。"]
+        let previews = ["正在核对资料。", "开始整理", "开始整理结果并检查引用。"]
+        for (index, delta) in deltas.enumerated() {
+            ChatProcessEntry.record(ChatJobEvent(jobID: job, sequence: index + 1,
+                payload: .reasoningSummaryDelta(delta)), into: &entries)
+            guard case let .reasoningSummary(summary)? = entries.last?.content else {
+                XCTFail("The actual public-summary event must produce a summary entry")
+                return
+            }
+            XCTAssertEqual(PublicReasoningSummaryPreview.text(summary), previews[index])
+        }
+        XCTAssertEqual(entries.count, 1, "Incremental previews must update the same process entry")
+    }
+
+    func testPublicSummaryPreviewKeepsOnlyExplicitPublicTextAndHandlesEmptyValues() {
+        XCTAssertNil(PublicReasoningSummaryPreview.text(nil))
+        XCTAssertNil(PublicReasoningSummaryPreview.text(" \n\t\n "))
+        XCTAssertNil(PublicReasoningSummaryPreview.text(ChatReasoningSummaryStorage.decode("private provider thinking")))
+        let summary = "核对资料并规划下一步。"
+        XCTAssertEqual(PublicReasoningSummaryPreview.text(
+            ChatReasoningSummaryStorage.decode(ChatReasoningSummaryStorage.encode(summary))), summary)
+        XCTAssertEqual(PublicReasoningSummaryPreview.text("Checking version 1.2 and example.com"),
+            "Checking version 1.2 and example.com")
+    }
+
+    func testArtifactDocumentCountsPreserveNativeRenderingDecision() {
+        let html = "<artifact><html><head><title>Preview</title></head><body>" +
+            String(repeating: "<!-- Large immutable preview source -->", count: 4096) +
+            "<h1>Example</h1></body></html></artifact>"
+        let document = "<document>title: Note\nfilename: note.md\n\n# Note\nBody.</document>"
+        let svg = "<artifact><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\"><circle cx=\"10\" cy=\"10\" r=\"5\"/></svg></artifact>"
+        let diagram = "<mermaid>graph TD; A-->B;</mermaid>"
+        let sources = [html, document, svg, diagram, html + document, html + svg, document + diagram, ""]
+        for source in sources {
+            let blocks = ChatArtifactParser.parse(source).blocks.filter(\.isComplete)
+            let documents = ChatDocument.documents(in: source, namespace: "render-decision")
+            XCTAssertEqual(documents.count < blocks.count,
+                blocks.contains(where: { ChatDocument.from($0) == nil }),
+                "Cached counts must choose the same native renderer without reparsing HTML during a swipe")
+        }
+    }
+
+    func testArtifactSourcePreparationCachePreservesPartialSVGAndCompletion() {
+        let fixture = NativeRuntimeFixture.largeArtifactSVG
+        let fixtureBlocks = ChatArtifactParser.parse(fixture).blocks
+        XCTAssertEqual(fixtureBlocks.count, 1)
+        XCTAssertEqual(fixtureBlocks.first?.kind, .inlineArtifact)
+        XCTAssertEqual(fixtureBlocks.first?.isComplete, true)
+        XCTAssertTrue(fixtureBlocks.first?.raw.contains("id=\"fixture-sun\"") == true)
+        XCTAssertGreaterThan(fixture.utf8.count, 100_000)
+        XCTAssertTrue(ChatDocument.documents(in: fixture, namespace: "svg-return-fixture").isEmpty,
+            "The UI fixture must select the native inline-SVG renderer, not the HTML document renderer")
+
+        let source = #"<svg><style>circle { fill: red; }</style><!-- retained --><circle data-label="太阳" r="20"/></svg>"#
+        var cache = ArtifactSourcePreparationCache()
+        for end in source.indices {
+            let prefix = String(source[..<end])
+            let expected = StreamingArtifactSource.renderableHTML(prefix, streaming: true)
+            XCTAssertEqual(cache.prepare(rawHTML: prefix, isStreaming: true), expected)
+            let preparations = cache.preparationCount
+            XCTAssertEqual(cache.prepare(rawHTML: prefix, isStreaming: true), expected)
+            XCTAssertEqual(cache.preparationCount, preparations,
+                "An unchanged source must not be prepared again")
+        }
+        XCTAssertEqual(cache.prepare(rawHTML: source, isStreaming: true), source)
+        let preparations = cache.preparationCount
+        XCTAssertEqual(cache.prepare(rawHTML: source, isStreaming: false), source)
+        XCTAssertEqual(cache.preparationCount, preparations + 1,
+            "Completion must invalidate the streaming preparation key")
+    }
+
+    func testStreamingArtifactCachesSourceAcrossUnchangedUpdatesAndAppearanceChanges() async throws {
+        let source = #"<svg id="cached-drawing" viewBox="0 0 300 200"><circle id="cached-sun" cx="100" cy="100" r="20"/></svg>"#
+        let coordinator = ArtifactSandboxView.Coordinator()
+        let initial = ArtifactSandboxView(rawHTML: source, colorScheme: .light,
+            isStreaming: true, inline: true, reduceMotion: true)
+        let web = initial.makeWebView(coordinator: coordinator)
+        web.frame = CGRect(x: 0, y: 0, width: 390, height: 260)
+        defer { web.stopLoading(); web.navigationDelegate = nil }
+
+        func waitFor(_ expression: String) async throws {
+            for _ in 0..<100 {
+                let ready = try? await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Error>) in
+                    web.evaluateJavaScript(expression, in: nil, in: .defaultClient) { result in
+                        switch result {
+                        case .success(let value): continuation.resume(returning: value as? Bool ?? false)
+                        case .failure(let error): continuation.resume(throwing: error)
+                        }
+                    }
+                }
+                if ready == true { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            throw NSError(domain: "ArtifactPreparationTest", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Artifact preparation fixture did not become ready: \(expression)"])
+        }
+
+        try await waitFor("document.getElementById('cached-sun') !== null")
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1)
+        for _ in 0..<240 { coordinator.update(initial, in: web) }
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1,
+            "Unchanged native view updates must reuse the prepared source")
+
+        coordinator.update(ArtifactSandboxView(rawHTML: source, colorScheme: .dark,
+            isStreaming: true, inline: true, reduceMotion: true), in: web)
+        try await waitFor("document.documentElement.style.colorScheme === 'dark'")
+        XCTAssertEqual(coordinator.sourcePreparationCount, 1,
+            "Appearance changes must update WebKit without rescanning source")
+
+        coordinator.update(ArtifactSandboxView(rawHTML: source, colorScheme: .dark,
+            isStreaming: false, inline: true, reduceMotion: true), in: web)
+        try await waitUntil { coordinator.sourcePreparationCount == 2 }
+        XCTAssertEqual(coordinator.sourcePreparationCount, 2)
+    }
+
     func testHapticSemanticsRespectPreferenceAndReducedMotion() {
         let events: [HapticFeedback.Event] = [.surface, .selection, .send, .stop, .success, .error]
         for event in events {
@@ -204,12 +331,65 @@ import Combine
         controller.pauseFollowAnimation()
     }
 
-    func testLicensedReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
-        for name in ["Newsreader16pt-Regular", "Newsreader16pt-Italic", "Newsreader16pt-Bold"] {
-            XCTAssertNotNil(UIFont(name: name, size: 17))
+    func testOriginalReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
+        for name in ["AnthropicSerifWebWeb-TextLight", "AnthropicSerifWebWeb-TextLightItalic"] {
+            XCTAssertNotNil(UIFont(name: name, size: 17), "The original face must be bundled, not silently substituted")
         }
-        XCTAssertTrue(MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true).fontName.hasPrefix("Newsreader"))
-        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/ttf"))
+        for (weight, italic, expectedWeight) in [
+            (UIFont.Weight.regular, false, 400.0), (.medium, false, 400.0),
+            (.semibold, false, 700.0), (.bold, false, 700.0), (.regular, true, 400.0)
+        ] {
+            let font = MyChatSystemFont.uiFont(size: 17, weight: weight, serif: true, italic: italic)
+            XCTAssertTrue(font.fontName.hasPrefix("AnthropicSerifWebWeb"))
+            let axes = try XCTUnwrap(CTFontCopyVariation(font) as? [NSNumber: NSNumber])
+            let actualWeight = try XCTUnwrap(axes[NSNumber(value: 0x77676874)]).doubleValue
+            XCTAssertEqual(actualWeight, expectedWeight, accuracy: 0.01)
+            let available = try XCTUnwrap(CTFontCopyVariationAxes(font) as? [[String: Any]])
+            let optical = try XCTUnwrap(available.first {
+                ($0[kCTFontVariationAxisIdentifierKey as String] as? NSNumber)?.uint32Value == 0x6F70737A
+            })
+            let opticalDefault = try XCTUnwrap(optical[kCTFontVariationAxisDefaultValueKey as String] as? NSNumber)
+            XCTAssertEqual(opticalDefault.doubleValue, 16, accuracy: 0.01)
+            // CoreText omits axes at their default. Resolve from the actual
+            // registered font's axis metadata, never from a hard-coded fallback.
+            let opticalValue = axes[NSNumber(value: 0x6F70737A)] ?? opticalDefault
+            XCTAssertEqual(opticalValue.doubleValue, 16, accuracy: 0.01)
+            let traits = CTFontCopyTraits(font) as NSDictionary
+            let traitWeight = (traits[kCTFontWeightTrait] as? NSNumber)?.doubleValue ?? .nan
+            print("RESTORED_FONT postscript=\(font.fontName) wght=\(actualWeight) opsz=\(opticalValue) opszDefault=\(opticalDefault) traitWeight=\(traitWeight)")
+        }
+        let textFont = MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true)
+        let displayDescriptor = textFont.fontDescriptor.addingAttributes([
+            UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String):
+                [NSNumber(value: 0x77676874): NSNumber(value: 400),
+                 NSNumber(value: 0x6F70737A): NSNumber(value: 48)]
+        ])
+        let displayFont = UIFont(descriptor: displayDescriptor, size: 17)
+        let displayAxes = try XCTUnwrap(CTFontCopyVariation(displayFont) as? [NSNumber: NSNumber])
+        XCTAssertEqual(try XCTUnwrap(displayAxes[NSNumber(value: 0x6F70737A)]).doubleValue, 48, accuracy: 0.01)
+        func glyphWidth(_ font: UIFont) -> Double {
+            let sample = NSAttributedString(string: "HAMBURGEFONS", attributes: [.font: font])
+            return CTLineGetTypographicBounds(CTLineCreateWithAttributedString(sample), nil, nil, nil)
+        }
+        let textWidth = glyphWidth(textFont), displayWidth = glyphWidth(displayFont)
+        XCTAssertGreaterThan(abs(textWidth - displayWidth), 0.1,
+            "The original font's optical axis must change actual glyph metrics")
+        print("RESTORED_FONT_OPTICAL text16Width=\(textWidth) display48Width=\(displayWidth)")
+        XCTAssertFalse(MyChatSystemFont.uiFont(size: 17, weight: .regular).fontName.hasPrefix("Anthropic"),
+            "The system sans-serif summary preview must keep its existing face")
+        for size in [CGFloat(12), 17, 25] {
+            let font = MyChatSystemFont.appSerifUIFont(size: size, relativeTo: .body, weight: .medium)
+            XCTAssertTrue(font.fontName.hasPrefix("AnthropicSerifWebWeb"))
+            let scaled = MyChatSystemFont.scaledUIFont(font, relativeTo: .body,
+                compatibleWith: UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge))
+            let cascade = try XCTUnwrap(scaled.fontDescriptor.fontAttributes[.cascadeList] as? [UIFontDescriptor])
+            for fallback in cascade {
+                XCTAssertEqual(fallback.pointSize, scaled.pointSize, accuracy: 0.01,
+                    "Restoring the original Latin face must retain the Chinese clipping fix")
+            }
+        }
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/woff2"))
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font-weight: 300 800"))
         func luminance(_ color: Color, style: UIUserInterfaceStyle) -> CGFloat {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&r, green: &g, blue: &b, alpha: &a)
@@ -1081,8 +1261,12 @@ import Combine
         XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 4, y: 2)), .undecided)
         XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 7, y: 14)), .vertical)
         XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 18, y: 12)), .vertical)
-        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 16, y: 3)), .horizontal)
-        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: -16, y: 3)), .horizontal)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 16, y: 3)), .undecided)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: -16, y: 3)), .undecided)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 23, y: 3)), .undecided)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: -23, y: 3)), .undecided)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: 24, y: 3)), .horizontal)
+        XCTAssertEqual(DrawerMotion.intent(CGPoint(x: -24, y: 3)), .horizontal)
         XCTAssertTrue(DrawerMotion.targetIsOpen(offset: 40, velocity: 0, width: 320, cancelled: false, wasOpen: false))
         XCTAssertEqual(DrawerMotion.shadeOpacity(progress: 0), 0.38, accuracy: 0.0001)
         XCTAssertEqual(DrawerMotion.shadeOpacity(progress: 0.5), 0.19, accuracy: 0.0001)

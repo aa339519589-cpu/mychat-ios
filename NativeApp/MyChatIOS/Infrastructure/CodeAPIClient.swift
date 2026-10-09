@@ -7,6 +7,10 @@ protocol CodeAPIServing: Sendable {
     func enqueue(_ command: CodeChatCommand, accessToken: String) async throws -> CodeAdmission
     func apply(_ command: CodeApplyCommand, accessToken: String) async throws -> CodeApplyResponse
     func capabilities(accessToken: String) async throws -> CodeCapabilities
+    func workspace(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceState
+    func workspaceChanges(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceChanges
+    func workspaceDiff(binding: CodeWorkspaceDiffBinding, path: String,
+                       capability: CodeWorkspaceDiffCapability, accessToken: String) async throws -> CodeWorkspaceDiffResponse
     func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery
     func taskRecovery(taskID: UUID, accessToken: String) async throws -> CodeTaskRecovery
     func reject(_ request: CodeConfirmationRequest, accessToken: String) async throws
@@ -15,6 +19,12 @@ protocol CodeAPIServing: Sendable {
 
 extension CodeAPIServing {
     func capabilities(accessToken: String) async throws -> CodeCapabilities { throw CodeAPIError.invalidResponse }
+    func workspace(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceState { throw CodeAPIError.workspaceDiffUnavailable }
+    func workspaceChanges(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceChanges { throw CodeAPIError.workspaceDiffUnavailable }
+    func workspaceDiff(binding: CodeWorkspaceDiffBinding, path: String,
+                       capability: CodeWorkspaceDiffCapability, accessToken: String) async throws -> CodeWorkspaceDiffResponse {
+        throw CodeAPIError.workspaceDiffUnavailable
+    }
     func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery { throw CodeAPIError.invalidResponse }
     func taskRecovery(taskID: UUID, accessToken: String) async throws -> CodeTaskRecovery { throw CodeAPIError.invalidResponse }
     func reject(_ request: CodeConfirmationRequest, accessToken: String) async throws { throw CodeAPIError.invalidResponse }
@@ -27,6 +37,8 @@ enum CodeAPIError: LocalizedError, Equatable, Sendable {
     case invalidResponse
     case unsafeURL
     case mismatchedResponse
+    case workspaceDiffUnavailable
+    case workspaceDiffRedirect
     case server(status: Int, message: String, retryable: Bool)
 
     var errorDescription: String? {
@@ -41,6 +53,10 @@ enum CodeAPIError: LocalizedError, Equatable, Sendable {
             return "编程服务返回了不安全的事件流地址"
         case .mismatchedResponse:
             return "编程服务响应与本次任务不一致"
+        case .workspaceDiffUnavailable:
+            return "当前服务暂不支持查看文件差异"
+        case .workspaceDiffRedirect:
+            return "文件差异读取不允许跳转到其他地址"
         case let .server(_, message, _):
             return message
         }
@@ -103,6 +119,82 @@ struct CodeAPIClient: CodeAPIServing {
 
     func capabilities(accessToken: String) async throws -> CodeCapabilities {
         try await get("api/code/capabilities", accessToken: accessToken)
+    }
+
+    func workspace(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceState {
+        try await workspaceRead(baseURL.appendingPathComponent("api/agent/tasks/\(taskID.uuidString.lowercased())/workspace"),
+                                accessToken: accessToken)
+    }
+
+    func workspaceChanges(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceChanges {
+        let changes: CodeWorkspaceChanges = try await workspaceRead(
+            baseURL.appendingPathComponent("api/agent/tasks/\(taskID.uuidString.lowercased())/workspace/diff"),
+            accessToken: accessToken)
+        guard changes.isWellFormed else { throw CodeAPIError.invalidResponse }
+        return changes
+    }
+
+    func workspaceDiff(binding: CodeWorkspaceDiffBinding, path: String,
+                       capability: CodeWorkspaceDiffCapability, accessToken: String) async throws -> CodeWorkspaceDiffResponse {
+        guard capability.isSupported else { throw CodeAPIError.workspaceDiffUnavailable }
+        guard binding.isValid, CodeWorkspacePath.isValid(path) else {
+            throw CodeAPIError.invalidRequest("文件差异的快照信息无效")
+        }
+        let endpoint = baseURL.appendingPathComponent("api/agent/tasks/\(binding.taskID.uuidString.lowercased())/workspace/diff")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
+            throw CodeAPIError.unsafeURL
+        }
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "unified"), URLQueryItem(name: "path", value: path),
+            URLQueryItem(name: "snapshotId", value: binding.snapshotID.uuidString.lowercased()),
+            URLQueryItem(name: "manifestDigest", value: binding.manifestDigest),
+            URLQueryItem(name: "head", value: binding.head), URLQueryItem(name: "version", value: String(binding.version))
+        ]
+        guard let url = components.url else { throw CodeAPIError.unsafeURL }
+        let value: CodeWorkspaceDiffResponse = try await workspaceRead(url, accessToken: accessToken)
+        guard value.isValid(for: binding, path: path, capability: capability) else {
+            throw CodeAPIError.mismatchedResponse
+        }
+        return value
+    }
+
+    /// These reads never follow a redirect, store cookies, or accumulate an unbounded response.
+    private func workspaceRead<T: Decodable>(_ url: URL, accessToken: String) async throws -> T {
+        var request = try authorizedRequest(url: url, accessToken: accessToken)
+        request.httpShouldHandleCookies = false
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        let (bytes, response) = try await session.bytes(for: request, delegate: CodeWorkspaceReadDelegate())
+        guard let response = response as? HTTPURLResponse, response.url == url else {
+            bytes.task.cancel()
+            throw CodeAPIError.unsafeURL
+        }
+        guard !(300..<400).contains(response.statusCode) else {
+            bytes.task.cancel()
+            throw CodeAPIError.workspaceDiffRedirect
+        }
+        let limit = 4 * 1_024 * 1_024
+        guard response.expectedContentLength <= Int64(limit) else {
+            bytes.task.cancel()
+            throw CodeAPIError.invalidResponse
+        }
+        let data: Data
+        do {
+            data = try await withTaskCancellationHandler {
+                var collected = Data()
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    guard collected.count < limit else { throw CodeAPIError.invalidResponse }
+                    collected.append(byte)
+                }
+                return collected
+            } onCancel: { bytes.task.cancel() }
+        } catch {
+            bytes.task.cancel()
+            throw error
+        }
+        guard (200..<300).contains(response.statusCode) else { throw serverError(status: response.statusCode, data: data) }
+        do { return try JSONDecoder().decode(T.self, from: data) }
+        catch { throw CodeAPIError.invalidResponse }
     }
 
     func recovery(sessionID: String, accessToken: String) async throws -> CodeTaskRecovery {
@@ -358,6 +450,14 @@ struct CodeAPIClient: CodeAPIServing {
             message: flat?.error ?? "编程服务暂时不可用",
             retryable: status == 429 || status >= 500
         )
+    }
+}
+
+private final class CodeWorkspaceReadDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 

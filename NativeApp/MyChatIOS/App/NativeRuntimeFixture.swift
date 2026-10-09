@@ -8,6 +8,17 @@ enum NativeRuntimeFixture {
     static let userID = "10000000-0000-4000-8000-000000000064"
     static let conversationID = "20000000-0000-4000-8000-000000000064"
     static let projectID = "30000000-0000-4000-8000-000000000064"
+    // Opt-in UI stress fixture only; a large style payload keeps the DOM small.
+    static let largeArtifactHTML =
+        "<html><head><style>" +
+        String(repeating: "/* Artifact swipe fixture payload */", count: 4096) +
+        "</style></head><body><main><h1>Artifact preview</h1><p>Large return fixture.</p></main></body></html>"
+
+    // Exercise the production inline-SVG renderer as well as the HTML renderer.
+    static let largeArtifactSVG =
+        "<inline-artifact><svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 300 200\"><title>SVG return fixture</title>" +
+        "<!--" + String(repeating: "SVG return fixture payload ", count: 4096) + "-->" +
+        "<circle id=\"fixture-sun\" cx=\"150\" cy=\"100\" r=\"32\" fill=\"orange\"><animate attributeName=\"r\" values=\"32;36;32\" dur=\"2s\" repeatCount=\"indefinite\"/></circle></svg></inline-artifact>"
 
     @MainActor static func makeModel(dataClient: (any SupabaseDataServing)? = nil,
         workspaceClient: (any WorkspaceDataServing)? = nil,
@@ -294,6 +305,21 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     private static var systemPrompt = ""
     private static var deletedConversations: Set<String> = []
     private static var deletedProjects: Set<String> = []
+    private static var codeCancellationCount = 0
+    private static var codeCancellationStatusQueryCount = 0
+    private static let lateCodeJobA = "88000000-0000-4000-8000-000000000064"
+    private static let lateCodeJobB = "88000000-0000-4000-8000-000000000067"
+    private static let lateCodeTask = "88000000-0000-4000-8000-000000000065"
+    private static var lateCodeStreams: [String: NativeAuditURLProtocol] = [:]
+    private static var lateCodeStreamCounts: [String: Int] = [:]
+    private static var lateCodeCancellation: NativeAuditURLProtocol?
+    private static var lateCodeEndedA = false
+    private static var lateCodeReplyScheduled = false
+    private static var lateCodeReplyDelivered = false
+    private static var staleRecoveryEndedA = false
+    private static var staleRecoveryHeldRequest: NativeAuditURLProtocol?
+    private static var staleRecoveryHeldOnce = false
+    private static var staleRecoveryStreams: [String: NativeAuditURLProtocol] = [:]
     static var historicalTestContent: String?
     private static var addedMemories: [[String: Any]] = []
     private static var savedArtifacts: [[String: Any]] = []
@@ -316,7 +342,54 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Offline fixture rejected an unconfigured origin"]))
             return
         }
+        if handleStaleCodeRecovery(url) { return }
+        if handleLateCodeCancellation(url) { return }
         let path = url.path
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay"),
+           path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let fromSequence = components?.queryItems?.first(where: { $0.name == "from_seq" })?.value
+            guard fromSequence == "0" else {
+                let errorResponse = HTTPURLResponse(url: url, statusCode: 400, httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"])!
+                client?.urlProtocol(self, didReceive: errorResponse, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data(#"{"error":"fixture requires from_seq=0"}"#.utf8))
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            let jobID = "88000000-0000-4000-8000-000000000074"
+            let taskID = "88000000-0000-4000-8000-000000000075"
+            func frame(_ sequence: Int, _ kind: String, _ payload: [String: Any]) -> Data {
+                let envelope: [String: Any] = ["jobId": jobID, "seq": sequence, "kind": kind, "payload": payload]
+                let json = try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+                let text = String(data: json, encoding: .utf8)!
+                return Data("id: \(sequence)\nevent: \(kind)\ndata: \(text)\n\n".utf8)
+            }
+            let textEvent = frame(1, "text.delta", ["text": "终态任务回放正文"])
+            let planEvent = frame(2, "agent.plan", ["plan": [
+                "kind": "write_file", "path": "README.md", "newContent": "replayed"
+            ]])
+            let terminalEvent = frame(3, "job.terminal", ["status": "completed", "result": [
+                "mode": "publish_pr", "taskId": taskID, "repo": "mychat/test-app"
+            ]])
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: textEvent)
+            client?.urlProtocol(self, didLoad: textEvent) // replayed sequence is ignored by the client cursor
+            client?.urlProtocol(self, didLoad: planEvent)
+            Thread.sleep(forTimeInterval: 2.0)
+            guard !stopped else { return }
+            client?.urlProtocol(self, didLoad: terminalEvent)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse"),
+           path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
+            // Hold the durable event stream open. The cancellation test proves
+            // task recovery can settle the UI even without a terminal SSE.
+            return
+        }
         let body = Self.body(request)
         Self.lock.lock()
         let (status, payload) = Self.response(path, request.httpMethod ?? "GET", body, url)
@@ -329,6 +402,208 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { stopped = true }
+
+    private func codeFixtureJSON(status: Int, payload: [String: Any]) -> Bool {
+        guard !stopped, let url = request.url, let receiver = client else { return false }
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json", "Cache-Control": "no-store"])!
+        receiver.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        receiver.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: payload))
+        receiver.urlProtocolDidFinishLoading(self)
+        return true
+    }
+
+    private func codeFixtureFrame(_ sequence: Int, kind: String, payload: [String: Any]) {
+        guard !stopped, let url = request.url else { return }
+        let envelope: [String: Any] = ["jobId": url.pathComponents.dropLast().last ?? "",
+            "seq": sequence, "kind": kind, "payload": payload]
+        let json = try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        let text = String(data: json, encoding: .utf8)!
+        client?.urlProtocol(self, didLoad: Data("id: \(sequence)\nevent: \(kind)\ndata: \(text)\n\n".utf8))
+    }
+
+    private func handleStaleCodeRecovery(_ url: URL) -> Bool {
+        guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-stale-recovery") else { return false }
+        let jobID = url.pathComponents.dropLast().last ?? ""
+        if url.path == "/api/code/tasks", request.httpMethod == "GET" {
+            Self.lock.lock()
+            let endedA = Self.staleRecoveryEndedA
+            if endedA && !Self.staleRecoveryHeldOnce {
+                Self.staleRecoveryHeldOnce = true
+                Self.staleRecoveryHeldRequest = self
+                Self.lock.unlock()
+                return true
+            }
+            Self.lock.unlock()
+            _ = codeFixtureJSON(status: 200, payload: Self.staleRecoveryPayload(successor: endedA))
+            return true
+        }
+        guard url.path.hasPrefix("/api/v1/jobs/") else { return false }
+        if url.path.hasSuffix("/events") {
+            Self.lock.lock()
+            Self.staleRecoveryStreams[jobID] = self
+            let held = jobID == Self.lateCodeJobB ? Self.staleRecoveryHeldRequest : nil
+            if held != nil { Self.staleRecoveryHeldRequest = nil }
+            Self.lock.unlock()
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            codeFixtureFrame(1, kind: "text.delta", payload: ["text": jobID == Self.lateCodeJobB ? "新任务已接管" : "任务正在运行"])
+            if let held {
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+                    guard held.codeFixtureJSON(status: 200,
+                        payload: Self.staleRecoveryPayload(successor: false, completed: true)) else { return }
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                        self.codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；旧恢复响应已交付"])
+                    }
+                }
+            }
+            return true
+        }
+        guard url.path.hasSuffix("/cancel"), request.httpMethod == "POST", jobID == Self.lateCodeJobA else { return false }
+        Self.lock.lock()
+        Self.staleRecoveryEndedA = true
+        let stream = Self.staleRecoveryStreams[jobID]
+        Self.lock.unlock()
+        _ = codeFixtureJSON(status: 202, payload: ["jobId": jobID, "accepted": true,
+            "replayed": false, "status": "cancelling", "eventSeq": 1])
+        stream?.codeFixtureFrame(2, kind: "job.terminal", payload: ["status": "completed", "content": "旧任务已结束"])
+        if let stream { stream.client?.urlProtocolDidFinishLoading(stream) }
+        return true
+    }
+
+    private static func staleRecoveryPayload(successor: Bool, completed: Bool = false) -> [String: Any] {
+        let jobID = successor ? lateCodeJobB : lateCodeJobA
+        let responseID = successor ? "88000000-0000-4000-8000-000000000068" : "88000000-0000-4000-8000-000000000066"
+        let status = completed ? "completed" : "running"
+        let evidenceID = successor ? "current-recovery-evidence" : "previous-recovery-evidence"
+        let task: [String: Any] = ["id": lateCodeTask, "status": status,
+            "branch": successor ? "feature/current-task" : "main", "error": NSNull(), "pullRequestUrl": NSNull(),
+            "toolCalls": [], "artifacts": [["id": evidenceID, "kind": "summary",
+                "title": successor ? "当前任务记录" : "旧任务记录", "content": "隔离测试持久记录"]]]
+        let admission: Any
+        if completed {
+            admission = NSNull()
+        } else {
+            admission = ["schemaVersion": 1, "jobId": jobID,
+                "taskId": lateCodeTask, "responseId": responseID, "status": status, "created": false,
+                "streamUrl": "/api/v1/jobs/\(jobID)/events", "trialRemaining": NSNull(), "trialLimit": NSNull()] as [String: Any]
+        }
+        return ["sessionId": "80000000-0000-4000-8000-000000000064", "task": task,
+            "admission": admission, "operationAdmission": NSNull()]
+    }
+
+    private func handleLateCodeCancellation(_ url: URL) -> Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--ui-test-code-late-cancel"),
+              url.path.hasPrefix("/api/v1/jobs/") else { return false }
+        let jobID = url.pathComponents.dropLast().last ?? ""
+        if url.path.hasSuffix("/events") {
+            Self.lock.lock()
+            Self.lateCodeStreams[jobID] = self
+            Self.lateCodeStreamCounts[jobID, default: 0] += 1
+            let count = Self.lateCodeStreamCounts[jobID, default: 0]
+            let resumed = jobID == Self.lateCodeJobB && count > 1
+            if Self.lateCodeEndedA,
+               jobID == Self.lateCodeJobB || arguments.contains("--ui-test-code-cancel-resubscribe") {
+                Self.scheduleLateCodeReply()
+            }
+            Self.lock.unlock()
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            let cursorValue = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "from_seq" })?.value
+            let cursor = max(0, Int(cursorValue ?? "0") ?? 0)
+            if cursor < 1 {
+                codeFixtureFrame(1, kind: "text.delta", payload: ["text": "任务正在运行"])
+            }
+            if resumed {
+                // Replay immutable events before publishing the next sequence after reconnect.
+                if cursor < 2 {
+                    codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；取消响应已交付"])
+                }
+                if cursor < 3 {
+                    codeFixtureFrame(3, kind: "text.delta", payload: ["text": "后继任务已正常恢复"])
+                }
+            }
+            return true
+        }
+        guard url.path.hasSuffix("/cancel"), request.httpMethod == "POST", jobID == Self.lateCodeJobA else {
+            return false
+        }
+        Self.lock.lock()
+        Self.lateCodeCancellation = self
+        Self.lateCodeEndedA = true
+        let stream = Self.lateCodeStreams[jobID]
+        Self.lock.unlock()
+        if !arguments.contains("--ui-test-code-cancel-resubscribe") {
+            stream?.codeFixtureFrame(2, kind: "job.terminal", payload: ["status": "completed", "content": "首个任务已完成"])
+        }
+        if let stream { stream.client?.urlProtocolDidFinishLoading(stream) }
+        // The HTTP response remains held until recovery has reached the selected owner.
+        return true
+    }
+
+    // Called with lock held. No sleeping while holding the fixture's request lock.
+    private static func scheduleLateCodeReply() {
+        guard !lateCodeReplyScheduled, lateCodeCancellation != nil else { return }
+        lateCodeReplyScheduled = true
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+            lock.lock()
+            let pending = lateCodeCancellation
+            lateCodeCancellation = nil
+            let arguments = ProcessInfo.processInfo.arguments
+            let successor = arguments.contains("--ui-test-code-cancel-successor")
+            let resumed = arguments.contains("--ui-test-code-cancel-resubscribe")
+            let stream = successor ? lateCodeStreams[lateCodeJobB] : (resumed ? lateCodeStreams[lateCodeJobA] : nil)
+            lock.unlock()
+            let delivered: Bool
+            if arguments.contains("--ui-test-code-late-cancel-fails") {
+                delivered = pending?.codeFixtureJSON(status: 503, payload: ["error": "隔离测试：迟到取消失败"]) ?? false
+            } else {
+                delivered = pending?.codeFixtureJSON(status: 202, payload: ["jobId": lateCodeJobA,
+                    "accepted": true, "replayed": false, "status": "cancelling", "eventSeq": 1]) ?? false
+            }
+            guard delivered else { return }
+            lock.lock(); lateCodeReplyDelivered = true; lock.unlock()
+            NSLog("CODE_LATE_CANCEL_RESPONSE_DELIVERED")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                stream?.codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；取消响应已交付"])
+                if successor, let stream {
+                    // A normal disconnect after the stale reply must not enter A's cancellation path.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                        stream.client?.urlProtocolDidFinishLoading(stream)
+                    }
+                }
+            }
+        }
+    }
+
+    // Called with lock held by response(). B deliberately shares A's task ID.
+    private static func lateCodeRecovery() -> [String: Any] {
+        let arguments = ProcessInfo.processInfo.arguments
+        let successor = lateCodeEndedA && arguments.contains("--ui-test-code-cancel-successor")
+        let sameJob = arguments.contains("--ui-test-code-cancel-resubscribe")
+        let finished = lateCodeEndedA && !successor && !sameJob
+        if finished { scheduleLateCodeReply() }
+        let jobID = successor ? lateCodeJobB : lateCodeJobA
+        let responseID = successor ? "88000000-0000-4000-8000-000000000068" : "88000000-0000-4000-8000-000000000066"
+        let cancelling = sameJob && lateCodeReplyDelivered && !arguments.contains("--ui-test-code-late-cancel-fails")
+        let status = finished ? "completed" : (cancelling ? "cancelling" : "running")
+        let task: [String: Any] = ["id": lateCodeTask, "status": status, "branch": "main",
+            "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []]
+        let admission: Any
+        if finished {
+            admission = NSNull()
+        } else {
+            admission = ["schemaVersion": 1, "jobId": jobID,
+                "taskId": lateCodeTask, "responseId": responseID, "status": status, "created": false,
+                "streamUrl": "/api/v1/jobs/\(jobID)/events", "trialRemaining": NSNull(), "trialLimit": NSNull()] as [String: Any]
+        }
+        return ["sessionId": "80000000-0000-4000-8000-000000000064", "task": task,
+            "admission": admission, "operationAdmission": NSNull()]
+    }
 
     private static func body(_ request: URLRequest) -> [String: Any] {
         var data = request.httpBody ?? Data()
@@ -349,20 +624,63 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         switch path {
         case "/api/mobile/config":
             return (200, ["supabaseUrl": "https://isolated.mychat.invalid", "supabaseAnonKey": "isolated-anon"])
+        case "/api/code/capabilities":
+            var capabilities: [String: Any] = [
+                "schemaVersion": 1, "cloudOnly": true, "durableQueue": true,
+                "execution": ["backend": "isolated", "location": "local_test", "configured": false,
+                              "verified": false, "reason": "Isolated test fixture; no Cloud verification"]
+            ]
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff") {
+                capabilities["workspaceDiff"] = ["schemaVersion": 1, "formats": ["cas-change-summary", "unified"],
+                    "requiresSnapshotBinding": true, "maxFileBytes": 262144, "maxPatchBytes": 1048576]
+            }
+            return (200, capabilities)
+        case "/api/code/branches":
+            return (200, ["branches": [["name": "main"], ["name": "feature/fixture"]], "defaultBranch": "main"])
+        case "/api/github/status":
+            let connected = ProcessInfo.processInfo.arguments.contains("--ui-test-connected-github")
+            let login: Any = connected ? "fixture-user" : NSNull()
+            return (200, ["connected": connected, "login": login])
+        case "/api/github/repos":
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-connected-github") else {
+                return (401, ["error": "GitHub fixture is not connected"])
+            }
+            return (200, ["repos": [[
+                "name": "mychat-ios",
+                "full_name": "aa339519589-cpu/mychat-ios",
+                "private": true,
+                "description": "Isolated repository fixture"
+            ]]])
         case "/api/models":
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-claude-models") {
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("--ui-test-claude-models") || arguments.contains("--ui-test-long-model-names") {
                 let routes = [("anthropic/claude-fable-5-1", "Claude Fable 5.1"),
                     ("anthropic/claude-opus-5-5", "Claude Opus 5.5"),
                     ("anthropic/claude-sonnet-5-5", "Claude Sonnet 5.5"),
                     ("anthropic/claude-sonnet-5", "Claude Sonnet 5"),
                     ("anthropic/claude-haiku-5.5", "Claude Haiku 5.5"),
                     ("anthropic/claude-haiku-4.5", "Claude Haiku 4.5")]
-                let models: [[String: Any]] = routes.map { id, name in
+                var models: [[String: Any]] = routes.map { id, name in
                     ["id": id, "name": name, "provider": "Anthropic", "access": "quota", "outputKind": "chat",
                      "promptPrice": 0, "completionPrice": 0, "contextLength": 100000,
                      "vision": true, "tools": true, "flagship": false,
                      "reasoningEfforts": ["none", "low", "medium", "high", "xhigh", "max"],
                      "defaultReasoningEffort": "medium", "reasoningMandatory": false]
+                }
+                if arguments.contains("--ui-test-long-model-names") {
+                    let longModels: [(String, String, String)] = [
+                        ("fixture-long-english", "Experimental Multilingual Reasoning Model for Very Long Context and Advanced Tool Use",
+                         "Provider with a deliberately long English description to verify the model row layout"),
+                        ("fixture-long-chinese", "面向复杂知识工作和超长上下文的多语言研究与逻辑推理模型",
+                         "用于验证中文模型说明换行与勾选列对齐的服务提供方")
+                    ]
+                    models.append(contentsOf: longModels.map { id, name, provider in
+                        ["id": id, "name": name, "provider": provider, "access": "quota", "outputKind": "chat",
+                         "promptPrice": 0, "completionPrice": 0, "contextLength": 100000,
+                         "vision": true, "tools": false, "flagship": false,
+                         "reasoningEfforts": ["none", "low", "medium"], "defaultReasoningEffort": "medium",
+                         "reasoningMandatory": false]
+                    })
                 }
                 return (200, ["schemaVersion": 1, "configured": true, "owner": false, "trialLimit": 0, "models": models])
             }
@@ -403,12 +721,97 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "80000000-0000-4000-8000-000000000065", "repo": provisionalRepository, "title": "继续当前任务", "created_at": date, "updated_at": date],
                 ["id": "80000000-0000-4000-8000-000000000066", "repo": "mychat/test-app", "title": "修复登录边界", "created_at": date, "updated_at": date],
             ])
+        case "/rest/v1/code_messages":
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel")
+                || ProcessInfo.processInfo.arguments.contains("--ui-test-code-stale-recovery") {
+                return (200, ["88000000-0000-4000-8000-000000000066", "88000000-0000-4000-8000-000000000068"].map { id in
+                    ["id": id, "session_id": "80000000-0000-4000-8000-000000000064", "role": "assistant",
+                     "content": "隔离任务记录", "meta": NSNull(), "created_at": date] as [String: Any]
+                })
+            }
+            guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") else { return (200, []) }
+            return (200, [[
+                "id": "88000000-0000-4000-8000-000000000076",
+                "session_id": "80000000-0000-4000-8000-000000000066",
+                "role": "assistant", "content": "旧内容", "meta": NSNull(), "created_at": date,
+            ]])
         case "/api/code/tasks":
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else {
                 return (503, ["error": "隔离测试未配置任务恢复"])
             }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel") {
+                return (200, lateCodeRecovery())
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff")
+                || ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff-legacy") {
+                return (200, ["task": ["id": "88000000-0000-4000-8000-000000000075", "status": "completed", "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [],
+                    "artifacts": [["id": "legacy-summary", "kind": "summary", "title": "更改摘要", "content": "已修改两个文件"]]],
+                    "admission": NSNull(), "operationAdmission": NSNull()])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") {
+                let jobID = "88000000-0000-4000-8000-000000000074"
+                let taskID = "88000000-0000-4000-8000-000000000075"
+                let sessionID = "80000000-0000-4000-8000-000000000066"
+                let task: [String: Any] = [
+                    "id": taskID, "status": "completed", "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []
+                ]
+                let admission: [String: Any] = [
+                    "schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+                    "responseId": "88000000-0000-4000-8000-000000000076",
+                    "status": "completed", "created": false,
+                    "streamUrl": "/api/v1/jobs/\(jobID)/events",
+                    "trialRemaining": NSNull(), "trialLimit": NSNull()
+                ]
+                return (200, ["sessionId": sessionID, "task": task, "admission": admission,
+                              "operationAdmission": NSNull()])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse") {
+                let jobID = "88000000-0000-4000-8000-000000000064"
+                let taskID = "88000000-0000-4000-8000-000000000065"
+                let sessionID = "80000000-0000-4000-8000-000000000064"
+                if codeCancellationCount >= 2 { codeCancellationStatusQueryCount += 1 }
+                let cancelled = codeCancellationCount >= 2 && codeCancellationStatusQueryCount >= 2
+                let status = cancelled ? "cancelled" : (codeCancellationCount >= 2 ? "cancelling" : "running")
+                let task: [String: Any] = [
+                    "id": taskID, "status": status, "branch": "main",
+                    "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []
+                ]
+                let admission: Any
+                if cancelled {
+                    admission = NSNull()
+                } else {
+                    admission = [
+                        "schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+                        "responseId": "88000000-0000-4000-8000-000000000066",
+                        "status": status, "created": false,
+                        "streamUrl": "/api/v1/jobs/\(jobID)/events",
+                        "trialRemaining": NSNull(), "trialLimit": NSNull()
+                    ] as [String: Any]
+                }
+                return (200, ["sessionId": sessionID, "task": task, "admission": admission,
+                              "operationAdmission": NSNull()])
+            }
             return (200, ["task": NSNull(), "admission": NSNull()])
-        case "/api/connectors": return (200, ["connectors": []])
+        case "/api/connectors":
+            if method == "POST" {
+                let accessToken = body["accessToken"] as? String
+                let connector: [String: Any] = [
+                    "id": "90000000-0000-4000-8000-000000000066",
+                    "name": body["name"] as? String ?? "Fixture connector",
+                    "serverUrl": body["serverUrl"] as? String ?? "https://connector.example.invalid/mcp",
+                    "enabled": true,
+                    "hasAccessToken": accessToken != nil,
+                    "authType": accessToken == nil ? "none" : "bearer",
+                    "toolCount": 0,
+                    "tools": [],
+                    "createdAt": date,
+                    "updatedAt": date
+                ]
+                return (201, ["connector": connector])
+            }
+            return (200, ["connectors": []])
         case "/api/connectors/directory": return (200, ["entries": [["id": "sample", "name": "Sample service", "description": "An isolated directory entry", "serverUrl": "https://connector.example.invalid/mcp", "authType": "oauth"]], "nextCursor": NSNull()])
         case "/api/tts": return (503, ["error": "隔离测试：模拟语音提供方失败"])
         case "/rest/v1/conversations":
@@ -427,6 +830,25 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             guard query.contains(where: { $0.name == "conversation_id" && $0.value?.contains(NativeRuntimeFixture.conversationID) == true }) else { return (200, []) }
             if let content = historicalTestContent {
                 return (200, [["id": "77700000-0000-4000-8000-000000000064", "role": "assistant", "content": content, "seq": 2, "created_at": date]])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-english-font-reference") {
+                let reply = "Yes, I can! I'm happy to chat in English. Feel free to ask me anything, or tell me what you'd like help with, and we can continue in English or switch to Chinese whenever you like."
+                let summary = "This person is simply asking if I can speak English."
+                return (200, [
+                    ["id": "40000000-0000-4000-8000-000000000063", "role": "user",
+                     "content": "Hello, can you speak English?", "seq": 1, "created_at": date],
+                    ["id": "40000000-0000-4000-8000-000000000064", "role": "assistant", "content": reply,
+                     "thinking": ChatReasoningSummaryStorage.encode(summary) ?? "", "seq": 2, "created_at": date]
+                ].reversed().map { $0 })
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-summary-reference") {
+                let summary = "核对研究资料包并规划后续步骤。\n\n第二段摘要仍然保留，展开后可以继续阅读。"
+                let reply = "<document>\ntitle: 摘要样式测试\nfilename: summary.md\nsummary: 这是文档描述。\n\n# 测试正文\n\n文档内容保持独立。\n</document>\n\n保留摘要下方的回复正文。"
+                return (200, [
+                    ["id": "40000000-0000-4000-8000-000000000063", "role": "user", "content": "整理资料并生成文件。", "seq": 1, "created_at": date],
+                    ["id": "40000000-0000-4000-8000-000000000064", "role": "assistant", "content": reply,
+                     "thinking": ChatReasoningSummaryStorage.encode(summary) ?? "", "seq": 2, "created_at": date]
+                ].reversed().map { $0 })
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-document-reference") {
                 var reply = "<document>\ntitle: 文章 慢下来\nfilename: 文章 慢下来.md\nsummary: 撰写一篇主题自选的文章。\n\n" + NativeRuntimeFixture.referenceArticle + "\n</document>\n\n我写了一篇关于\"慢下来\"的短文,放在上面的文件里了。想换主题或风格(比如更幽默、更正式),告诉我就行。"
@@ -543,11 +965,17 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                     "message_id": "60000000-0000-4000-8000-000000000065",
                     "project_id": NSNull(), "created_at": date, "updated_at": date]])
             }
-            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") {
+            let largeArtifactFixture = ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts-large")
+            let svgArtifactFixture = ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts-svg-large")
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-artifacts") || largeArtifactFixture || svgArtifactFixture {
                 return (200, [[
                     "id": "70000000-0000-4000-8000-000000000064",
                     "title": "动画咖啡杯",
-                    "raw": "<html><body><h1>Artifact preview</h1><p>Fixture artifact.</p></body></html>",
+                    "raw": svgArtifactFixture
+                        ? NativeRuntimeFixture.largeArtifactSVG
+                        : largeArtifactFixture
+                        ? NativeRuntimeFixture.largeArtifactHTML
+                        : "<html><body><h1>Artifact preview</h1><p>Fixture artifact.</p></body></html>",
                     "conversation_id": NativeRuntimeFixture.conversationID,
                     "message_id": "60000000-0000-4000-8000-000000000064",
                     "project_id": NSNull(),
@@ -558,6 +986,61 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             return (200, savedArtifacts)
         case "/rest/v1/profiles": return (200, [])
         default:
+            if path == "/api/agent/tasks/88000000-0000-4000-8000-000000000075/workspace"
+                || path == "/api/agent/tasks/88000000-0000-4000-8000-000000000075/workspace/diff" {
+                guard method == "GET", ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff") else {
+                    return (404, ["error": "Fixture diff capability is unavailable"])
+                }
+                let snapshotID = "99000000-0000-4000-8000-000000000075"
+                let digest = String(repeating: "a", count: 64), head = String(repeating: "b", count: 40)
+                if !path.hasSuffix("/diff") {
+                    return (200, ["status": "durable", "repo": "mychat/test-app", "branch": "main",
+                        "snapshotId": snapshotID, "manifestDigest": digest, "commit": head, "version": 7])
+                }
+                let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+                if query.isEmpty {
+                    return (200, ["diff": "旧版更改摘要，不能当作 patch", "diffFormat": "cas-change-summary",
+                        "snapshotId": snapshotID, "manifestDigest": digest, "head": head, "hasChanges": true,
+                        "changedFiles": [["path": "README.md", "status": "modified"], ["path": "image.bin", "status": "added"]],
+                        "summary": ["added": 1, "modified": 1, "deleted": 0]])
+                }
+                let keys = ["format", "path", "snapshotId", "manifestDigest", "head", "version"]
+                guard query.count == keys.count, Set(query.map(\.name)) == Set(keys),
+                      query.first(where: { $0.name == "format" })?.value == "unified",
+                      query.first(where: { $0.name == "snapshotId" })?.value == snapshotID,
+                      query.first(where: { $0.name == "manifestDigest" })?.value == digest,
+                      query.first(where: { $0.name == "head" })?.value == head,
+                      query.first(where: { $0.name == "version" })?.value == "7",
+                      let selected = query.first(where: { $0.name == "path" })?.value,
+                      ["README.md", "image.bin"].contains(selected) else {
+                    return (400, ["error": "Fixture requires an exact immutable diff selection"])
+                }
+                if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff-stale") {
+                    return (409, ["error": "工作区已更新，请刷新后再查看差异"])
+                }
+                var payload: [String: Any] = ["schemaVersion": 1, "path": selected,
+                    "scope": ["userId": NativeRuntimeFixture.userID, "taskId": "88000000-0000-4000-8000-000000000075",
+                        "repository": "mychat/test-app", "snapshotId": snapshotID, "manifestDigest": digest, "head": head, "version": 7]]
+                if selected == "image.bin" {
+                    payload["status"] = "omitted"; payload["format"] = "none"; payload["reason"] = "binary"
+                } else {
+                    payload["status"] = "ready"; payload["format"] = "unified"
+                    payload["patch"] = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-before\n+after\n"
+                }
+                return (200, payload)
+            }
+            if path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/cancel"), method == "POST",
+               ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-lost-sse") {
+                Thread.sleep(forTimeInterval: 0.4)
+                codeCancellationCount += 1
+                if ProcessInfo.processInfo.arguments.contains("--ui-test-code-cancel-first-fails"),
+                   codeCancellationCount == 1 {
+                    return (503, ["error": "隔离测试：模拟取消服务失败"])
+                }
+                let jobID = url.pathComponents.dropLast().last ?? ""
+                return (202, ["jobId": jobID, "accepted": true, "replayed": false,
+                              "status": "cancelling", "eventSeq": 1])
+            }
             if path.hasPrefix("/api/conversations/"), method == "DELETE" {
                 deletedConversations.insert(url.lastPathComponent); return (200, ["ok": true])
             }

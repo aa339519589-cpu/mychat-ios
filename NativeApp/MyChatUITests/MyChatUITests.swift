@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 final class MyChatUITests: XCTestCase {
     @MainActor func testHorizontalPhotosKeepGestureOwnershipAndReachTheLastImage() {
@@ -57,8 +58,15 @@ final class MyChatUITests: XCTestCase {
         let app = launch()
         let input = app.textViews["composer.input"].firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 5))
-        for label in ["添加内容和工具", "选择模型", "语音转文字"] {
-            let button = app.buttons[label].firstMatch
+        let composerControls: [(String, String)] = [
+            ("composer.add", "添加内容和工具"),
+            ("composer.model-picker", "选择模型"),
+            ("语音转文字", "语音转文字")
+        ]
+        for (identifier, expectedLabel) in composerControls {
+            let button = app.buttons[identifier].firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 5), "Missing composer control: \(identifier)")
+            XCTAssertTrue(button.label.contains(expectedLabel), "Unexpected accessibility label: \(button.label)")
             XCTAssertGreaterThanOrEqual(button.frame.width, 44)
             XCTAssertGreaterThanOrEqual(button.frame.height, 44)
         }
@@ -68,6 +76,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(send.frame.height, 44)
         app.buttons["header.sidebar"].tap()
         app.buttons["sidebar.accountSettings"].tap()
+        app.buttons["功能"].firstMatch.tap()
         let toggle = app.switches["settings.haptics"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         if toggle.value as? String == "1" { toggle.tap() }
@@ -75,6 +84,7 @@ final class MyChatUITests: XCTestCase {
         app.terminate(); app.launch()
         app.buttons["header.sidebar"].tap()
         app.buttons["sidebar.accountSettings"].tap()
+        app.buttons["功能"].firstMatch.tap()
         XCTAssertTrue(toggle.waitForExistence(timeout: 5))
         XCTAssertEqual(toggle.value as? String, "0", "Haptic preference must persist across relaunch")
         toggle.tap()
@@ -129,6 +139,38 @@ final class MyChatUITests: XCTestCase {
             XCTAssertFalse(account.isHittable)
         }
         saveScreenshot(app, "paper-closed-after-repeat")
+    }
+
+    @MainActor private func waitForHittable(_ element: XCUIElement, timeout: TimeInterval) -> Bool {
+        let hittable = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true AND hittable == true"),
+            object: element
+        )
+        return XCTWaiter.wait(for: [hittable], timeout: timeout) == .completed
+    }
+
+    @MainActor private func isEmptyTextField(_ field: XCUIElement, placeholder: String) -> Bool {
+        guard let value = field.value as? String else { return true }
+        return value.isEmpty || value == placeholder
+    }
+
+    @MainActor private func openConnectorSettings(in app: XCUIApplication) {
+        app.buttons["header.sidebar"].tap()
+        let accountSettings = app.buttons["sidebar.accountSettings"].firstMatch
+        XCTAssertTrue(accountSettings.waitForExistence(timeout: 5))
+        accountSettings.tap()
+        let connectors = app.buttons["连接器"].firstMatch
+        XCTAssertTrue(connectors.waitForExistence(timeout: 5))
+        connectors.tap()
+        XCTAssertTrue(app.buttons["添加连接器"].firstMatch.waitForExistence(timeout: 5))
+    }
+
+    @MainActor private func waitForKeyboardDismissal(in app: XCUIApplication) {
+        let keyboardDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in !app.keyboards.firstMatch.exists },
+            object: nil
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [keyboardDismissed], timeout: 5), .completed)
     }
 
     @MainActor private func launch(extra: [String] = []) -> XCUIApplication {
@@ -188,6 +230,59 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["暂无项目"].waitForExistence(timeout: 5))
     }
 
+    @MainActor func testVerticalChatScrollMovesContentWithoutOpeningDrawer() {
+        let app = launch(extra: ["--ui-test-long-chat"])
+        app.buttons["header.sidebar"].tap()
+        let conversation = app.buttons["隔离测试对话"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        conversation.tap()
+        let tail = app.descendants(matching: .any)
+            .matching(identifier: "message.row.50000000-0000-4000-8000-0000000003E8").firstMatch
+        XCTAssertTrue(tail.waitForExistence(timeout: 30))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+
+        let surface = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
+        XCTAssertTrue(surface.waitForExistence(timeout: 5))
+        let headerBottom = app.buttons["header.sidebar"].frame.maxY
+        let visibleTranscript = CGRect(x: app.frame.minX, y: headerBottom,
+            width: app.frame.width, height: surface.frame.minY - headerBottom)
+        XCTAssertGreaterThan(visibleTranscript.height, 100)
+        let rows = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.row."))
+            .allElementsBoundByIndex
+        // A long Markdown message can fill more than the viewport. Its visible
+        // portion remains a valid scrolling anchor without fitting wholly inside.
+        guard let anchor = rows.first(where: {
+            let visible = $0.frame.intersection(visibleTranscript)
+            return $0.isHittable && visible.height >= 44
+                && visible.maxY - visibleTranscript.minY >= 100
+        }) else {
+            let frames = rows.suffix(8).map { "\($0.identifier) frame=\($0.frame) hittable=\($0.isHittable)" }
+                .joined(separator: "; ")
+            XCTFail("Expected a hittable row intersecting transcript \(visibleTranscript); fixture rows: \(frames)")
+            return
+        }
+        let before = anchor.frame.minY
+        let visibleAnchor = anchor.frame.intersection(visibleTranscript)
+        let start = CGPoint(x: visibleAnchor.midX, y: visibleAnchor.maxY - 12)
+        let endY = max(visibleTranscript.minY + 8, start.y - app.frame.height * 0.24)
+        XCTAssertTrue(visibleAnchor.contains(start), "The drag must begin on the visible anchor")
+        XCTAssertGreaterThan(start.y - endY, 40)
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        origin.withOffset(CGVector(dx: start.x - app.frame.minX, dy: start.y - app.frame.minY)).press(forDuration: 0.03,
+            thenDragTo: origin.withOffset(CGVector(dx: start.x - app.frame.minX, dy: endY - app.frame.minY)),
+            withVelocity: .slow, thenHoldForDuration: 0.08)
+
+        let transcriptMoved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            !anchor.isHittable || abs(anchor.frame.minY - before) > 40
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [transcriptMoved], timeout: 5), .completed,
+            "A vertical-intent gesture must still scroll the transcript")
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable,
+            "Vertical transcript scrolling must not reveal the drawer")
+        XCTAssertTrue(app.buttons["header.sidebar"].isHittable)
+    }
+
     @MainActor func testVerticalSwipeWithSidewaysDriftDoesNotOpenDrawer() {
         let app = launch()
         let account = app.buttons["sidebar.accountSettings"]
@@ -212,6 +307,115 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["connectors.default.health"].waitForExistence(timeout: 8))
         XCTAssertFalse(app.buttons["connectors.default.gmail"].exists)
         XCTAssertFalse(app.staticTexts["Gmail"].exists)
+    }
+
+    @MainActor func testConnectorDirectoryPushesAndPreservesEachPriorScreen() throws {
+        let app = launch()
+        openConnectorSettings(in: app)
+
+        let addMenu = app.buttons["添加连接器"].firstMatch
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+        addMenu.tap()
+        app.buttons["浏览连接器"].firstMatch.tap()
+
+        let directorySearch = app.textFields["connector.directory.search"].firstMatch
+        let sample = app.buttons["connector.catalog.sample"].firstMatch
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 8))
+        XCTAssertTrue(sample.waitForExistence(timeout: 8))
+        guard sample.isHittable, directorySearch.exists else { return XCTFail("The isolated directory must be visible before capture") }
+        let directoryRect = app.navigationBars.firstMatch.frame.union(directorySearch.frame).union(sample.frame)
+        try captureFixtureEvidence(app, rect: directoryRect, name: "connector-directory")
+        sample.tap()
+
+        let name = app.textFields["connector.name"].firstMatch
+        let serverURL = app.textFields["connector.server-url"].firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        XCTAssertEqual(name.value as? String, "Sample service")
+        XCTAssertEqual(serverURL.value as? String, "https://connector.example.invalid/mcp")
+        XCTAssertTrue(app.navigationBars["连接服务"].exists)
+        guard name.value as? String == "Sample service",
+              serverURL.value as? String == "https://connector.example.invalid/mcp" else {
+            return XCTFail("Only known isolated connector fields may be captured")
+        }
+        let editorRect = app.navigationBars.firstMatch.frame.union(name.frame).union(serverURL.frame)
+        try captureFixtureEvidence(app, rect: editorRect, name: "connector-editor")
+
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5),
+            "Popping the editor must reveal the same directory screen")
+        XCTAssertTrue(sample.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let editorName = app.textFields["connector.name"].firstMatch
+        XCTAssertTrue(editorName.waitForExistence(timeout: 5))
+        editorName.tap()
+        editorName.typeText("Unsaved draft")
+        app.buttons["connector.directory"].tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5))
+        sample.tap()
+        XCTAssertEqual(editorName.value as? String, "Sample service",
+            "Selecting a common service must update the editor that remains beneath the directory")
+
+        app.buttons["connector.directory"].tap()
+        XCTAssertTrue(directorySearch.waitForExistence(timeout: 5))
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(editorName.waitForExistence(timeout: 5))
+        XCTAssertEqual(editorName.value as? String, "Sample service",
+            "Returning from the nested directory must preserve the editor state")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5),
+            "Canceling the editor must return to connector settings")
+    }
+
+    @MainActor func testConnectorEditorSaveCancelAndRepeatedOpenResetState() throws {
+        let app = launch()
+        openConnectorSettings(in: app)
+        let addMenu = app.buttons["添加连接器"].firstMatch
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let name = app.textFields["connector.name"].firstMatch
+        let serverURL = app.textFields["connector.server-url"].firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.tap()
+        name.typeText("Fixture saved connector")
+        serverURL.tap()
+        serverURL.typeText("https://fixture.example.invalid/mcp")
+        app.buttons["无"].tap()
+        let connect = app.buttons["connector.connect"]
+        XCTAssertTrue(connect.isEnabled)
+        connect.tap()
+
+        XCTAssertTrue(app.staticTexts["Fixture saved connector"].waitForExistence(timeout: 10),
+            "A successful isolated save must return to the connector list")
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        let reopenedName = app.textFields["connector.name"].firstMatch
+        XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
+        XCTAssertTrue(isEmptyTextField(reopenedName, placeholder: "名称"),
+            "Reopening a saved editor must start a fresh custom connector")
+        reopenedName.tap()
+        reopenedName.typeText("Canceled draft")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5),
+            "Back/cancel must pop the editor without dismissing the Settings navigation flow")
+
+        addMenu.tap()
+        app.buttons["添加自定义连接器"].firstMatch.tap()
+        XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
+        XCTAssertTrue(isEmptyTextField(reopenedName, placeholder: "名称"),
+            "Reopening after cancel must not restore a discarded draft")
+        guard isEmptyTextField(reopenedName, placeholder: "名称") else { return XCTFail("The reopened fixture editor must be empty before capture") }
+        try captureFixtureEvidence(app,
+            rect: app.navigationBars.firstMatch.frame.union(reopenedName.frame), name: "connector-reopened")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
     }
 
     /// Reproduces transcript/composer geometry: the newest row must clear the
@@ -287,6 +491,31 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "sidebar-and-top-buttons")
     }
 
+    @MainActor func testSidebarSelectionTraitTracksDestination() {
+        let app = launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
+
+        sidebar.tap()
+        let projects = app.buttons["项目"].firstMatch
+        XCTAssertTrue(projects.waitForExistence(timeout: 5))
+        projects.tap()
+
+        sidebar.tap()
+        let selectedProjects = app.buttons["项目"].firstMatch
+        XCTAssertTrue(selectedProjects.waitForExistence(timeout: 5))
+        XCTAssertTrue(selectedProjects.isSelected)
+
+        let code = app.buttons["编程"].firstMatch
+        XCTAssertTrue(waitForHittable(code, timeout: 5))
+        code.tap()
+        sidebar.tap()
+        let selectedCode = app.buttons["编程"].firstMatch
+        XCTAssertTrue(selectedCode.waitForExistence(timeout: 5))
+        XCTAssertTrue(selectedCode.isSelected)
+        XCTAssertFalse(app.buttons["项目"].firstMatch.isSelected)
+    }
+
     @MainActor func testArtifactLibraryOpensAndDismissesPreviewRepeatedly() {
         let app = launch(extra: ["--ui-test-artifacts"])
         app.buttons["打开侧边栏"].firstMatch.tap()
@@ -334,6 +563,103 @@ final class MyChatUITests: XCTestCase {
                 XCTAssertTrue(artifact.isHittable)
             }
         }
+    }
+
+    @MainActor func testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
+        verifyArtifactEdgeSwipe(fixture: "--ui-test-artifacts-large")
+    }
+
+    @MainActor func testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly() {
+        verifyArtifactEdgeSwipe(fixture: "--ui-test-artifacts-svg-large")
+    }
+
+    @MainActor private func verifyArtifactEdgeSwipe(fixture: String) {
+        let app = launch(extra: [fixture, "--artifact-motion-audit"])
+        app.buttons["打开侧边栏"].firstMatch.tap()
+        app.buttons["可视化"].firstMatch.tap()
+
+        let artifact = app.buttons["artifact-record-70000000-0000-4000-8000-000000000064"].firstMatch
+        XCTAssertTrue(waitForHittable(artifact, timeout: 10))
+        artifact.tap()
+
+        let close = app.buttons["artifact-preview-close"].firstMatch
+        let opened = waitForHittable(close, timeout: 10)
+        recordArtifactPreviewState(app, phase: "opened", captureDetailFrames: true)
+        XCTAssertTrue(opened, "The preview close control must become hittable before an edge gesture")
+        guard opened else { return }
+        if fixture == "--ui-test-artifacts-svg-large" {
+            let native = app.descendants(matching: .any)
+                .matching(identifier: "artifact-native-preview-inline-artifact").firstMatch
+            XCTAssertTrue(native.waitForExistence(timeout: 10),
+                "The SVG fixture must actually open the native inline-artifact preview")
+        }
+        let originalCloseMinX = close.frame.minX
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let width = app.frame.width
+        let y = app.frame.height * 0.55
+
+        func dragFromLeadingEdge(_ distance: CGFloat) {
+            let start = origin.withOffset(CGVector(dx: 5, dy: y))
+            start.press(forDuration: 0.03,
+                thenDragTo: origin.withOffset(CGVector(dx: 5 + distance, dy: y)),
+                withVelocity: .slow, thenHoldForDuration: 0.08)
+        }
+
+        // A short edge drag must settle back in place without dismissing the cover.
+        dragFromLeadingEdge(34)
+        let cancelled = waitForHittable(close, timeout: 5)
+        XCTAssertTrue(cancelled,
+            "A cancelled edge swipe must restore the artifact detail")
+        let settleDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while abs(close.frame.minX - originalCloseMinX) > 2,
+              ProcessInfo.processInfo.systemUptime < settleDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        XCTAssertEqual(close.frame.minX, originalCloseMinX, accuracy: 3,
+            "A cancelled edge swipe must return the detail to its starting position")
+        XCTAssertFalse(artifact.isHittable,
+            "The artifact row must remain covered after a cancelled edge swipe")
+        recordArtifactPreviewState(app, phase: "cancelled", captureDetailFrames: cancelled)
+
+        // The same natural gesture must dismiss the detail and work again after re-entry.
+        for cycle in 0..<2 {
+            if !close.isHittable { artifact.tap() }
+            XCTAssertTrue(waitForHittable(close, timeout: 10))
+            dragFromLeadingEdge(width * 0.33)
+            XCTContext.runActivity(named: "Artifact edge return geometry") { activity in
+                let closeStillExists = close.exists
+                let attachment = XCTAttachment(string: "screenWidth=\(width); requestedTravel=\(width * 0.33); originalCloseMinX=\(originalCloseMinX); closeExistsAfterDrag=\(closeStillExists)")
+                attachment.lifetime = .keepAlways
+                activity.add(attachment)
+            }
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: close)
+            waitForExpectations(timeout: 8)
+            let listRestored = waitForHittable(artifact, timeout: 8)
+            recordArtifactPreviewState(app, phase: "returned-\(cycle)", captureDetailFrames: false)
+            XCTAssertTrue(listRestored,
+                "The artifact list must be restored after the edge swipe")
+        }
+    }
+
+    @MainActor private func recordArtifactPreviewState(_ app: XCUIApplication,
+        phase: String, captureDetailFrames: Bool) {
+        // Only known fixture/control geometry. Never dump the application tree,
+        // arbitrary labels, source HTML, or a frame after its dismissal.
+        let started = ProcessInfo.processInfo.systemUptime
+        let close = app.buttons["artifact-preview-close"].firstMatch
+        let row = app.buttons["artifact-record-70000000-0000-4000-8000-000000000064"].firstMatch
+        let native = app.descendants(matching: .any)
+            .matching(identifier: "artifact-native-preview-inline-artifact").firstMatch
+        let closeExists = close.exists
+        let rowExists = row.exists
+        let nativeExists = native.exists
+        let closeFrame = captureDetailFrames && closeExists ? String(describing: close.frame) : "not-sampled"
+        let nativeFrame = captureDetailFrames && nativeExists ? String(describing: native.frame) : "not-sampled"
+        let diagnostic = "ARTIFACT_PREVIEW_AX phase=\(phase) closeExists=\(closeExists) closeHittable=\(close.isHittable) closeFrame=\(closeFrame) nativeExists=\(nativeExists) nativeFrame=\(nativeFrame) rowExists=\(rowExists) rowHittable=\(row.isHittable) queryMs=\(Int((ProcessInfo.processInfo.systemUptime - started) * 1000))"
+        print(diagnostic)
+        let attachment = XCTAttachment(string: diagnostic)
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor func testArtifactLibraryKeepsEveryDocumentInPackage() {
@@ -564,7 +890,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testConnectedModelsRemainSelectableWithoutMislabelingDefaults() {
         let app = launch(extra: ["--ui-test-claude-models", "--ui-test-connected-model"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         app.buttons["model.more"].tap()
         XCTAssertTrue(app.staticTexts["已连接模型"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["自定义模型"].exists)
@@ -604,7 +930,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testClaudeModelNamesAndNativeEffortNavigation() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--ui-test-claude-models"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         for name in ["Fable 5.1", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"] {
             XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
         }
@@ -626,7 +952,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testModelsEffortAndCompactAddMenu() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         XCTAssertTrue(app.buttons["model.more"].waitForExistence(timeout: 5))
         app.buttons["model.effort"].tap()
         XCTAssertTrue(app.buttons["effort.low"].waitForExistence(timeout: 5)); app.buttons["effort.low"].tap()
@@ -636,7 +962,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["更多模型"].waitForExistence(timeout: 5))
         saveScreenshot(app, "more-models-dark")
         app.buttons["返回"].firstMatch.tap(); app.buttons["关闭"].firstMatch.tap()
-        app.buttons["添加内容和工具"].firstMatch.tap()
+        app.buttons["composer.add"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["添加到聊天"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["照片"].exists)
         let camera = app.buttons["拍照"].firstMatch
@@ -649,6 +975,144 @@ final class MyChatUITests: XCTestCase {
         XCTAssertFalse(app.switches["扩展思考"].exists)
         XCTAssertFalse(app.switches["自动网页搜索"].exists)
         saveScreenshot(app, "add-menu-dark")
+    }
+
+    @MainActor func testComposerButtonsAcceptSmallHorizontalTouchDrift() {
+        let app = launch(extra: ["--ui-test-open-conversation"])
+        let add = app.buttons["composer.add"].firstMatch
+        let model = app.buttons["composer.model-picker"].firstMatch
+        guard add.waitForExistence(timeout: 10), model.waitForExistence(timeout: 10) else {
+            XCTFail("Expected stable composer controls in an existing conversation")
+            return
+        }
+        waitForKeyboardDismissal(in: app)
+
+        for (button, title) in [(add, "添加到聊天"), (model, "选择模型")] {
+            let keyboard = app.keyboards.firstMatch
+            guard waitForHittable(button, timeout: 10) else {
+                XCTFail("Pre-gesture button is not hittable; frame=\(button.frame); keyboard=\(keyboard.exists ? String(describing: keyboard.frame) : "not present")")
+                return
+            }
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let frame = button.frame
+            origin.withOffset(CGVector(dx: frame.midX, dy: frame.midY)).press(forDuration: 0.08,
+                thenDragTo: origin.withOffset(CGVector(dx: frame.midX + 15, dy: frame.midY)),
+                withVelocity: .slow, thenHoldForDuration: 0.01)
+            let sheetTitle = app.staticTexts[title].firstMatch
+            guard sheetTitle.waitForExistence(timeout: 8) else {
+                XCTFail("15 pt horizontal drift failed to open \(title); button frame=\(frame); keyboard=\(keyboard.exists ? String(describing: keyboard.frame) : "not present")")
+                return
+            }
+            app.buttons["关闭"].firstMatch.tap()
+            waitForKeyboardDismissal(in: app)
+            XCTAssertTrue(waitForHittable(button, timeout: 8),
+                "Composer control must be hittable after dismissal: \(title)")
+        }
+    }
+
+    @MainActor func testComposerSheetsReopenAfterSelectingConversation() {
+        let app = launch()
+        app.buttons["header.sidebar"].tap()
+        let conversation = app.buttons["隔离测试对话"].firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 5))
+        conversation.tap()
+
+        let add = app.buttons["composer.add"].firstMatch
+        let model = app.buttons["composer.model-picker"].firstMatch
+        XCTAssertTrue(waitForHittable(add, timeout: 10),
+            "The composer must become interactive after a history row closes the drawer")
+        XCTAssertTrue(waitForHittable(model, timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar.accountSettings"].isHittable)
+
+        let routes: [(XCUIElement, String)] = [
+            (model, "选择模型"),
+            (add, "添加到聊天"),
+            (model, "选择模型"),
+            (add, "添加到聊天")
+        ]
+        func interactionState(_ phase: String, title: String) -> String {
+            let keyboard = app.keyboards.firstMatch
+            let keyboardFrame = keyboard.exists ? String(describing: keyboard.frame) : "absent"
+            let addExists = add.exists, modelExists = model.exists
+            let addFrame = addExists ? String(describing: add.frame) : "absent"
+            let modelFrame = modelExists ? String(describing: model.frame) : "absent"
+            return "COMPOSER_REOPEN_AX phase=\(phase) route=\(title) sheetTitleExists=\(app.staticTexts[title].firstMatch.exists) addExists=\(addExists) addEnabled=\(addExists && add.isEnabled) addHittable=\(addExists && add.isHittable) addFrame=\(addFrame) modelExists=\(modelExists) modelEnabled=\(modelExists && model.isEnabled) modelHittable=\(modelExists && model.isHittable) modelFrame=\(modelFrame) keyboardFrame=\(keyboardFrame)"
+        }
+        for (button, title) in routes {
+            guard waitForHittable(button, timeout: 5) else {
+                saveScreenshot(app, "composer-unavailable-before-" + title)
+                let state = interactionState("before", title: title)
+                let details = XCTAttachment(string: state)
+                details.lifetime = .keepAlways
+                self.add(details)
+                print(state)
+                XCTFail("Composer control unavailable before \(title); \(state)")
+                return
+            }
+            button.tap()
+            let sheetTitle = app.staticTexts[title].firstMatch
+            XCTAssertTrue(sheetTitle.waitForExistence(timeout: 10))
+            let close = app.buttons["关闭"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 5))
+            close.tap()
+            let dismissedAndInteractive = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                !sheetTitle.exists && add.isHittable && model.isHittable
+            }, object: nil)
+            let settled = XCTWaiter.wait(for: [dismissedAndInteractive], timeout: 10)
+            if settled != .completed {
+                saveScreenshot(app, "composer-unavailable-after-" + title)
+                let state = interactionState("after", title: title)
+                let details = XCTAttachment(string: state)
+                details.lifetime = .keepAlways
+                self.add(details)
+                print(state)
+            }
+            XCTAssertEqual(settled, .completed,
+                "Dismissal must finish and both composer controls must return; \(interactionState("after", title: title))")
+        }
+    }
+
+    @MainActor func testComposerSheetsOpenFromNewAndExistingChatsWithKeyboard() {
+        for extra in [[], ["--ui-test-open-conversation"]] {
+            let app = launch(extra: extra)
+            let add = app.buttons["composer.add"].firstMatch
+            let model = app.buttons["composer.model-picker"].firstMatch
+            let input = app.descendants(matching: .any).matching(identifier: "composer.input").firstMatch
+            XCTAssertTrue(add.waitForExistence(timeout: 10))
+            XCTAssertTrue(model.waitForExistence(timeout: 10))
+            XCTAssertTrue(add.isHittable)
+            XCTAssertTrue(model.isHittable)
+
+            model.tap()
+            XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            let close = app.buttons["关闭"].firstMatch
+            XCTAssertTrue(close.isHittable)
+            close.tap()
+
+            XCTAssertTrue(add.waitForExistence(timeout: 5))
+            add.tap()
+            XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 10))
+            close.tap()
+
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(add.isHittable)
+            add.tap()
+            XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 10))
+            waitForKeyboardDismissal(in: app)
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            close.tap()
+
+            input.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+            XCTAssertTrue(model.isHittable)
+            model.tap()
+            XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            waitForKeyboardDismissal(in: app)
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            close.tap()
+            app.terminate()
+        }
     }
 
     @MainActor func testProfilePhotoMenuInstructionsSaveAndSupportedCapabilities() {
@@ -683,7 +1147,7 @@ final class MyChatUITests: XCTestCase {
 
     @MainActor func testHomeMascotAndPrivateHeaderPositions() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark"])
-        app.buttons["选择模型"].tap()
+        app.buttons["composer.model-picker"].tap()
         app.buttons["关闭"].firstMatch.tap()
         let logo = app.images["home.logo"]
         XCTAssertTrue(logo.waitForExistence(timeout: 5))
@@ -724,11 +1188,26 @@ final class MyChatUITests: XCTestCase {
         saveScreenshot(app, "account-settings")
     }
 
+    @MainActor func testPasswordAndPrivacyShareOneSettingsEntry() {
+        let app = launch()
+        app.buttons["打开侧边栏"].firstMatch.tap()
+        app.buttons["sidebar.accountSettings"].tap()
+
+        let combined = app.buttons["密码与隐私"].firstMatch
+        XCTAssertTrue(combined.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["密码"].exists)
+        XCTAssertFalse(app.buttons["隐私"].exists)
+        combined.tap()
+
+        XCTAssertTrue(app.buttons["密码"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["隐私"].firstMatch.exists)
+    }
+
     @MainActor func testComposerKeyboardAndPrivacyTransitionsStayStable() {
         let app = launch(extra: ["-AppleInterfaceStyle", "Dark", "--layout-audit"])
         // Close the initial keyboard through a real modal, then start from the
         // same resting state as the user's recording.
-        app.buttons["选择模型"].tap()
+        app.buttons["composer.model-picker"].tap()
         app.buttons["关闭"].firstMatch.tap()
         let input = app.textViews["composer.input"]
         let surface = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
@@ -764,7 +1243,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertEqual(logo.frame.minY, openLogo.minY, accuracy: 0.5)
             XCTAssertEqual(surface.frame.minY, openSurface.minY, accuracy: 0.5)
             saveScreenshot(app, "input-short-stable-\(cycle)")
-            app.buttons["选择模型"].tap()
+            app.buttons["composer.model-picker"].tap()
             app.buttons["关闭"].firstMatch.tap()
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             XCTAssertEqual(logo.frame.minY, restingLogo.minY, accuracy: 0.5)
@@ -792,6 +1271,155 @@ final class MyChatUITests: XCTestCase {
                 XCTAssertEqual(app.keyboards.firstMatch.exists, keyboardOpen)
             }
         }
+    }
+
+    @MainActor func testOriginalEnglishReadingFontKeepsSummarySansSerif() throws {
+        let prompt = "Hello, can you speak English?"
+        let response = "Yes, I can! I'm happy to chat in English. Feel free to ask me anything, or tell me what you'd like help with, and we can continue in English or switch to Chinese whenever you like."
+        let summary = "This person is simply asking if I can speak English."
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-english-font-reference", "-AppleInterfaceStyle", appearance])
+            app.buttons["header.sidebar"].firstMatch.tap()
+            let history = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(history, timeout: 10))
+            history.tap()
+            let user = app.staticTexts[prompt].firstMatch
+            let reply = app.staticTexts.matching(NSPredicate(format: "label == %@", response)).firstMatch
+            let row = app.buttons["document.thinking"].firstMatch
+            guard user.waitForExistence(timeout: 10), reply.waitForExistence(timeout: 10),
+                  waitForHittable(row, timeout: 10), row.value as? String == summary else {
+                return XCTFail("The known English fixture and public summary must be visible before capture")
+            }
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let composer = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
+            XCTAssertTrue(composer.exists)
+            let rect = user.frame.union(row.frame).union(reply.frame)
+            XCTAssertGreaterThan(rect.minY, app.buttons["header.sidebar"].frame.maxY)
+            XCTAssertLessThan(rect.maxY, composer.frame.minY)
+            try captureFixtureEvidence(app, rect: rect, name: "font-reference-" + appearance)
+            app.terminate()
+        }
+    }
+
+    @MainActor func testChatHeaderMatchesCanvasInLightAndDarkAppearance() throws {
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-reference-chat", "-AppleInterfaceStyle", appearance])
+            let sidebar = app.buttons["header.sidebar"].firstMatch
+            sidebar.tap()
+            let history = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(history, timeout: 10))
+            history.tap()
+            let reply = app.staticTexts["你好！有什么我可以帮你的吗？"].firstMatch
+            XCTAssertTrue(reply.waitForExistence(timeout: 10))
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let newChat = app.buttons["header.new-chat"].firstMatch
+            let sidebarReady = waitForHittable(sidebar, timeout: 5)
+            if !sidebarReady {
+                recordHeaderHitFailure(app, phase: appearance + ".after-history", target: "header.sidebar")
+            }
+            XCTAssertTrue(sidebarReady)
+            XCTAssertTrue(waitForHittable(newChat, timeout: 5))
+
+            let screenshot = try XCTUnwrap(app.screenshot().image.cgImage)
+            let bounds = app.frame
+            let scaleX = CGFloat(screenshot.width) / bounds.width
+            let scaleY = CGFloat(screenshot.height) / bounds.height
+            func pixels(_ rect: CGRect) -> CGRect {
+                CGRect(x: (rect.minX - bounds.minX) * scaleX,
+                    y: (rect.minY - bounds.minY) * scaleY,
+                    width: rect.width * scaleX, height: rect.height * scaleY).integral
+            }
+            // The reference fixture has no centered header title. Sample the
+            // empty header center and the canvas outside the transcript margin.
+            let headerRect = CGRect(x: bounds.midX - 4, y: sidebar.frame.minY + 4, width: 8, height: 8)
+            let canvasRect = CGRect(x: bounds.minX + 8, y: bounds.minY + bounds.height * 0.55, width: 8, height: 8)
+            let header = try XCTUnwrap(screenshot.cropping(to: pixels(headerRect)))
+            let canvas = try XCTUnwrap(screenshot.cropping(to: pixels(canvasRect)))
+            let headerBrightness = try sampledBrightness(header)
+            let canvasBrightness = try sampledBrightness(canvas)
+            print("HEADER_CANVAS appearance=\(appearance) header=\(headerBrightness) canvas=\(canvasBrightness) delta=\(headerBrightness - canvasBrightness)")
+            if appearance == "Dark" {
+                XCTAssertLessThan(canvasBrightness, 0.2, "The fixture must actually be in dark appearance")
+                XCTAssertLessThanOrEqual(abs(headerBrightness - canvasBrightness), 0.035,
+                    "The dark header must not add a bright halo above the chat canvas")
+            } else {
+                XCTAssertGreaterThan(canvasBrightness, 0.7, "The fixture must actually be in light appearance")
+                XCTAssertLessThanOrEqual(abs(headerBrightness - canvasBrightness), 0.08)
+            }
+
+            // Exportable evidence contains only the known fixture's header
+            // controls and an 8pt canvas swatch, never transcript/account text.
+            let stripRect = CGRect(x: bounds.minX, y: sidebar.frame.minY - 4,
+                width: bounds.width, height: sidebar.frame.height + 8)
+            let strip = try XCTUnwrap(screenshot.cropping(to: pixels(stripRect)))
+            for (name, crop) in [("header-strip-", strip), ("header-canvas-", canvas)] {
+                try retainFixtureEvidence(crop, name: name + appearance)
+            }
+
+            sidebar.tap()
+            let accountReady = waitForHittable(app.buttons["sidebar.accountSettings"].firstMatch, timeout: 5)
+            if !accountReady {
+                recordHeaderHitFailure(app, phase: appearance + ".reopened-drawer", target: "sidebar.accountSettings")
+            }
+            XCTAssertTrue(accountReady)
+            history.tap()
+            XCTAssertTrue(waitForHittable(newChat, timeout: 5))
+            newChat.tap()
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: reply)
+            waitForExpectations(timeout: 5)
+            XCTAssertTrue(app.textViews["composer.input"].exists)
+            app.terminate()
+        }
+    }
+
+    @MainActor private func recordHeaderHitFailure(_ app: XCUIApplication, phase: String, target: String) {
+        // Inspect one immutable AX snapshot after the original wait has failed.
+        // Never read a vanished element's live frame or print labels/account values.
+        do {
+            let snapshot = try app.snapshot()
+            var pending = [snapshot]
+            var controls: [[String: Any]] = []
+            var windows: [String] = []
+            var keyboards = 0
+            var visited = 0
+            let identifiers: Set<String> = ["header.sidebar", "header.new-chat",
+                "sidebar.accountSettings", "sidebar.newChat", "composer.surface"]
+            while visited < 2048, let node = pending.popLast() {
+                visited += 1
+                if node.elementType == .keyboard { keyboards += 1 }
+                if node.elementType == .window, windows.count < 8 {
+                    windows.append(String(describing: node.frame))
+                }
+                var name: String?
+                if identifiers.contains(node.identifier) { name = node.identifier }
+                if node.elementType == .button, node.label == "隔离测试对话" { name = "fixture.history" }
+                if node.elementType == .button, node.label == "关闭侧边栏" { name = "drawer.close-shield" }
+                if let name, controls.count < 24 {
+                    controls.append(["control": name, "frame": String(describing: node.frame),
+                        "enabled": node.isEnabled])
+                }
+                pending.append(contentsOf: node.children)
+            }
+            let payload: [String: Any] = ["phase": phase, "target": target, "waitSeconds": 5,
+                "appFrame": String(describing: snapshot.frame), "windows": windows,
+                "keyboardCount": keyboards, "controls": controls, "snapshotTruncated": !pending.isEmpty]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            if let text = String(data: data, encoding: .utf8) { print("HEADER_HIT_FAILURE " + text) }
+        } catch {
+            print("HEADER_HIT_FAILURE phase=\(phase) target=\(target) snapshotUnavailable=true")
+        }
+    }
+
+    private func sampledBrightness(_ image: CGImage) throws -> Double {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        try pixel.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1]) + 0.0722 * Double(pixel[2])) / 255
     }
 
     @MainActor func testReferenceComposerHasOneBoundedSurfaceAndFollowsKeyboard() {
@@ -854,7 +1482,7 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(app.staticTexts["Swift 代码"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-code-\(appearance)")
             app.buttons["关闭"].firstMatch.tap()
-            app.buttons["选择模型"].firstMatch.tap()
+            app.buttons["composer.model-picker"].firstMatch.tap()
             XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
             XCTAssertTrue(app.staticTexts["测试模型"].firstMatch.exists,
                 "The selected fixture model must remain available in the native model picker")
@@ -873,6 +1501,54 @@ final class MyChatUITests: XCTestCase {
             app.buttons["可视化"].firstMatch.tap()
             XCTAssertTrue(app.textFields["搜索"].firstMatch.waitForExistence(timeout: 5))
             saveScreenshot(app, "claude-aligned-artifacts-\(appearance)")
+            app.terminate()
+        }
+    }
+
+    @MainActor func testReasoningSummaryShowsProviderPreviewAndReopensInBothAppearances() {
+        let opening = "核对研究资料包并规划后续步骤。"
+        let preview = "第二段摘要仍然保留，展开后可以继续阅读。"
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-summary-reference", "-AppleInterfaceStyle", appearance])
+            app.buttons["header.sidebar"].firstMatch.tap()
+            let conversation = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(conversation, timeout: 10))
+            conversation.tap()
+
+            let row = app.buttons["document.thinking"].firstMatch
+            XCTAssertTrue(waitForHittable(row, timeout: 10))
+            XCTAssertEqual(row.value as? String, preview,
+                "The collapsed row must show the latest public summary, not the first line or document description")
+            XCTAssertGreaterThanOrEqual(row.frame.height, 40)
+            XCTAssertLessThanOrEqual(row.frame.maxX, app.frame.maxX - 8)
+            saveScreenshot(app, "reasoning-summary-preview-" + appearance)
+
+            for cycle in 0..<3 {
+                row.tap()
+                XCTAssertTrue(app.staticTexts["思考摘要"].firstMatch.waitForExistence(timeout: 5))
+                let sheet = app.descendants(matching: .any).matching(identifier: "document.thinking.sheet").firstMatch
+                XCTAssertTrue(sheet.waitForExistence(timeout: 5))
+                let body = sheet.descendants(matching: .any).matching(identifier: "document.thinking.content").firstMatch
+                XCTAssertTrue(body.waitForExistence(timeout: 5))
+                // MarkdownBody is one attributed Text. Scope this to the sheet
+                // body so the obscured collapsed preview cannot satisfy it.
+                let bodyLabels = ([body.label] + body.staticTexts.allElementsBoundByIndex.map(\.label)).joined(separator: "\n")
+                let openingPresent = bodyLabels.contains(opening)
+                let latestPresent = bodyLabels.contains(preview)
+                let safeDiagnostic = "SUMMARY_EXPANDED_AX \(appearance)-\(cycle) sheet=document.thinking.sheet body=document.thinking.content elementType=\(body.elementType.rawValue) frame=\(body.frame) characters=\(bodyLabels.count) knownOpeningPresent=\(openingPresent) knownLatestPresent=\(latestPresent)"
+                print(safeDiagnostic)
+                XCTAssertTrue(openingPresent, "Opening paragraph missing from the expanded summary body")
+                XCTAssertTrue(latestPresent, "Latest paragraph missing from the expanded summary body")
+                let contents = XCTAttachment(string: safeDiagnostic)
+                contents.lifetime = .keepAlways
+                add(contents)
+                saveScreenshot(app, "reasoning-summary-expanded-\(appearance)-\(cycle)")
+                let close = app.buttons["关闭"].firstMatch
+                XCTAssertTrue(waitForHittable(close, timeout: 5))
+                close.tap()
+                XCTAssertTrue(waitForHittable(row, timeout: 5))
+                XCTAssertEqual(row.value as? String, preview)
+            }
             app.terminate()
         }
     }
@@ -914,12 +1590,12 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(app.buttons["关闭文件预览"].firstMatch.waitForExistence(timeout: 5))
         saveScreenshot(app, "uploaded-pdf-preview")
         app.buttons["关闭文件预览"].firstMatch.tap()
-        app.buttons["选择模型"].firstMatch.tap()
+        app.buttons["composer.model-picker"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["选择模型"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertFalse(app.switches["扩展思考"].exists)
         XCTAssertFalse(app.staticTexts["思考深度"].exists)
         app.buttons["关闭"].firstMatch.tap()
-        app.buttons["添加内容和工具"].firstMatch.tap()
+        app.buttons["composer.add"].firstMatch.tap()
         XCTAssertTrue(app.staticTexts["添加到聊天"].firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["照片"].firstMatch.exists)
         XCTAssertTrue(app.buttons["拍照"].firstMatch.exists)
@@ -929,11 +1605,47 @@ final class MyChatUITests: XCTestCase {
         let photo = app.buttons["添加最近照片"].firstMatch
         if photo.exists {
             photo.tap()
-            XCTAssertTrue(app.buttons["选择模型"].firstMatch.waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["composer.model-picker"].firstMatch.waitForExistence(timeout: 10))
             let image = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "attachment.remove-")).firstMatch
             XCTAssertTrue(image.waitForExistence(timeout: 5))
             saveScreenshot(app, "recent-photo-attached")
         }
+    }
+
+    @MainActor private func captureFixtureEvidence(_ app: XCUIApplication, rect: CGRect, name: String) throws {
+        guard app.launchArguments.contains("--ui-test-mode") else {
+            return XCTFail("Screenshots may only be retained for the isolated UI fixture")
+        }
+        let screenshot = try XCTUnwrap(app.screenshot().image.cgImage)
+        let bounds = app.frame
+        let cropRect = rect.insetBy(dx: -4, dy: -4).intersection(bounds)
+        let scaleX = CGFloat(screenshot.width) / bounds.width
+        let scaleY = CGFloat(screenshot.height) / bounds.height
+        let pixels = CGRect(x: (cropRect.minX - bounds.minX) * scaleX,
+            y: (cropRect.minY - bounds.minY) * scaleY,
+            width: cropRect.width * scaleX, height: cropRect.height * scaleY).integral
+        let crop = try XCTUnwrap(screenshot.cropping(to: pixels))
+        try retainFixtureEvidence(crop, name: name)
+    }
+
+    @MainActor private func retainFixtureEvidence(_ crop: CGImage, name: String) throws {
+        let allowed = ["header-strip-Light", "header-canvas-Light", "header-strip-Dark", "header-canvas-Dark",
+            "connector-directory", "connector-editor", "connector-reopened", "font-reference-Light", "font-reference-Dark"]
+        guard allowed.contains(name) else { return XCTFail("Unapproved fixture screenshot name") }
+        let image = UIImage(cgImage: crop)
+        let data = try XCTUnwrap(image.pngData())
+        let cache = try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+        let directory = cache.appendingPathComponent("MyChatFixtureEvidence", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: directory.appendingPathComponent(name + ".png"), options: .atomic)
+        let metadata: [String: Any] = ["name": name, "bundle": try XCTUnwrap(Bundle.main.bundleIdentifier),
+            "width": crop.width, "height": crop.height]
+        let record = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
+        print("MYCHAT_UI_EVIDENCE " + (try XCTUnwrap(String(data: record, encoding: .utf8))))
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor private func saveScreenshot(_ app: XCUIApplication, _ name: String) {
