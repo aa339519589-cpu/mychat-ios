@@ -176,7 +176,6 @@ jobs:
             -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactLibraryOpensAndDismissesPreviewRepeatedly \
-            -only-testing:MyChatUITests/MyChatUITests/testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             -only-testing:MyChatUITests/MyChatUITests/testSidebarSelectionTraitTracksDestination \
             -only-testing:MyChatUITests/MyChatUITests/testPasswordAndPrivacyShareOneSettingsEntry \
             -only-testing:MyChatUITests/MyChatUITests/testComposerTouchTargetsAndHapticPreferencePersist \
@@ -217,4 +216,5 @@ jobs:
             -collect-test-diagnostics never \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactLibraryOpensAndDismissesPreviewRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             test
