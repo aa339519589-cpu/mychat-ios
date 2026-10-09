@@ -55,6 +55,7 @@
 		200000000000000000000027 /* provider-zai.png in Resources */ = {isa = PBXBuildFile; fileRef = 300000000000000000000029 /* provider-zai.png */; };
 		A06400000000000000000002 /* NativeRuntimeFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000001 /* NativeRuntimeFixture.swift */; };
 		A06400000000000000000005 /* MyChatRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000004 /* MyChatRuntimeTests.swift */; };
+		2C3EFCC20B3113B1BD4F9D05 /* DotCoordinatedTerminalUIKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA99A761C51F77B1417BB699 /* DotCoordinatedTerminalUIKitTests.swift */; };
 		A06400000000000000000011 /* MyChatUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000010 /* MyChatUITests.swift */; };
 		A06400000000000000000021 /* MyChatRuntimeTests/tts.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = A06400000000000000000020 /* MyChatRuntimeTests/tts.mp3 */; };
 		B10000000000000000000001 /* ChatGPTPlanModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* ChatGPTPlanModels.swift */; };
@@ -140,6 +141,7 @@
 		F25000000000000000000002 /* ReadingFonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReadingFonts; sourceTree = "<group>"; };
 		A06400000000000000000001 /* NativeRuntimeFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRuntimeFixture.swift; sourceTree = "<group>"; };
 		A06400000000000000000004 /* MyChatRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatRuntimeTests.swift; sourceTree = "<group>"; };
+		AA99A761C51F77B1417BB699 /* DotCoordinatedTerminalUIKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DotCoordinatedTerminalUIKitTests.swift; sourceTree = "<group>"; };
 		A06400000000000000000006 /* MyChatRuntimeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MyChatRuntimeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A06400000000000000000010 /* MyChatUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MyChatUITests.swift; sourceTree = "<group>"; };
 		A06400000000000000000012 /* MyChatUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = MyChatUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -335,6 +337,7 @@
 			isa = PBXGroup;
 			children = (
 				A06400000000000000000004 /* MyChatRuntimeTests.swift */,
+				AA99A761C51F77B1417BB699 /* DotCoordinatedTerminalUIKitTests.swift */,
 				CC1020000000000000000004 /* CodeWorkspaceTests.swift */,
 			);
 			path = MyChatRuntimeTests;
@@ -526,6 +529,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A06400000000000000000005 /* MyChatRuntimeTests.swift in Sources */,
+				2C3EFCC20B3113B1BD4F9D05 /* DotCoordinatedTerminalUIKitTests.swift in Sources */,
 				CC1020000000000000000003 /* CodeWorkspaceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

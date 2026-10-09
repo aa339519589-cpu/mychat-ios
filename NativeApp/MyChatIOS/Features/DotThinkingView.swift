@@ -81,6 +81,7 @@ final class DotAnimationSurface: UIControl {
     private var targetContentY: CGFloat?
     private var positionID: UUID?
     private var previousPositionTime: CFTimeInterval?
+    private var terminalPlacement = DotTerminalPlacement()
     private lazy var positionTarget = DotPositionTarget(self)
     private var frames: DotMotionFrames?
     private var loading: Task<Void, Never>?
@@ -129,13 +130,23 @@ final class DotAnimationSurface: UIControl {
     deinit { loading?.cancel(); idleTimer?.invalidate(); positionLink?.invalidate(); observers.forEach(NotificationCenter.default.removeObserver) }
 
     func configure(isGenerating: Bool, reduceMotion: Bool, isSuspended: Bool, positionID: UUID) {
-        if self.positionID != positionID {
+        let changedPosition = self.positionID != positionID
+        if changedPosition {
             self.positionID = positionID
             displayedContentY = nil
             targetContentY = nil
             previousPositionTime = nil
+            terminalPlacement.reset()
+            applyPositionOffset(0)
         }
         let changedGeneration = self.isGenerating != isGenerating
+        if changedGeneration {
+            if isGenerating { terminalPlacement.reset() }
+            else if !changedPosition, let window, positionScrollView != nil {
+                let visible = CGPoint(x: bounds.midX, y: bounds.midY + imageLayer.transform.m42)
+                terminalPlacement.begin(at: convert(visible, to: window).y, now: CACurrentMediaTime())
+            }
+        }
         self.isGenerating = isGenerating
         self.reduceMotion = reduceMotion
         explicitlySuspended = isSuspended
@@ -161,11 +172,18 @@ final class DotAnimationSurface: UIControl {
         refreshPlayback()
     }
 
+    override var frame: CGRect { didSet { synchronizeCompletedPlacement() } }
+    override var center: CGPoint { didSet { synchronizeCompletedPlacement() } }
+    override var bounds: CGRect { didSet { synchronizeCompletedPlacement() } }
+    override var transform: CGAffineTransform { didSet { synchronizeCompletedPlacement() } }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        imageLayer.frame = bounds
-        outgoingLayer.frame = bounds
+        imageLayer.bounds = CGRect(origin: .zero, size: bounds.size)
+        imageLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        outgoingLayer.bounds = imageLayer.bounds
+        outgoingLayer.position = imageLayer.position
         screenGlow.frame = bounds
         let screen = UIBezierPath()
         screen.move(to: CGPoint(x: bounds.width * 0.30, y: bounds.height * 0.45))
@@ -175,8 +193,11 @@ final class DotAnimationSurface: UIControl {
         screen.close()
         screenGlow.path = screen.cgPath
         CATransaction.commit()
+        synchronizeCompletedPlacement()
     }
-    override func didMoveToWindow() { super.didMoveToWindow(); refreshPlayback() }
+    override func didMoveToWindow() {
+        super.didMoveToWindow(); refreshPlayback(); synchronizeCompletedPlacement()
+    }
     override func accessibilityActivate() -> Bool { tapped(); return true }
 
     private func show(_ next: DotCompanionMode) {
@@ -265,15 +286,16 @@ final class DotAnimationSurface: UIControl {
                 pulse.calculationMode = .cubic
                 screenGlow.add(pulse, forKey: "key-light")
             }
-            if positionLink == nil {
-                let link = CADisplayLink(target: positionTarget, selector: #selector(DotPositionTarget.tick))
-                link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
-                link.add(to: .main, forMode: .common)
-                positionLink = link
-            }
         } else {
             screenGlow.removeAllAnimations()
             screenGlow.opacity = 0
+        }
+        if canAnimate && isGenerating {
+            startPositionTracking()
+        } else if canAnimate && terminalPlacement.isActive {
+            synchronizeCompletedPlacement()
+        } else {
+            terminalPlacement.suspend()
             positionLink?.invalidate(); positionLink = nil
             displayedContentY = nil
             targetContentY = nil
@@ -286,6 +308,7 @@ final class DotAnimationSurface: UIControl {
         if canAnimate && !isGenerating && !holdsCompletedPose {
             if imageLayer.animation(forKey: "rest-breath") == nil {
                 let breath = CABasicAnimation(keyPath: "transform.translation.y")
+                breath.isAdditive = true
                 breath.fromValue = 0; breath.toValue = -0.7
                 breath.duration = 1.8; breath.autoreverses = true; breath.repeatCount = .infinity
                 breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -294,15 +317,63 @@ final class DotAnimationSurface: UIControl {
         } else { imageLayer.removeAnimation(forKey: "rest-breath") }
     }
 
-    fileprivate func followLayout() {
-        guard window != nil else { return }
+    private var positionScrollView: UIScrollView? {
         var ancestor = superview
         while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
-        guard let scroll = ancestor as? UIScrollView else { return }
+        return ancestor as? UIScrollView
+    }
+
+    private func startPositionTracking() {
+        guard positionLink == nil else { return }
+        let link = CADisplayLink(target: positionTarget, selector: #selector(DotPositionTarget.tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        positionLink = link
+    }
+
+    // Geometry writes preserve the existing visible coordinate in this same call.
+    // They must not advance the animation; only followLayout consumes frame time.
+    func synchronizeCompletedPlacement() {
+        guard terminalPlacement.isActive, !isGenerating, canAnimate,
+              let window, let scroll = positionScrollView else { return }
+        let target = convert(CGPoint(x: bounds.midX, y: bounds.midY), to: window).y
+        let native = scroll.isTracking || scroll.isDragging || scroll.isDecelerating
+        let offset = terminalPlacement.correction(targetWindowY: target, nativeInteraction: native)
+        applyWindowOffset(offset, in: window)
+        if offset != 0 { startPositionTracking() }
+    }
+
+    private func applyWindowOffset(_ offset: CGFloat, in window: UIWindow) {
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let point = convert(center, to: window)
+        let local = convert(CGPoint(x: point.x, y: point.y + offset), from: window)
+        applyPositionOffset(local.y - center.y)
+    }
+
+    private func applyPositionOffset(_ offset: CGFloat) {
+        guard imageLayer.transform.m42 != offset || outgoingLayer.transform.m42 != offset else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        imageLayer.transform = CATransform3DMakeTranslation(0, offset, 0)
+        outgoingLayer.transform = imageLayer.transform
+        CATransaction.commit()
+    }
+
+    fileprivate func followLayout(at now: CFTimeInterval) {
+        guard canAnimate, let window, let scroll = positionScrollView else { return }
+        if terminalPlacement.isActive && !isGenerating {
+            let target = convert(CGPoint(x: bounds.midX, y: bounds.midY), to: window).y
+            let native = scroll.isTracking || scroll.isDragging || scroll.isDecelerating
+            let offset = terminalPlacement.advance(targetWindowY: target, now: now, nativeInteraction: native)
+            applyWindowOffset(offset, in: window)
+            // Keep the geometry observer state after settling, without an idle
+            // display link. A later synchronous geometry correction restarts it.
+            if offset == 0 { positionLink?.invalidate(); positionLink = nil }
+            return
+        }
+        guard isGenerating else { return }
         // Scroll-view coordinates are content coordinates: scroll/keyboard
         // movement must not be mistaken for a new output line.
         let y = convert(CGPoint(x: bounds.midX, y: bounds.midY), to: scroll).y
-        let now = CACurrentMediaTime()
         let elapsed = min(1.0 / 30, max(1.0 / 120, now - (previousPositionTime ?? now - 1.0 / 60)))
         previousPositionTime = now
         var displayed = displayedContentY ?? y
@@ -315,10 +386,7 @@ final class DotAnimationSurface: UIControl {
         }
         displayedContentY = displayed
         targetContentY = y
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        imageLayer.transform = CATransform3DMakeTranslation(0, displayed - y, 0)
-        outgoingLayer.transform = imageLayer.transform
-        CATransaction.commit()
+        applyPositionOffset(displayed - y)
     }
 
     @objc private func tapped() {
@@ -331,6 +399,7 @@ final class DotAnimationSurface: UIControl {
         }
         guard canAnimate else { return }
         let bounce = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        bounce.isAdditive = true
         bounce.values = [0, -3, 0, -1, 0]
         bounce.keyTimes = [0, 0.3, 0.62, 0.8, 1]
         bounce.duration = 0.42
@@ -338,6 +407,7 @@ final class DotAnimationSurface: UIControl {
     }
 
     func stop() {
+        terminalPlacement.reset()
         loading?.cancel(); loading = nil
         idleTimer?.invalidate(); idleTimer = nil
         imageLayer.removeAllAnimations()
@@ -358,5 +428,51 @@ enum DotOutputPosition {
 @MainActor private final class DotPositionTarget: NSObject {
     weak var surface: DotAnimationSurface?
     init(_ surface: DotAnimationSurface) { self.surface = surface }
-    @objc func tick() { surface?.followLayout() }
+    @objc func tick(_ link: CADisplayLink) { surface?.followLayout(at: link.timestamp) }
+}
+
+struct DotTerminalPlacement {
+    private(set) var isActive = false
+    private(set) var displayedWindowY: CGFloat?
+    private var lastFrameTime: TimeInterval?
+
+    mutating func begin(at visibleWindowY: CGFloat, now: TimeInterval) {
+        isActive = true
+        displayedWindowY = visibleWindowY
+        lastFrameTime = now
+    }
+
+    mutating func reset() {
+        isActive = false
+        displayedWindowY = nil
+        lastFrameTime = nil
+    }
+
+    mutating func suspend() {
+        displayedWindowY = nil
+        lastFrameTime = nil
+    }
+
+    // Geometry setters call this synchronously. They never consume animation time.
+    mutating func correction(targetWindowY: CGFloat, nativeInteraction: Bool = false) -> CGFloat {
+        guard isActive else { return 0 }
+        if displayedWindowY == nil || nativeInteraction {
+            displayedWindowY = targetWindowY
+            lastFrameTime = nil
+        }
+        return (displayedWindowY ?? targetWindowY) - targetWindowY
+    }
+
+    // Only the Dot display-link callback advances the visible coordinate.
+    mutating func advance(targetWindowY: CGFloat, now: TimeInterval, nativeInteraction: Bool = false) -> CGFloat {
+        guard isActive else { return 0 }
+        if nativeInteraction { return correction(targetWindowY: targetWindowY, nativeInteraction: true) }
+        let displayed = displayedWindowY ?? targetWindowY
+        if let previous = lastFrameTime, now <= previous { return displayed - targetWindowY }
+        let elapsed = min(1.0 / 30, max(0, now - (lastFrameTime ?? now - 1.0 / 60)))
+        lastFrameTime = now
+        let next = displayed + (targetWindowY - displayed) * (1 - exp(-elapsed / 0.09))
+        displayedWindowY = abs(targetWindowY - next) < 0.25 ? targetWindowY : next
+        return (displayedWindowY ?? targetWindowY) - targetWindowY
+    }
 }

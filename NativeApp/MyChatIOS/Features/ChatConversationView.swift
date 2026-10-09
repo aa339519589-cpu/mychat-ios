@@ -552,6 +552,7 @@ enum ChatReadingAnchor {
     private var followingLatest = true
     private var explicitBottomFollow = false
     private var generationActive = false
+    private var completedCompanionFollow = false
     private var interactionActive = false
     private var drawerInteractionActive = false
     private var followScheduled = false
@@ -667,9 +668,12 @@ enum ChatReadingAnchor {
     }
 
     private func updateCompanions() {
-        let correction = generationActive && followingLatest && !nativeInteractionActive
+        let correction = (generationActive || completedCompanionFollow) && followingLatest && !nativeInteractionActive
             ? -(followOffset - (scrollView?.contentOffset.y ?? 0)) : 0
-        for view in companions.allObjects { view.transform = CGAffineTransform(translationX: 0, y: correction) }
+        for view in companions.allObjects {
+            view.transform = CGAffineTransform(translationX: 0, y: correction)
+            (view as? DotAnimationSurface)?.synchronizeCompletedPlacement()
+        }
     }
 
     func setLaidOutBodyBottom(_ bottom: CGFloat) {
@@ -728,6 +732,7 @@ enum ChatReadingAnchor {
             scheduleFollow()
         }
         if self.conversationID != conversationID {
+            completedCompanionFollow = false
             pendingRestoration = nil
             laidOutBodyBottom = nil
             stopSmoothFollow()
@@ -746,6 +751,7 @@ enum ChatReadingAnchor {
     func setGenerationActive(_ active: Bool) {
         guard generationActive != active else { return }
         generationActive = active
+        completedCompanionFollow = !active
         if active {
             if followingLatest { startSmoothFollow() }
         } else if followingLatest {
