@@ -349,7 +349,21 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            codeFixtureFrame(1, kind: "text.delta", payload: ["text": resumed ? "后继任务已正常恢复" : "任务正在运行"])
+            let cursorValue = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "from_seq" })?.value
+            let cursor = max(0, Int(cursorValue ?? "0") ?? 0)
+            if cursor < 1 {
+                codeFixtureFrame(1, kind: "text.delta", payload: ["text": "任务正在运行"])
+            }
+            if resumed {
+                // Replay immutable events before publishing the next sequence after reconnect.
+                if cursor < 2 {
+                    codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；取消响应已交付"])
+                }
+                if cursor < 3 {
+                    codeFixtureFrame(3, kind: "text.delta", payload: ["text": "后继任务已正常恢复"])
+                }
+            }
             return true
         }
         guard url.path.hasSuffix("/cancel"), request.httpMethod == "POST", jobID == Self.lateCodeJobA else {
