@@ -876,6 +876,7 @@ struct MCPConnectorsSettingsView: View {
                     }
                 ))
                 .labelsHidden()
+                .tint(MyChatTheme.toggleOnTint)
                 .accessibilityLabel("启用 \(connector.name)")
                 .disabled(busyConnectorIDs.contains(connector.id))
             }

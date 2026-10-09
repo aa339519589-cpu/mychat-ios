@@ -23,6 +23,18 @@ import Combine
         XCTAssertEqual(rgbBytes(MyChatTheme.newChatSurface, style: .dark), [0xAA, 0xA9, 0xA1])
     }
 
+    func testGlobalToggleOnTintUsesRestoredBlueInBothAppearances() {
+        func rgbBytes(_ color: Color, style: UIUserInterfaceStyle) -> [Int] {
+            var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+            UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style))
+                .getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+            return [red, green, blue].map { Int(($0 * 255).rounded()) }
+        }
+
+        XCTAssertEqual(rgbBytes(MyChatTheme.toggleOnTint, style: .light), [0x29, 0x55, 0x80])
+        XCTAssertEqual(rgbBytes(MyChatTheme.toggleOnTint, style: .dark), [0x29, 0x55, 0x80])
+    }
+
     func testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence() {
         XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。"), "正在核对资料。")
         XCTAssertEqual(PublicReasoningSummaryPreview.text("正在核对资料。\n\n开始整理结果"), "开始整理结果")

@@ -53,7 +53,7 @@ struct DefaultConnectorsView: View {
                         health.setEnabled(enabled)
                         if enabled { Task { _ = await HealthConnector.modelContext(ownerID: ownerID, refresh: true) } }
                 }))
-                .labelsHidden().tint(MyChatTheme.accent)
+                .labelsHidden().tint(MyChatTheme.toggleOnTint)
                 .padding(.trailing, 16)
                 .accessibilityIdentifier("connectors.default.health.enabled")
             }

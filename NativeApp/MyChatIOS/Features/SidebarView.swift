@@ -764,7 +764,7 @@ struct CapabilitiesSettingsView: View {
                 if let icon { Image(systemName: icon).font(MyChatSystemFont.appFont(size: 18)).frame(width: 22) }
                 Text(title).font(MyChatTypography.navigation)
             }
-        }.tint(MyChatTheme.brand).padding(.horizontal, 18).frame(minHeight: 60)
+        }.tint(MyChatTheme.toggleOnTint).padding(.horizontal, 18).frame(minHeight: 60)
     }
 }
 

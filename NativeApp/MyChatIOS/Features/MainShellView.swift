@@ -3408,7 +3408,7 @@ private struct ToolToggleRow: View {
                     .frame(width: 28)
             }
         }
-        .tint(MyChatTheme.accent)
+        .tint(MyChatTheme.toggleOnTint)
         .frame(minHeight: 62)
         .contentShape(Rectangle())
         .disabled(disabled)
@@ -3438,7 +3438,7 @@ private struct ConnectorToolToggleRow: View {
                     .frame(width: 28)
             }
         }
-        .tint(MyChatTheme.accent)
+        .tint(MyChatTheme.toggleOnTint)
         .frame(minHeight: 62)
         .contentShape(Rectangle())
         .disabled(disabled)

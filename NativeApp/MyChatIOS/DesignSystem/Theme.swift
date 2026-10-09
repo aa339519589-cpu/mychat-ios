@@ -6,6 +6,7 @@ enum MyChatTheme {
     static let brand = Color.dynamic(light: 0xC86F4E, dark: 0xD68B68)
     static let onBrand = Color.dynamic(light: 0xFFFFFF, dark: 0x1C1512)
     static let accent = brand
+    static let toggleOnTint = Color.dynamic(light: 0x295580, dark: 0x295580)
     static let canvas = Color.dynamic(light: 0xF9F9F7, dark: 0x151515)
     static let sidebar = Color.dynamic(light: 0xF3F3F0, dark: 0x111111)
     static let sidebarSecondary = Color.dynamic(light: 0x52514E, dark: 0x9A9A93)
