@@ -83,7 +83,7 @@ jobs:
             test
 
       - name: Run fixture-backed stale Code recovery UI regression on installed iOS 27 simulator
-        if: \${{ inputs.run_stale_recovery_probe }}
+        if: ${{ inputs.run_stale_recovery_probe }}
         working-directory: NativeApp
         run: |
           set -euo pipefail
