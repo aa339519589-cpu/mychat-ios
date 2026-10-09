@@ -1388,20 +1388,20 @@ final class MyChatUITests: XCTestCase {
                 visited += 1
                 if node.elementType == .keyboard { keyboards += 1 }
                 if node.elementType == .window, windows.count < 8 {
-                    windows.append(NSStringFromCGRect(node.frame))
+                    windows.append(String(describing: node.frame))
                 }
                 var name: String?
                 if identifiers.contains(node.identifier) { name = node.identifier }
                 if node.elementType == .button, node.label == "隔离测试对话" { name = "fixture.history" }
                 if node.elementType == .button, node.label == "关闭侧边栏" { name = "drawer.close-shield" }
                 if let name, controls.count < 24 {
-                    controls.append(["control": name, "frame": NSStringFromCGRect(node.frame),
+                    controls.append(["control": name, "frame": String(describing: node.frame),
                         "enabled": node.isEnabled])
                 }
                 pending.append(contentsOf: node.children)
             }
             let payload: [String: Any] = ["phase": phase, "target": target, "waitSeconds": 5,
-                "appFrame": NSStringFromCGRect(snapshot.frame), "windows": windows,
+                "appFrame": String(describing: snapshot.frame), "windows": windows,
                 "keyboardCount": keyboards, "controls": controls, "snapshotTruncated": !pending.isEmpty]
             let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
             if let text = String(data: data, encoding: .utf8) { print("HEADER_HIT_FAILURE " + text) }
