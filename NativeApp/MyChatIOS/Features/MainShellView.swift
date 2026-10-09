@@ -313,6 +313,11 @@ private struct MainCanvasView: View {
                     .background {
                         if !appModel.messages.isEmpty {
                             Rectangle().fill(.regularMaterial)
+                                .overlay {
+                                    if colorScheme == .dark {
+                                        MyChatTheme.canvas.opacity(0.9)
+                                    }
+                                }
                                 .mask {
                                     LinearGradient(stops: [
                                         .init(color: .black, location: 0),

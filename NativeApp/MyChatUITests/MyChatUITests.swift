@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 final class MyChatUITests: XCTestCase {
     @MainActor func testHorizontalPhotosKeepGestureOwnershipAndReachTheLastImage() {
@@ -1242,6 +1243,84 @@ final class MyChatUITests: XCTestCase {
                 XCTAssertEqual(app.keyboards.firstMatch.exists, keyboardOpen)
             }
         }
+    }
+
+    @MainActor func testChatHeaderMatchesCanvasInLightAndDarkAppearance() throws {
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-reference-chat", "-AppleInterfaceStyle", appearance])
+            let sidebar = app.buttons["header.sidebar"].firstMatch
+            sidebar.tap()
+            let history = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(history, timeout: 10))
+            history.tap()
+            let reply = app.staticTexts["你好！有什么我可以帮你的吗？"].firstMatch
+            XCTAssertTrue(reply.waitForExistence(timeout: 10))
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let newChat = app.buttons["header.new-chat"].firstMatch
+            XCTAssertTrue(waitForHittable(sidebar, timeout: 5))
+            XCTAssertTrue(waitForHittable(newChat, timeout: 5))
+
+            let screenshot = try XCTUnwrap(app.screenshot().image.cgImage)
+            let bounds = app.frame
+            let scaleX = CGFloat(screenshot.width) / bounds.width
+            let scaleY = CGFloat(screenshot.height) / bounds.height
+            func pixels(_ rect: CGRect) -> CGRect {
+                CGRect(x: (rect.minX - bounds.minX) * scaleX,
+                    y: (rect.minY - bounds.minY) * scaleY,
+                    width: rect.width * scaleX, height: rect.height * scaleY).integral
+            }
+            // The reference fixture has no centered header title. Sample the
+            // empty header center and the canvas outside the transcript margin.
+            let headerRect = CGRect(x: bounds.midX - 4, y: sidebar.frame.minY + 4, width: 8, height: 8)
+            let canvasRect = CGRect(x: bounds.minX + 8, y: bounds.minY + bounds.height * 0.55, width: 8, height: 8)
+            let header = try XCTUnwrap(screenshot.cropping(to: pixels(headerRect)))
+            let canvas = try XCTUnwrap(screenshot.cropping(to: pixels(canvasRect)))
+            let headerBrightness = try sampledBrightness(header)
+            let canvasBrightness = try sampledBrightness(canvas)
+            print("HEADER_CANVAS appearance=\(appearance) header=\(headerBrightness) canvas=\(canvasBrightness) delta=\(headerBrightness - canvasBrightness)")
+            if appearance == "Dark" {
+                XCTAssertLessThan(canvasBrightness, 0.2, "The fixture must actually be in dark appearance")
+                XCTAssertLessThanOrEqual(abs(headerBrightness - canvasBrightness), 0.035,
+                    "The dark header must not add a bright halo above the chat canvas")
+            } else {
+                XCTAssertGreaterThan(canvasBrightness, 0.7, "The fixture must actually be in light appearance")
+                XCTAssertLessThanOrEqual(abs(headerBrightness - canvasBrightness), 0.08)
+            }
+
+            // Exportable evidence contains only the known fixture's header
+            // controls and an 8pt canvas swatch, never transcript/account text.
+            let stripRect = CGRect(x: bounds.minX, y: sidebar.frame.minY - 4,
+                width: bounds.width, height: sidebar.frame.height + 8)
+            let strip = try XCTUnwrap(screenshot.cropping(to: pixels(stripRect)))
+            for (name, crop) in [("header-strip-", strip), ("header-canvas-", canvas)] {
+                let attachment = XCTAttachment(image: UIImage(cgImage: crop))
+                attachment.name = name + appearance
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+
+            sidebar.tap()
+            XCTAssertTrue(waitForHittable(app.buttons["sidebar.accountSettings"].firstMatch, timeout: 5))
+            history.tap()
+            XCTAssertTrue(waitForHittable(newChat, timeout: 5))
+            newChat.tap()
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: reply)
+            waitForExpectations(timeout: 5)
+            XCTAssertTrue(app.textViews["composer.input"].exists)
+            app.terminate()
+        }
+    }
+
+    private func sampledBrightness(_ image: CGImage) throws -> Double {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        try pixel.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        return (0.2126 * Double(pixel[0]) + 0.7152 * Double(pixel[1]) + 0.0722 * Double(pixel[2])) / 255
     }
 
     @MainActor func testReferenceComposerHasOneBoundedSurfaceAndFollowsKeyboard() {
