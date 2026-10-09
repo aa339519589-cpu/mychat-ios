@@ -1,5 +1,5 @@
-// Local regression draft for the two-file coordinated candidate.
-// Not compiled, executed, registered, or uploaded. Uses only synthetic views.
+// Direct UIKit regressions for coordinated Dot/scroll placement.
+// The fixture uses only synthetic views and reports their geometry on failure.
 import XCTest
 import UIKit
 import QuartzCore
@@ -90,6 +90,9 @@ import QuartzCore
         defer { link.invalidate() }
         // This bounds a new synthetic fixture; it does not relax an existing test.
         await fulfillment(of: [arrived], timeout: 2)
+        let diagnosticSamples = Array(observer.samples.prefix(3)) + Array(observer.samples.suffix(8))
+        let diagnosticData = try JSONEncoder().encode(diagnosticSamples)
+        print("DOT_POSITION_TRACE phase=\(description) count=\(observer.samples.count) expectedScrollY=\(host.expectedScrollY) samples=\(String(decoding: diagnosticData, as: UTF8.self))")
         let data = try JSONEncoder().encode(observer.samples)
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
         attachment.name = description
@@ -119,6 +122,10 @@ private enum DotTerminalUIKitFailure: Error { case conditionNotReached }
 private struct DotTerminalUIKitSample: Encodable {
     let timestamp: TimeInterval
     let scrollY: CGFloat
+    let scrollHeight: CGFloat
+    let contentHeight: CGFloat
+    let surfaceCenterY: CGFloat
+    let nativeInteraction: Bool
     let outer: CGFloat
     let inner: CGFloat
     let targetWindowY: CGFloat
@@ -183,6 +190,9 @@ private struct DotTerminalUIKitSample: Encodable {
             surface.convert(CGPoint(x: center.x, y: center.y + $0.transform.m42), to: window).y
         }
         return DotTerminalUIKitSample(timestamp: CACurrentMediaTime(), scrollY: scroll.contentOffset.y,
+            scrollHeight: scroll.bounds.height, contentHeight: scroll.contentSize.height,
+            surfaceCenterY: surface.center.y,
+            nativeInteraction: scroll.isTracking || scroll.isDragging || scroll.isDecelerating,
             outer: surface.transform.ty, inner: imageLayer.transform.m42, targetWindowY: target,
             modelWindowY: surface.convert(modelPoint, to: window).y, presentationWindowY: presentation)
     }
@@ -192,7 +202,8 @@ private struct DotTerminalUIKitSample: Encodable {
         surface.stop()
         window.isHidden = true
         surface.removeFromSuperview()
-        window.rootViewController = nil
+        // Let the hidden window release its controller through normal ownership;
+        // forcing root deinitialization here raised InvalidTransition in run #120.
     }
 }
 
