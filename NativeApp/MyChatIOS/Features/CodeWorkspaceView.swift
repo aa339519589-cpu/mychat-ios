@@ -195,6 +195,8 @@ private struct CodeSessionDetailView: View {
     @State private var eventSubscription: Task<Void, Never>?
     @State private var eventSubscriptionJobID: UUID?
     @State private var eventSubscriptionToken: UUID?
+    // Keep ownership while a finished stream refreshes its persisted task evidence.
+    @State private var latestEventSubscriptionToken: UUID?
     @State private var cancellationReconciliation: Task<Void, Never>?
     @State private var cancellationReconciliationToken: UUID?
     @State private var cancellationPending = false
@@ -778,6 +780,7 @@ private struct CodeSessionDetailView: View {
         let token = UUID()
         eventSubscriptionJobID = admission.jobID
         eventSubscriptionToken = token
+        latestEventSubscriptionToken = token
         eventSubscription = Task { @MainActor in
             await consume(admission, subscriptionToken: token, terminalReplay: terminalReplay)
             if eventSubscriptionToken == token {
@@ -912,6 +915,7 @@ private struct CodeSessionDetailView: View {
         cancellationReconciliationToken = nil
         await load()
         if let recovery = try? await appModel.recoverCodeTask(sessionID: session.id) {
+            guard latestEventSubscriptionToken == subscriptionToken else { return }
             taskDetail = recovery.task
             if let task = recovery.task { branch = task.branch }
             if let admission = recovery.operationAdmission ?? recovery.admission,
