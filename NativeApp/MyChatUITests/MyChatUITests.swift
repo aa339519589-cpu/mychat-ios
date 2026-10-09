@@ -241,20 +241,36 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(tail.waitForExistence(timeout: 30))
         XCTAssertFalse(app.keyboards.firstMatch.exists)
 
+        let surface = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
+        XCTAssertTrue(surface.waitForExistence(timeout: 5))
+        let headerBottom = app.buttons["header.sidebar"].frame.maxY
+        let visibleTranscript = CGRect(x: app.frame.minX, y: headerBottom,
+            width: app.frame.width, height: surface.frame.minY - headerBottom)
+        XCTAssertGreaterThan(visibleTranscript.height, 100)
         let rows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "message.row."))
             .allElementsBoundByIndex
+        // A long Markdown message can fill more than the viewport. Its visible
+        // portion remains a valid scrolling anchor without fitting wholly inside.
         guard let anchor = rows.first(where: {
-            $0.isHittable && $0.frame.minY > 180 && $0.frame.maxY < app.frame.height - 150
+            let visible = $0.frame.intersection(visibleTranscript)
+            return $0.isHittable && visible.height >= 44
+                && visible.maxY - visibleTranscript.minY >= 100
         }) else {
-            XCTFail("Expected a visible conversation row before vertical scrolling")
+            let frames = rows.suffix(8).map { "\($0.identifier) frame=\($0.frame) hittable=\($0.isHittable)" }
+                .joined(separator: "; ")
+            XCTFail("Expected a hittable row intersecting transcript \(visibleTranscript); fixture rows: \(frames)")
             return
         }
         let before = anchor.frame.minY
+        let visibleAnchor = anchor.frame.intersection(visibleTranscript)
+        let start = CGPoint(x: visibleAnchor.midX, y: visibleAnchor.maxY - 12)
+        let endY = max(visibleTranscript.minY + 8, start.y - app.frame.height * 0.24)
+        XCTAssertTrue(visibleAnchor.contains(start), "The drag must begin on the visible anchor")
+        XCTAssertGreaterThan(start.y - endY, 40)
         let origin = app.coordinate(withNormalizedOffset: .zero)
-        let x = app.frame.midX
-        origin.withOffset(CGVector(dx: x, dy: app.frame.height * 0.58)).press(forDuration: 0.03,
-            thenDragTo: origin.withOffset(CGVector(dx: x, dy: app.frame.height * 0.34)),
+        origin.withOffset(CGVector(dx: start.x - app.frame.minX, dy: start.y - app.frame.minY)).press(forDuration: 0.03,
+            thenDragTo: origin.withOffset(CGVector(dx: start.x - app.frame.minX, dy: endY - app.frame.minY)),
             withVelocity: .slow, thenHoldForDuration: 0.08)
 
         let transcriptMoved = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
