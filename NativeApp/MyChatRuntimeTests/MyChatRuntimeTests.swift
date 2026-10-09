@@ -296,12 +296,35 @@ import CoreText
         controller.pauseFollowAnimation()
     }
 
-    func testLicensedReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
-        for name in ["Newsreader16pt-Regular", "Newsreader16pt-Italic", "Newsreader16pt-Bold"] {
-            XCTAssertNotNil(UIFont(name: name, size: 17))
+    func testOriginalReadingFacesAreRegisteredAndSecondaryTextKeepsContrast() throws {
+        for name in ["AnthropicSerifWebWeb-TextLight", "AnthropicSerifWebWeb-TextLightItalic"] {
+            XCTAssertNotNil(UIFont(name: name, size: 17), "The original face must be bundled, not silently substituted")
         }
-        XCTAssertTrue(MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true).fontName.hasPrefix("Newsreader"))
-        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/ttf"))
+        for (weight, italic, expectedWeight) in [
+            (UIFont.Weight.regular, false, 400.0), (.medium, false, 400.0),
+            (.semibold, false, 700.0), (.bold, false, 700.0), (.regular, true, 400.0)
+        ] {
+            let font = MyChatSystemFont.uiFont(size: 17, weight: weight, serif: true, italic: italic)
+            XCTAssertTrue(font.fontName.hasPrefix("AnthropicSerifWebWeb"))
+            let axes = try XCTUnwrap(CTFontCopyVariation(font) as? [NSNumber: NSNumber])
+            XCTAssertEqual(try XCTUnwrap(axes[NSNumber(value: 0x77676874)]).doubleValue, expectedWeight, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(axes[NSNumber(value: 0x6F70737A)]).doubleValue, 16, accuracy: 0.01)
+        }
+        XCTAssertFalse(MyChatSystemFont.uiFont(size: 17, weight: .regular).fontName.hasPrefix("Anthropic"),
+            "The system sans-serif summary preview must keep its existing face")
+        for size in [CGFloat(12), 17, 25] {
+            let font = MyChatSystemFont.appSerifUIFont(size: size, relativeTo: .body, weight: .medium)
+            XCTAssertTrue(font.fontName.hasPrefix("AnthropicSerifWebWeb"))
+            let scaled = MyChatSystemFont.scaledUIFont(font, relativeTo: .body,
+                compatibleWith: UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge))
+            let cascade = try XCTUnwrap(scaled.fontDescriptor.fontAttributes[.cascadeList] as? [UIFontDescriptor])
+            for fallback in cascade {
+                XCTAssertEqual(fallback.pointSize, scaled.pointSize, accuracy: 0.01,
+                    "Restoring the original Latin face must retain the Chinese clipping fix")
+            }
+        }
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font/woff2"))
+        XCTAssertTrue(MyChatSystemFont.responseWebFontCSS.contains("font-weight: 300 800"))
         func luminance(_ color: Color, style: UIUserInterfaceStyle) -> CGFloat {
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
             UIColor(color).resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&r, green: &g, blue: &b, alpha: &a)
