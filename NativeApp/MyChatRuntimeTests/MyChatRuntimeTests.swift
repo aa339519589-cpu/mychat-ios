@@ -65,6 +65,16 @@ import CoreText
     }
 
     func testArtifactSourcePreparationCachePreservesPartialSVGAndCompletion() {
+        let fixture = NativeRuntimeFixture.largeArtifactSVG
+        let fixtureBlocks = ChatArtifactParser.parse(fixture).blocks
+        XCTAssertEqual(fixtureBlocks.count, 1)
+        XCTAssertEqual(fixtureBlocks.first?.kind, .inlineArtifact)
+        XCTAssertEqual(fixtureBlocks.first?.isComplete, true)
+        XCTAssertTrue(fixtureBlocks.first?.raw.contains("id=\"fixture-sun\"") == true)
+        XCTAssertGreaterThan(fixture.utf8.count, 100_000)
+        XCTAssertTrue(ChatDocument.documents(in: fixture, namespace: "svg-return-fixture").isEmpty,
+            "The UI fixture must select the native inline-SVG renderer, not the HTML document renderer")
+
         let source = #"<svg><style>circle { fill: red; }</style><!-- retained --><circle data-label="太阳" r="20"/></svg>"#
         var cache = ArtifactSourcePreparationCache()
         for end in source.indices {

@@ -554,7 +554,16 @@ final class MyChatUITests: XCTestCase {
         artifact.tap()
 
         let close = app.buttons["artifact-preview-close"].firstMatch
-        XCTAssertTrue(waitForHittable(close, timeout: 10))
+        let opened = waitForHittable(close, timeout: 10)
+        recordArtifactPreviewState(app, phase: "opened", captureDetailFrames: true)
+        XCTAssertTrue(opened, "The preview close control must become hittable before an edge gesture")
+        guard opened else { return }
+        if fixture == "--ui-test-artifacts-svg-large" {
+            let native = app.descendants(matching: .any)
+                .matching(identifier: "artifact-native-preview-inline-artifact").firstMatch
+            XCTAssertTrue(native.waitForExistence(timeout: 10),
+                "The SVG fixture must actually open the native inline-artifact preview")
+        }
         let originalCloseMinX = close.frame.minX
         let origin = app.coordinate(withNormalizedOffset: .zero)
         let width = app.frame.width
@@ -569,7 +578,8 @@ final class MyChatUITests: XCTestCase {
 
         // A short edge drag must settle back in place without dismissing the cover.
         dragFromLeadingEdge(34)
-        XCTAssertTrue(waitForHittable(close, timeout: 5),
+        let cancelled = waitForHittable(close, timeout: 5)
+        XCTAssertTrue(cancelled,
             "A cancelled edge swipe must restore the artifact detail")
         let settleDeadline = ProcessInfo.processInfo.systemUptime + 2
         while abs(close.frame.minX - originalCloseMinX) > 2,
@@ -580,9 +590,10 @@ final class MyChatUITests: XCTestCase {
             "A cancelled edge swipe must return the detail to its starting position")
         XCTAssertFalse(artifact.isHittable,
             "The artifact row must remain covered after a cancelled edge swipe")
+        recordArtifactPreviewState(app, phase: "cancelled", captureDetailFrames: cancelled)
 
         // The same natural gesture must dismiss the detail and work again after re-entry.
-        for _ in 0..<2 {
+        for cycle in 0..<2 {
             if !close.isHittable { artifact.tap() }
             XCTAssertTrue(waitForHittable(close, timeout: 10))
             dragFromLeadingEdge(width * 0.33)
@@ -594,9 +605,32 @@ final class MyChatUITests: XCTestCase {
             }
             expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: close)
             waitForExpectations(timeout: 8)
-            XCTAssertTrue(waitForHittable(artifact, timeout: 8),
+            let listRestored = waitForHittable(artifact, timeout: 8)
+            recordArtifactPreviewState(app, phase: "returned-\(cycle)", captureDetailFrames: false)
+            XCTAssertTrue(listRestored,
                 "The artifact list must be restored after the edge swipe")
         }
+    }
+
+    @MainActor private func recordArtifactPreviewState(_ app: XCUIApplication,
+        phase: String, captureDetailFrames: Bool) {
+        // Only known fixture/control geometry. Never dump the application tree,
+        // arbitrary labels, source HTML, or a frame after its dismissal.
+        let started = ProcessInfo.processInfo.systemUptime
+        let close = app.buttons["artifact-preview-close"].firstMatch
+        let row = app.buttons["artifact-record-70000000-0000-4000-8000-000000000064"].firstMatch
+        let native = app.descendants(matching: .any)
+            .matching(identifier: "artifact-native-preview-inline-artifact").firstMatch
+        let closeExists = close.exists
+        let rowExists = row.exists
+        let nativeExists = native.exists
+        let closeFrame = captureDetailFrames && closeExists ? String(describing: close.frame) : "not-sampled"
+        let nativeFrame = captureDetailFrames && nativeExists ? String(describing: native.frame) : "not-sampled"
+        let diagnostic = "ARTIFACT_PREVIEW_AX phase=\(phase) closeExists=\(closeExists) closeHittable=\(close.isHittable) closeFrame=\(closeFrame) nativeExists=\(nativeExists) nativeFrame=\(nativeFrame) rowExists=\(rowExists) rowHittable=\(row.isHittable) queryMs=\(Int((ProcessInfo.processInfo.systemUptime - started) * 1000))"
+        print(diagnostic)
+        let attachment = XCTAttachment(string: diagnostic)
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor func testArtifactLibraryKeepsEveryDocumentInPackage() {
