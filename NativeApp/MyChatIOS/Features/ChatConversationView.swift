@@ -1005,8 +1005,16 @@ enum ChatReadingAnchor {
         // UIKit already animates the keyboard: sample that presentation,
         // rather than easing toward its animated position a second time.
         let progress = keyboardMoving ? 1 : 1 - exp(-elapsed / (generationActive ? 0.06 : idleFollowResponseTime))
-        let nextOffset = scrollView.contentOffset.y + remaining * progress
-        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: nextOffset), animated: false)
+        let previousOffset = scrollView.contentOffset
+        let nextOffset = previousOffset.y + remaining * progress
+        scrollView.setContentOffset(CGPoint(x: previousOffset.x, y: nextOffset), animated: false)
+        if scrollView.contentOffset.y == previousOffset.y, abs(remaining) > 0.5 {
+            // UIKit can round a subpixel request back to the current offset.
+            // Make bounded progress so the existing half-point stop is reachable.
+            let pixel = 1 / max(1, scrollView.traitCollection.displayScale)
+            let step = min(abs(remaining), pixel) * (remaining < 0 ? -1 : 1)
+            scrollView.setContentOffset(CGPoint(x: previousOffset.x, y: previousOffset.y + step), animated: false)
+        }
         updateCompanions()
         publishVisibility()
     }
