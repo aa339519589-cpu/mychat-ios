@@ -309,7 +309,7 @@ final class MyChatUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Gmail"].exists)
     }
 
-    @MainActor func testConnectorDirectoryPushesAndPreservesEachPriorScreen() {
+    @MainActor func testConnectorDirectoryPushesAndPreservesEachPriorScreen() throws {
         let app = launch()
         openConnectorSettings(in: app)
 
@@ -322,6 +322,9 @@ final class MyChatUITests: XCTestCase {
         let sample = app.buttons["connector.catalog.sample"].firstMatch
         XCTAssertTrue(directorySearch.waitForExistence(timeout: 8))
         XCTAssertTrue(sample.waitForExistence(timeout: 8))
+        guard sample.isHittable, directorySearch.exists else { return XCTFail("The isolated directory must be visible before capture") }
+        let directoryRect = app.navigationBars.firstMatch.frame.union(directorySearch.frame).union(sample.frame)
+        try captureFixtureEvidence(app, rect: directoryRect, name: "connector-directory")
         sample.tap()
 
         let name = app.textFields["connector.name"].firstMatch
@@ -330,6 +333,12 @@ final class MyChatUITests: XCTestCase {
         XCTAssertEqual(name.value as? String, "Sample service")
         XCTAssertEqual(serverURL.value as? String, "https://connector.example.invalid/mcp")
         XCTAssertTrue(app.navigationBars["连接服务"].exists)
+        guard name.value as? String == "Sample service",
+              serverURL.value as? String == "https://connector.example.invalid/mcp" else {
+            return XCTFail("Only known isolated connector fields may be captured")
+        }
+        let editorRect = app.navigationBars.firstMatch.frame.union(name.frame).union(serverURL.frame)
+        try captureFixtureEvidence(app, rect: editorRect, name: "connector-editor")
 
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(directorySearch.waitForExistence(timeout: 5),
@@ -361,7 +370,7 @@ final class MyChatUITests: XCTestCase {
             "Canceling the editor must return to connector settings")
     }
 
-    @MainActor func testConnectorEditorSaveCancelAndRepeatedOpenResetState() {
+    @MainActor func testConnectorEditorSaveCancelAndRepeatedOpenResetState() throws {
         let app = launch()
         openConnectorSettings(in: app)
         let addMenu = app.buttons["添加连接器"].firstMatch
@@ -402,6 +411,9 @@ final class MyChatUITests: XCTestCase {
         XCTAssertTrue(reopenedName.waitForExistence(timeout: 5))
         XCTAssertTrue(isEmptyTextField(reopenedName, placeholder: "名称"),
             "Reopening after cancel must not restore a discarded draft")
+        guard isEmptyTextField(reopenedName, placeholder: "名称") else { return XCTFail("The reopened fixture editor must be empty before capture") }
+        try captureFixtureEvidence(app,
+            rect: app.navigationBars.firstMatch.frame.union(reopenedName.frame), name: "connector-reopened")
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(addMenu.waitForExistence(timeout: 5))
     }
@@ -1261,6 +1273,34 @@ final class MyChatUITests: XCTestCase {
         }
     }
 
+    @MainActor func testOriginalEnglishReadingFontKeepsSummarySansSerif() throws {
+        let prompt = "Hello, can you speak English?"
+        let response = "Yes, I can! I'm happy to chat in English. Feel free to ask me anything, or tell me what you'd like help with, and we can continue in English or switch to Chinese whenever you like."
+        let summary = "This person is simply asking if I can speak English."
+        for appearance in ["Light", "Dark"] {
+            let app = launch(extra: ["--ui-test-english-font-reference", "-AppleInterfaceStyle", appearance])
+            app.buttons["header.sidebar"].firstMatch.tap()
+            let history = app.buttons["隔离测试对话"].firstMatch
+            XCTAssertTrue(waitForHittable(history, timeout: 10))
+            history.tap()
+            let user = app.staticTexts[prompt].firstMatch
+            let reply = app.staticTexts[response].firstMatch
+            let row = app.buttons["document.thinking"].firstMatch
+            guard user.waitForExistence(timeout: 10), reply.waitForExistence(timeout: 10),
+                  waitForHittable(row, timeout: 10), row.value as? String == summary else {
+                return XCTFail("The known English fixture and public summary must be visible before capture")
+            }
+            XCTAssertFalse(app.keyboards.firstMatch.exists)
+            let composer = app.descendants(matching: .any).matching(identifier: "composer.surface").firstMatch
+            XCTAssertTrue(composer.exists)
+            let rect = user.frame.union(row.frame).union(reply.frame)
+            XCTAssertGreaterThan(rect.minY, app.buttons["header.sidebar"].frame.maxY)
+            XCTAssertLessThan(rect.maxY, composer.frame.minY)
+            try captureFixtureEvidence(app, rect: rect, name: "font-reference-" + appearance)
+            app.terminate()
+        }
+    }
+
     @MainActor func testChatHeaderMatchesCanvasInLightAndDarkAppearance() throws {
         for appearance in ["Light", "Dark"] {
             let app = launch(extra: ["--ui-test-reference-chat", "-AppleInterfaceStyle", appearance])
@@ -1309,10 +1349,7 @@ final class MyChatUITests: XCTestCase {
                 width: bounds.width, height: sidebar.frame.height + 8)
             let strip = try XCTUnwrap(screenshot.cropping(to: pixels(stripRect)))
             for (name, crop) in [("header-strip-", strip), ("header-canvas-", canvas)] {
-                let attachment = XCTAttachment(image: UIImage(cgImage: crop))
-                attachment.name = name + appearance
-                attachment.lifetime = .keepAlways
-                add(attachment)
+                try retainFixtureEvidence(crop, name: name + appearance)
             }
 
             sidebar.tap()
@@ -1527,6 +1564,42 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(image.waitForExistence(timeout: 5))
             saveScreenshot(app, "recent-photo-attached")
         }
+    }
+
+    @MainActor private func captureFixtureEvidence(_ app: XCUIApplication, rect: CGRect, name: String) throws {
+        guard app.launchArguments.contains("--ui-test-mode") else {
+            return XCTFail("Screenshots may only be retained for the isolated UI fixture")
+        }
+        let screenshot = try XCTUnwrap(app.screenshot().image.cgImage)
+        let bounds = app.frame
+        let cropRect = rect.insetBy(dx: -4, dy: -4).intersection(bounds)
+        let scaleX = CGFloat(screenshot.width) / bounds.width
+        let scaleY = CGFloat(screenshot.height) / bounds.height
+        let pixels = CGRect(x: (cropRect.minX - bounds.minX) * scaleX,
+            y: (cropRect.minY - bounds.minY) * scaleY,
+            width: cropRect.width * scaleX, height: cropRect.height * scaleY).integral
+        let crop = try XCTUnwrap(screenshot.cropping(to: pixels))
+        try retainFixtureEvidence(crop, name: name)
+    }
+
+    @MainActor private func retainFixtureEvidence(_ crop: CGImage, name: String) throws {
+        let allowed = ["header-strip-Light", "header-canvas-Light", "header-strip-Dark", "header-canvas-Dark",
+            "connector-directory", "connector-editor", "connector-reopened", "font-reference-Light", "font-reference-Dark"]
+        guard allowed.contains(name) else { return XCTFail("Unapproved fixture screenshot name") }
+        let image = UIImage(cgImage: crop)
+        let data = try XCTUnwrap(image.pngData())
+        let cache = try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+        let directory = cache.appendingPathComponent("MyChatFixtureEvidence", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try data.write(to: directory.appendingPathComponent(name + ".png"), options: .atomic)
+        let metadata: [String: Any] = ["name": name, "bundle": try XCTUnwrap(Bundle.main.bundleIdentifier),
+            "width": crop.width, "height": crop.height]
+        let record = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
+        print("MYCHAT_UI_EVIDENCE " + (try XCTUnwrap(String(data: record, encoding: .utf8))))
+        let attachment = XCTAttachment(image: image)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     @MainActor private func saveScreenshot(_ app: XCUIApplication, _ name: String) {

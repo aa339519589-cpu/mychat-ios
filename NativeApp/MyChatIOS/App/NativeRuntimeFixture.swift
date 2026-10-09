@@ -380,6 +380,16 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
             if let content = historicalTestContent {
                 return (200, [["id": "77700000-0000-4000-8000-000000000064", "role": "assistant", "content": content, "seq": 2, "created_at": date]])
             }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-english-font-reference") {
+                let reply = "Yes, I can! I'm happy to chat in English. Feel free to ask me anything, or tell me what you'd like help with, and we can continue in English or switch to Chinese whenever you like."
+                let summary = "This person is simply asking if I can speak English."
+                return (200, [
+                    ["id": "40000000-0000-4000-8000-000000000063", "role": "user",
+                     "content": "Hello, can you speak English?", "seq": 1, "created_at": date],
+                    ["id": "40000000-0000-4000-8000-000000000064", "role": "assistant", "content": reply,
+                     "thinking": ChatReasoningSummaryStorage.encode(summary) ?? "", "seq": 2, "created_at": date]
+                ].reversed().map { $0 })
+            }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-summary-reference") {
                 let summary = "核对研究资料包并规划后续步骤。\n\n第二段摘要仍然保留，展开后可以继续阅读。"
                 let reply = "<document>\ntitle: 摘要样式测试\nfilename: summary.md\nsummary: 这是文档描述。\n\n# 测试正文\n\n文档内容保持独立。\n</document>\n\n保留摘要下方的回复正文。"
