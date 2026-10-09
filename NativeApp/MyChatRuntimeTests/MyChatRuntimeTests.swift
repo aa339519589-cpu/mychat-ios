@@ -307,9 +307,39 @@ import CoreText
             let font = MyChatSystemFont.uiFont(size: 17, weight: weight, serif: true, italic: italic)
             XCTAssertTrue(font.fontName.hasPrefix("AnthropicSerifWebWeb"))
             let axes = try XCTUnwrap(CTFontCopyVariation(font) as? [NSNumber: NSNumber])
-            XCTAssertEqual(try XCTUnwrap(axes[NSNumber(value: 0x77676874)]).doubleValue, expectedWeight, accuracy: 0.01)
-            XCTAssertEqual(try XCTUnwrap(axes[NSNumber(value: 0x6F70737A)]).doubleValue, 16, accuracy: 0.01)
+            let actualWeight = try XCTUnwrap(axes[NSNumber(value: 0x77676874)]).doubleValue
+            XCTAssertEqual(actualWeight, expectedWeight, accuracy: 0.01)
+            let available = try XCTUnwrap(CTFontCopyVariationAxes(font) as? [[String: Any]])
+            let optical = try XCTUnwrap(available.first {
+                ($0[kCTFontVariationAxisIdentifierKey as String] as? NSNumber)?.uint32Value == 0x6F70737A
+            })
+            let opticalDefault = try XCTUnwrap(optical[kCTFontVariationAxisDefaultValueKey as String] as? NSNumber)
+            XCTAssertEqual(opticalDefault.doubleValue, 16, accuracy: 0.01)
+            // CoreText omits axes at their default. Resolve from the actual
+            // registered font's axis metadata, never from a hard-coded fallback.
+            let opticalValue = axes[NSNumber(value: 0x6F70737A)] ?? opticalDefault
+            XCTAssertEqual(opticalValue.doubleValue, 16, accuracy: 0.01)
+            let traits = CTFontCopyTraits(font) as NSDictionary
+            let traitWeight = (traits[kCTFontWeightTrait] as? NSNumber)?.doubleValue ?? .nan
+            print("RESTORED_FONT postscript=\(font.fontName) wght=\(actualWeight) opsz=\(opticalValue) opszDefault=\(opticalDefault) traitWeight=\(traitWeight)")
         }
+        let textFont = MyChatSystemFont.uiFont(size: 17, weight: .regular, serif: true)
+        let displayDescriptor = textFont.fontDescriptor.addingAttributes([
+            UIFontDescriptor.AttributeName(rawValue: kCTFontVariationAttribute as String):
+                [NSNumber(value: 0x77676874): NSNumber(value: 400),
+                 NSNumber(value: 0x6F70737A): NSNumber(value: 48)]
+        ])
+        let displayFont = UIFont(descriptor: displayDescriptor, size: 17)
+        let displayAxes = try XCTUnwrap(CTFontCopyVariation(displayFont) as? [NSNumber: NSNumber])
+        XCTAssertEqual(try XCTUnwrap(displayAxes[NSNumber(value: 0x6F70737A)]).doubleValue, 48, accuracy: 0.01)
+        func glyphWidth(_ font: UIFont) -> Double {
+            let sample = NSAttributedString(string: "HAMBURGEFONS", attributes: [.font: font])
+            return CTLineGetTypographicBounds(CTLineCreateWithAttributedString(sample), nil, nil, nil)
+        }
+        let textWidth = glyphWidth(textFont), displayWidth = glyphWidth(displayFont)
+        XCTAssertGreaterThan(abs(textWidth - displayWidth), 0.1,
+            "The original font's optical axis must change actual glyph metrics")
+        print("RESTORED_FONT_OPTICAL text16Width=\(textWidth) display48Width=\(displayWidth)")
         XCTAssertFalse(MyChatSystemFont.uiFont(size: 17, weight: .regular).fontName.hasPrefix("Anthropic"),
             "The system sans-serif summary preview must keep its existing face")
         for size in [CGFloat(12), 17, 25] {
