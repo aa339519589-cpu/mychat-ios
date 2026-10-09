@@ -5,6 +5,135 @@ import SwiftUI
 @testable import MyChat
 
 @MainActor final class CodeWorkspaceTests: XCTestCase {
+    func testPublicationApplyCannotSkipThePendingApprovalGate() async throws {
+        let session = publicationSession()
+        defer { session.invalidateAndCancel(); PublicationURLProtocol.reset() }
+        let api = CodeAPIClient(session: session, baseURL: URL(string: "https://publication.invalid")!)
+        let result = try await api.apply(publicationCommand(), accessToken: "test-token")
+        guard case let .confirmation(request) = result else { return XCTFail("Expected the pending plan") }
+        do {
+            _ = try await api.apply(publicationCommand(request), accessToken: "test-token")
+            XCTFail("Passing the token alone must not approve or enqueue the operation")
+        } catch {
+            XCTAssertEqual(error as? CodeAPIError, .server(status: 409, message: "not_approved", retryable: false))
+        }
+        XCTAssertEqual(PublicationURLProtocol.paths, ["/api/code/apply", "/api/code/apply"])
+        XCTAssertEqual(PublicationURLProtocol.enqueued, 0)
+    }
+
+    func testExplicitPublicationApprovesTheExactPlanBeforeEnqueue() async throws {
+        let session = publicationSession()
+        defer { session.invalidateAndCancel(); PublicationURLProtocol.reset() }
+        let api = CodeAPIClient(session: session, baseURL: URL(string: "https://publication.invalid")!)
+        let result = try await api.apply(publicationCommand(), accessToken: "test-token")
+        guard case let .confirmation(request) = result else { return XCTFail("Expected the pending plan") }
+        XCTAssertEqual(request.planHash, PublicationURLProtocol.planHash)
+        let admission = try await api.confirmAndApply(publicationCommand(request), confirmation: request, accessToken: "test-token")
+        XCTAssertEqual(admission.taskID, request.taskID)
+        XCTAssertEqual(PublicationURLProtocol.paths, ["/api/code/apply", PublicationURLProtocol.confirmPath, "/api/code/apply"])
+        let approved = try XCTUnwrap(PublicationURLProtocol.bodies.dropFirst().first)
+        XCTAssertEqual(approved["action"] as? String, "confirm")
+        XCTAssertEqual(approved["operation"] as? String, "publish")
+        XCTAssertEqual(approved["confirmationId"] as? String, request.confirmationID.uuidString.lowercased())
+        XCTAssertEqual(approved["confirmationToken"] as? String, request.confirmationToken)
+        XCTAssertEqual(PublicationURLProtocol.enqueued, 1)
+        do {
+            _ = try await api.confirmAndApply(publicationCommand(request), confirmation: request, accessToken: "test-token")
+            XCTFail("A consumed approval must not publish twice")
+        } catch { XCTAssertEqual(error as? CodeAPIError, .server(status: 409, message: "not_pending", retryable: false)) }
+        XCTAssertEqual(PublicationURLProtocol.enqueued, 1)
+        XCTAssertEqual(Array(PublicationURLProtocol.paths.suffix(2)), ["/api/code/apply", PublicationURLProtocol.confirmPath])
+    }
+
+    func testPublicationApprovalFailureAndUserRejectionNeverEnqueue() async throws {
+        let session = publicationSession()
+        defer { session.invalidateAndCancel(); PublicationURLProtocol.reset() }
+        let api = CodeAPIClient(session: session, baseURL: URL(string: "https://publication.invalid")!)
+        let request = try publicationConfirmation()
+        for reason in ["rejected", "expired", "not_pending"] {
+            PublicationURLProtocol.reset(approvalError: reason)
+            do {
+                _ = try await api.confirmAndApply(publicationCommand(request), confirmation: request, accessToken: "test-token")
+                XCTFail(reason)
+            } catch { XCTAssertEqual(error as? CodeAPIError, .server(status: 409, message: reason, retryable: false)) }
+            XCTAssertEqual(PublicationURLProtocol.paths, [PublicationURLProtocol.confirmPath])
+            XCTAssertEqual(PublicationURLProtocol.enqueued, 0)
+        }
+        PublicationURLProtocol.reset()
+        try await api.reject(request, accessToken: "test-token")
+        XCTAssertEqual(PublicationURLProtocol.paths, [PublicationURLProtocol.confirmPath])
+        XCTAssertEqual(PublicationURLProtocol.bodies.first?["action"] as? String, "reject")
+        XCTAssertEqual(PublicationURLProtocol.enqueued, 0)
+    }
+
+    func testPublicationChangedVersionNeverApprovesAReplacementPlan() async throws {
+        let session = publicationSession()
+        defer { session.invalidateAndCancel(); PublicationURLProtocol.reset() }
+        let api = CodeAPIClient(session: session, baseURL: URL(string: "https://publication.invalid")!)
+        let request = try publicationConfirmation()
+        for replacement in [false, true] {
+            PublicationURLProtocol.reset(changedVersion: true, replacementGate: replacement)
+            do {
+                _ = try await api.confirmAndApply(publicationCommand(request), confirmation: request, accessToken: "test-token")
+                XCTFail("A new diff must require a separate user decision")
+            } catch {
+                let expected: CodeAPIError = replacement ? .mismatchedResponse
+                    : .server(status: 409, message: "plan_mismatch", retryable: false)
+                XCTAssertEqual(error as? CodeAPIError, expected)
+            }
+            XCTAssertEqual(PublicationURLProtocol.paths, [PublicationURLProtocol.confirmPath, "/api/code/apply"])
+            XCTAssertEqual(PublicationURLProtocol.enqueued, 0)
+        }
+    }
+
+    func testPublicationRejectsCrossTaskAndCrossPlanApprovalReceipts() async throws {
+        let session = publicationSession()
+        defer { session.invalidateAndCancel(); PublicationURLProtocol.reset() }
+        let api = CodeAPIClient(session: session, baseURL: URL(string: "https://publication.invalid")!)
+        let request = try publicationConfirmation()
+        let replacements = ["id": UUID().uuidString, "taskId": UUID().uuidString,
+            "planHash": String(repeating: "b", count: 64), "operation": "delete_files", "status": "pending"]
+        for (key, value) in replacements {
+            PublicationURLProtocol.reset(receiptOverride: [key: value])
+            do {
+                _ = try await api.confirmAndApply(publicationCommand(request), confirmation: request, accessToken: "test-token")
+                XCTFail(key)
+            } catch { XCTAssertEqual(error as? CodeAPIError, .mismatchedResponse) }
+            XCTAssertEqual(PublicationURLProtocol.paths, [PublicationURLProtocol.confirmPath])
+            XCTAssertEqual(PublicationURLProtocol.enqueued, 0)
+        }
+        PublicationURLProtocol.reset()
+        var missingPlan = request
+        missingPlan.planHash = nil
+        for (command, confirmation) in [(publicationCommand(request, taskID: UUID()), request),
+                                       (publicationCommand(), request), (publicationCommand(missingPlan), missingPlan)] {
+            do {
+                _ = try await api.confirmAndApply(command, confirmation: confirmation, accessToken: "test-token")
+                XCTFail("Invalid approval must fail before transport")
+            } catch { XCTAssertEqual(error as? CodeAPIError, .mismatchedResponse) }
+        }
+        XCTAssertTrue(PublicationURLProtocol.paths.isEmpty)
+    }
+
+    private func publicationSession() -> URLSession {
+        PublicationURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PublicationURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private func publicationConfirmation() throws -> CodeConfirmationRequest {
+        try JSONDecoder().decode(CodeConfirmationRequest.self,
+            from: JSONSerialization.data(withJSONObject: PublicationURLProtocol.confirmation))
+    }
+
+    private func publicationCommand(_ confirmation: CodeConfirmationRequest? = nil, taskID: UUID? = nil) -> CodeApplyCommand {
+        CodeApplyCommand(repository: "owner/repo", actions: [], message: "Publish fixture",
+            taskID: taskID ?? UUID(uuidString: PublicationURLProtocol.taskID)!, mode: .workspacePullRequest,
+            confirmationID: confirmation?.confirmationID, confirmationToken: confirmation?.confirmationToken)
+    }
+
+
     func testWorkspaceDiffRequiresAnExplicitSupportedCapability() throws {
         var payload: [String: Any] = ["schemaVersion": 1, "durableQueue": true,
             "execution": ["backend": "isolated", "location": "cloud", "configured": true, "verified": false]]
@@ -669,4 +798,101 @@ private final class FactoryRequestURLProtocol: URLProtocol, @unchecked Sendable 
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class PublicationURLProtocol: URLProtocol, @unchecked Sendable {
+    static let taskID = "33333333-3333-4333-8333-333333333333"
+    static let gateID = "44444444-4444-4444-8444-444444444444"
+    static let planHash = String(repeating: "a", count: 64)
+    static var confirmPath: String { "/api/agent/tasks/\(taskID)/confirm" }
+    static var confirmation: [String: Any] {
+        ["taskId": taskID, "confirmationId": gateID, "confirmationToken": String(repeating: "x", count: 43),
+         "operation": "publish", "expiresAt": "2099-01-01T00:00:00Z", "planHash": planHash,
+         "risk": ["level": "high", "blocked": false, "needsConfirmation": true, "operation": "publish",
+                  "title": "Publish fixture", "reason": "Fixture only", "files": ["README.md"]]]
+    }
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var captured: [(String, [String: Any])] = []
+    nonisolated(unsafe) private static var gateStatus = "pending"
+    nonisolated(unsafe) private static var count = 0
+    nonisolated(unsafe) private static var rejection: String?
+    nonisolated(unsafe) private static var receiptChanges: [String: String] = [:]
+    nonisolated(unsafe) private static var stale = false
+    nonisolated(unsafe) private static var replacement = false
+    static var paths: [String] { lock.lock(); defer { lock.unlock() }; return captured.map { $0.0 } }
+    static var bodies: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return captured.map { $0.1 } }
+    static var enqueued: Int { lock.lock(); defer { lock.unlock() }; return count }
+    static func reset(approvalError: String? = nil, receiptOverride: [String: String] = [:],
+                      changedVersion: Bool = false, replacementGate: Bool = false) {
+        lock.lock(); defer { lock.unlock() }
+        captured = []; gateStatus = "pending"; count = 0
+        rejection = approvalError; receiptChanges = receiptOverride
+        stale = changedVersion; replacement = replacementGate
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let body = Self.requestBody(request)
+        Self.lock.lock()
+        let (status, payload) = Self.reply(request, body: body)
+        Self.lock.unlock()
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json", "Cache-Control": "no-store"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: (try? JSONSerialization.data(withJSONObject: payload)) ?? Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+    private static func reply(_ request: URLRequest, body: [String: Any]) -> (Int, [String: Any]) {
+        let path = request.url?.path ?? ""
+        captured.append((path, body))
+        guard request.url?.host == "publication.invalid", request.httpMethod == "POST",
+              request.value(forHTTPHeaderField: "Authorization") == "Bearer test-token" else {
+            return (400, ["error": "unexpected_request"])
+        }
+        if path == confirmPath {
+            guard body["confirmationId"] as? String == gateID,
+                  body["confirmationToken"] as? String == confirmation["confirmationToken"] as? String,
+                  body["operation"] as? String == "publish" else { return (409, ["error": "invalid_confirmation"]) }
+            if body["action"] as? String == "reject" { gateStatus = "rejected"; return (200, [:]) }
+            guard body["action"] as? String == "confirm" else { return (400, ["error": "unexpected_action"]) }
+            if let rejection { return (409, ["error": rejection]) }
+            guard gateStatus == "pending" else { return (409, ["error": "not_pending"]) }
+            gateStatus = "approved"
+            let receipt = ["id": gateID, "taskId": taskID, "operation": "publish",
+                           "status": "approved", "planHash": planHash].merging(receiptChanges) { _, new in new }
+            return (200, receipt)
+        }
+        guard path == "/api/code/apply", body["taskId"] as? String == taskID else {
+            return (400, ["error": "unexpected_path"])
+        }
+        guard body["confirmationId"] != nil else { return (409, confirmation) }
+        guard gateStatus == "approved" else { return (409, ["error": "not_approved"]) }
+        if stale {
+            if replacement {
+                var newPlan = confirmation
+                newPlan["confirmationId"] = "55555555-5555-4555-8555-555555555555"
+                newPlan["planHash"] = String(repeating: "b", count: 64)
+                return (409, newPlan)
+            }
+            return (409, ["error": "plan_mismatch"])
+        }
+        gateStatus = "consumed"; count += 1
+        let jobID = "22222222-2222-4222-8222-222222222222"
+        return (202, ["schemaVersion": 1, "jobId": jobID, "taskId": taskID,
+            "status": "queued", "created": true, "streamUrl": "/api/v1/jobs/\(jobID)/events?from_seq=0"])
+    }
+    private static func requestBody(_ request: URLRequest) -> [String: Any] {
+        var data = request.httpBody ?? Data()
+        if let stream = request.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let size = stream.read(&buffer, maxLength: 4096)
+                if size <= 0 { break }
+                data.append(contentsOf: buffer.prefix(size))
+            }
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
 }

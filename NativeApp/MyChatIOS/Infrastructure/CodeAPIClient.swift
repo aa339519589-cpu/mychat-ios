@@ -6,6 +6,8 @@ protocol CodeAPIServing: Sendable {
     func fetchRepositories(accessToken: String) async throws -> [GitHubRepositoryRecord]
     func enqueue(_ command: CodeChatCommand, accessToken: String) async throws -> CodeAdmission
     func apply(_ command: CodeApplyCommand, accessToken: String) async throws -> CodeApplyResponse
+    func confirmAndApply(_ command: CodeApplyCommand, confirmation: CodeConfirmationRequest,
+                         accessToken: String) async throws -> CodeAdmission
     func capabilities(accessToken: String) async throws -> CodeCapabilities
     func workspace(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceState
     func workspaceChanges(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceChanges
@@ -18,6 +20,8 @@ protocol CodeAPIServing: Sendable {
 }
 
 extension CodeAPIServing {
+    func confirmAndApply(_ command: CodeApplyCommand, confirmation: CodeConfirmationRequest,
+                         accessToken: String) async throws -> CodeAdmission { throw CodeAPIError.invalidResponse }
     func capabilities(accessToken: String) async throws -> CodeCapabilities { throw CodeAPIError.invalidResponse }
     func workspace(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceState { throw CodeAPIError.workspaceDiffUnavailable }
     func workspaceChanges(taskID: UUID, accessToken: String) async throws -> CodeWorkspaceChanges { throw CodeAPIError.workspaceDiffUnavailable }
@@ -324,6 +328,44 @@ struct CodeAPIClient: CodeAPIServing {
         return .accepted(value)
     }
 
+    /// Called only after the user confirms this exact publication plan in the app.
+    func confirmAndApply(_ command: CodeApplyCommand, confirmation: CodeConfirmationRequest,
+                         accessToken: String) async throws -> CodeAdmission {
+        guard command.taskID == confirmation.taskID,
+              command.confirmationID == confirmation.confirmationID,
+              command.confirmationToken == confirmation.confirmationToken,
+              confirmation.operation == "publish", confirmation.risk.operation == "publish",
+              confirmation.risk.needsConfirmation, !confirmation.risk.blocked,
+              let planHash = confirmation.planHash, planHash.count == 64,
+              planHash.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+            throw CodeAPIError.mismatchedResponse
+        }
+        try Task.checkCancellation()
+        let endpoint = baseURL.appendingPathComponent("api/agent/tasks/\(command.taskID.uuidString.lowercased())/confirm")
+        var request = try authorizedRequest(url: endpoint, accessToken: accessToken)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": "confirm", "operation": confirmation.operation,
+            "confirmationId": confirmation.confirmationID.uuidString.lowercased(),
+            "confirmationToken": confirmation.confirmationToken
+        ])
+        let (data, response) = try await perform(request: request)
+        guard (200..<300).contains(response.statusCode) else {
+            throw serverError(status: response.statusCode, data: data)
+        }
+        let approved: CodeApprovedPublicationWire
+        do { approved = try JSONDecoder().decode(CodeApprovedPublicationWire.self, from: data) }
+        catch { throw CodeAPIError.invalidResponse }
+        guard approved.id == confirmation.confirmationID, approved.taskId == confirmation.taskID,
+              approved.operation == confirmation.operation, approved.status == "approved",
+              approved.planHash == planHash else { throw CodeAPIError.mismatchedResponse }
+        try Task.checkCancellation()
+        let result = try await apply(command, accessToken: accessToken)
+        // A changed plan needs a new explicit user decision, never another automatic approval.
+        guard case let .accepted(admission) = result else { throw CodeAPIError.mismatchedResponse }
+        return admission
+    }
+
     private func validate(_ command: CodeChatCommand) throws {
         guard command.branch.map({ !$0.isEmpty && $0.utf8.count <= 255 && !$0.hasPrefix("-") && !$0.contains("..") && !$0.contains(where: { $0.isWhitespace || $0.isNewline }) }) ?? true else {
             throw CodeAPIError.invalidRequest("目标分支无效")
@@ -505,6 +547,14 @@ private struct CodeApplyBody: Encodable {
         confirmationId = command.confirmationID?.uuidString.lowercased()
         confirmationToken = command.confirmationToken
     }
+}
+
+private struct CodeApprovedPublicationWire: Decodable {
+    let id: UUID
+    let taskId: UUID
+    let operation: String
+    let status: String
+    let planHash: String
 }
 
 private struct CodeAdmissionWire: Decodable {

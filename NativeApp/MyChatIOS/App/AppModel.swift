@@ -2234,6 +2234,11 @@ final class AppModel: ObservableObject {
         return try await codeClient.apply(command, accessToken: session.accessToken)
     }
 
+    func confirmCodeApply(_ command: CodeApplyCommand, confirmation: CodeConfirmationRequest) async throws -> CodeAdmission {
+        let session = try await refreshedSession()
+        return try await codeClient.confirmAndApply(command, confirmation: confirmation, accessToken: session.accessToken)
+    }
+
     func cancelCodeRun(_ admission: CodeAdmission) async throws -> ChatCancelResponse {
         let session = try await refreshedSession()
         return try await chatClient.cancel(

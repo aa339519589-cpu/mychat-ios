@@ -878,6 +878,7 @@ struct CodeConfirmationRequest: Codable, Equatable, Identifiable, Sendable {
     let confirmationToken: String
     let operation: String
     let expiresAt: String
+    var planHash: String? = nil
     let risk: Risk
 
     var id: UUID { confirmationID }
@@ -888,6 +889,7 @@ struct CodeConfirmationRequest: Codable, Equatable, Identifiable, Sendable {
         case confirmationToken
         case operation
         case expiresAt
+        case planHash
         case risk
     }
 }

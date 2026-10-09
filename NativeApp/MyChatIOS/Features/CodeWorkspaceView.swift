@@ -1082,15 +1082,16 @@ private struct CodeSessionDetailView: View {
     }
 
     private func confirmPublish(_ request: CodeConfirmationRequest) async {
+        guard !isApplying, confirmation?.confirmationID == request.confirmationID,
+              lastTaskID == request.taskID else { return }
         isApplying = true
         errorMessage = nil
         do {
-            let response = try await appModel.requestCodeApply(
-                applyCommand(taskID: request.taskID, confirmation: request)
+            let admission = try await appModel.confirmCodeApply(
+                applyCommand(taskID: request.taskID, confirmation: request), confirmation: request
             )
-            guard case let .accepted(admission) = response else {
-                throw CodeAPIError.invalidResponse
-            }
+            guard confirmation?.confirmationID == request.confirmationID,
+                  lastTaskID == request.taskID else { isApplying = false; return }
             confirmation = nil
             activeAdmission = admission
             startConsuming(admission)
