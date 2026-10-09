@@ -493,7 +493,8 @@ struct JobEventStream: ChatEventStreaming {
             let terminal = ChatTerminalSnapshot(
                 status: status,
                 content: payload.result?.content ?? state.content,
-                thinking: payload.result?.thinking ?? state.thinking,
+                thinking: payload.result?.reasoningSummary.flatMap(ChatReasoningSummaryStorage.encode)
+                    ?? payload.result?.thinking ?? state.thinking,
                 sequence: header.seq,
                 errorCode: payload.errorCode,
                 media: payload.result?.media ?? state.media,
@@ -774,6 +775,7 @@ private struct TerminalPayload: Decodable {
     struct Result: Decodable {
         let content: String?
         let thinking: String?
+        let reasoningSummary: String?
         let media: [ChatGeneratedMedia]?
         let tokenUsage: ChatTokenUsage?
         let codeReceipt: CodeOperationReceipt?
@@ -781,6 +783,7 @@ private struct TerminalPayload: Decodable {
         private enum CodingKeys: String, CodingKey {
             case content
             case thinking
+            case reasoningSummary
             case media
             case tokenUsage
         }
@@ -791,6 +794,7 @@ private struct TerminalPayload: Decodable {
             // optional extension must not invalidate the authoritative status.
             content = try? container.decode(String.self, forKey: .content)
             thinking = try? container.decode(String.self, forKey: .thinking)
+            reasoningSummary = try? container.decode(String.self, forKey: .reasoningSummary)
             media = try? container.decode([ChatGeneratedMedia].self, forKey: .media)
             tokenUsage = try? container.decode(ChatTokenUsage.self, forKey: .tokenUsage)
             codeReceipt = try? CodeOperationReceipt(from: decoder)

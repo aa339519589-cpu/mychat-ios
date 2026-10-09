@@ -3352,6 +3352,75 @@ import Combine
         XCTAssertEqual(recorder.requestCount, 1)
     }
 
+    func testSSETerminalDecodesExplicitPublicSummaryWithoutEarlierFrames() async throws {
+        let summary = "Checked the provided inputs. Compared the available results."
+        let events = try await terminalOnlyFixtureEvents(result: ["content": "Answer",
+            "thinking": "Unmarked provider text", "reasoningSummary": summary])
+        XCTAssertEqual(events.count, 1)
+        var accumulator = ChatStreamAccumulator()
+        var entries: [ChatProcessEntry] = []
+        for event in events {
+            XCTAssertTrue(accumulator.apply(event))
+            ChatProcessEntry.record(event, into: &entries)
+        }
+        XCTAssertEqual(accumulator.terminal?.status, .completed)
+        XCTAssertEqual(accumulator.content, "Answer")
+        XCTAssertEqual(accumulator.reasoningSummary, summary)
+        XCTAssertEqual(ChatReasoningSummaryStorage.decode(accumulator.persistedThinking), summary)
+        XCTAssertEqual(entries.compactMap { entry -> String? in
+            if case let .reasoningSummary(value) = entry.content { return value }; return nil
+        }.joined(), summary)
+    }
+
+    func testSSETerminalIgnoresMalformedSummaryAndKeepsRawThinkingPrivate() async throws {
+        let raw = "Unmarked provider text"
+        let results: [[String: Any]] = [
+            ["content": "Answer", "thinking": raw],
+            ["content": "Answer", "thinking": raw, "reasoningSummary": 7],
+            ["content": "Answer", "thinking": raw, "reasoningSummary": ["text": "Not the allowed string field"]],
+            ["content": "Answer", "thinking": raw, "reasoningSummary": "   "]
+        ]
+        for result in results {
+            let events = try await terminalOnlyFixtureEvents(result: result)
+            var accumulator = ChatStreamAccumulator()
+            var entries: [ChatProcessEntry] = []
+            for event in events {
+                XCTAssertTrue(accumulator.apply(event))
+                ChatProcessEntry.record(event, into: &entries)
+            }
+            XCTAssertEqual(events.count, 1)
+            XCTAssertEqual(accumulator.terminal?.status, .completed,
+                "An optional malformed extension must not invalidate terminal status")
+            XCTAssertEqual(accumulator.content, "Answer")
+            XCTAssertEqual(accumulator.reasoningSummary, "")
+            XCTAssertNil(ChatReasoningSummaryStorage.decode(accumulator.persistedThinking))
+            XCTAssertFalse(entries.contains { if case .reasoningSummary = $0.content { return true }; return false })
+        }
+    }
+
+    private func terminalOnlyFixtureEvents(result: [String: Any]) async throws -> [ChatJobEvent] {
+        let job = UUID()
+        let json = try JSONSerialization.data(withJSONObject: ["jobId": job.uuidString,
+            "seq": 1, "kind": "job.terminal", "payload": ["status": "completed", "result": result]])
+        let frames = Data("id: 1\nevent: job.terminal\ndata: \(String(decoding: json, as: UTF8.self))\n\n".utf8)
+        let recorder = ChatAdmissionRetryRecorder(responses: [(200, frames, ["Content-Type": "text/event-stream"])])
+        ChatAdmissionRetryFixtureURLProtocol.recorder = recorder
+        defer { ChatAdmissionRetryFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatAdmissionRetryFixtureURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let origin = URL(string: "https://terminal-fixture.invalid")!
+        let admission = ChatAdmission(schemaVersion: 1, jobID: job, generationID: job,
+            userMessageID: UUID(), assistantMessageID: UUID(), status: "running", created: false,
+            streamURL: origin.appendingPathComponent("events"), trialRemaining: nil, trialLimit: nil)
+        var events: [ChatJobEvent] = []
+        for try await event in JobEventStream(session: session, allowedOrigin: origin, maximumDuration: 2)
+            .events(admission: admission, accessToken: "fixture-only") { events.append(event) }
+        XCTAssertEqual(recorder.requestCount, 1)
+        return events
+    }
+
     func testProcessEntriesPreserveThinkingSearchAndToolOrder() {
         let job = UUID()
         var entries: [ChatProcessEntry] = []
