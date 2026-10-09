@@ -1313,7 +1313,11 @@ final class MyChatUITests: XCTestCase {
             XCTAssertTrue(reply.waitForExistence(timeout: 10))
             XCTAssertFalse(app.keyboards.firstMatch.exists)
             let newChat = app.buttons["header.new-chat"].firstMatch
-            XCTAssertTrue(waitForHittable(sidebar, timeout: 5))
+            let sidebarReady = waitForHittable(sidebar, timeout: 5)
+            if !sidebarReady {
+                recordHeaderHitFailure(app, phase: appearance + ".after-history", target: "header.sidebar")
+            }
+            XCTAssertTrue(sidebarReady)
             XCTAssertTrue(waitForHittable(newChat, timeout: 5))
 
             let screenshot = try XCTUnwrap(app.screenshot().image.cgImage)
@@ -1353,7 +1357,11 @@ final class MyChatUITests: XCTestCase {
             }
 
             sidebar.tap()
-            XCTAssertTrue(waitForHittable(app.buttons["sidebar.accountSettings"].firstMatch, timeout: 5))
+            let accountReady = waitForHittable(app.buttons["sidebar.accountSettings"].firstMatch, timeout: 5)
+            if !accountReady {
+                recordHeaderHitFailure(app, phase: appearance + ".reopened-drawer", target: "sidebar.accountSettings")
+            }
+            XCTAssertTrue(accountReady)
             history.tap()
             XCTAssertTrue(waitForHittable(newChat, timeout: 5))
             newChat.tap()
@@ -1361,6 +1369,44 @@ final class MyChatUITests: XCTestCase {
             waitForExpectations(timeout: 5)
             XCTAssertTrue(app.textViews["composer.input"].exists)
             app.terminate()
+        }
+    }
+
+    @MainActor private func recordHeaderHitFailure(_ app: XCUIApplication, phase: String, target: String) {
+        // Inspect one immutable AX snapshot after the original wait has failed.
+        // Never read a vanished element's live frame or print labels/account values.
+        do {
+            let snapshot = try app.snapshot()
+            var pending = [snapshot]
+            var controls: [[String: Any]] = []
+            var windows: [String] = []
+            var keyboards = 0
+            var visited = 0
+            let identifiers: Set<String> = ["header.sidebar", "header.new-chat",
+                "sidebar.accountSettings", "sidebar.newChat", "composer.surface"]
+            while visited < 2048, let node = pending.popLast() {
+                visited += 1
+                if node.elementType == .keyboard { keyboards += 1 }
+                if node.elementType == .window, windows.count < 8 {
+                    windows.append(NSStringFromCGRect(node.frame))
+                }
+                var name: String?
+                if identifiers.contains(node.identifier) { name = node.identifier }
+                if node.elementType == .button, node.label == "隔离测试对话" { name = "fixture.history" }
+                if node.elementType == .button, node.label == "关闭侧边栏" { name = "drawer.close-shield" }
+                if let name, controls.count < 24 {
+                    controls.append(["control": name, "frame": NSStringFromCGRect(node.frame),
+                        "enabled": node.isEnabled])
+                }
+                pending.append(contentsOf: node.children)
+            }
+            let payload: [String: Any] = ["phase": phase, "target": target, "waitSeconds": 5,
+                "appFrame": NSStringFromCGRect(snapshot.frame), "windows": windows,
+                "keyboardCount": keyboards, "controls": controls, "snapshotTruncated": !pending.isEmpty]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+            if let text = String(data: data, encoding: .utf8) { print("HEADER_HIT_FAILURE " + text) }
+        } catch {
+            print("HEADER_HIT_FAILURE phase=\(phase) target=\(target) snapshotUnavailable=true")
         }
     }
 

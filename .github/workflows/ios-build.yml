@@ -320,15 +320,17 @@ jobs:
             -only-testing:MyChatUITests/MyChatUITests/testConnectorEditorSaveCancelAndRepeatedOpenResetState \
             test | tee "$RUNNER_TEMP/mychat-fixture-ui-evidence.log"
       - name: Verify bounded fixture screenshot files on the runner
-        if: ${{ inputs.run_header_connector_tests && steps.header_connector_tests.outputs.device_id != '' }}
+        id: fixture_evidence
+        if: ${{ !cancelled() && inputs.run_header_connector_tests && steps.header_connector_tests.outputs.device_id != '' }}
         working-directory: NativeApp
         run: |
           python3 scripts/collect_fixture_ui_evidence.py \
             --device "${{ steps.header_connector_tests.outputs.device_id }}" \
             --log "$RUNNER_TEMP/mychat-fixture-ui-evidence.log" \
+            --test-outcome "${{ steps.header_connector_tests.outcome }}" \
             --output "$RUNNER_TEMP/mychat-fixture-ui-evidence"
       - name: Retain verified fixture screenshots
-        if: ${{ inputs.run_header_connector_tests && steps.header_connector_tests.outputs.device_id != '' }}
+        if: ${{ !cancelled() && inputs.run_header_connector_tests && steps.fixture_evidence.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: mychat-fixture-ui-evidence-${{ github.sha }}
