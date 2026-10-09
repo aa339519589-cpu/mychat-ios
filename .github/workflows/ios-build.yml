@@ -9,7 +9,7 @@ on:
         type: boolean
         default: false
       run_offline_summary_tests:
-        description: "Run the two fixture-only public-summary runtime tests and the artifact-count regression only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        description: "Run focused fixture-only public-summary, artifact, and SVG-cache runtime tests only on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
         required: false
         type: boolean
         default: false
@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       run_artifact_ui_tests:
-        description: "Run only the two fixture-based Artifact swipe and dismissal UI tests on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
+        description: "Run the two existing Artifact UI regressions plus the SVG preview swipe regression on an already-installed iOS 27 iPhone 18 Pro. No runtime download."
         required: false
         type: boolean
         default: false
@@ -91,7 +91,7 @@ jobs:
             -skip-testing:MyChatRuntimeTests/MyChatRuntimeTests/testOptInLiveCustomEndpointFirstTextTiming \
             test
 
-      - name: Run focused summary and artifact runtime tests on an installed iOS 27 simulator
+      - name: Run focused summary, artifact, and SVG-cache runtime tests on an installed iOS 27 simulator
         if: ${{ inputs.run_offline_summary_tests }}
         working-directory: NativeApp
         run: |
@@ -128,6 +128,11 @@ jobs:
             -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewAdvancesWithActualLatestParagraphAndSentence \
             -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testPublicSummaryPreviewKeepsOnlyExplicitPublicTextAndHandlesEmptyValues \
             -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testArtifactDocumentCountsPreserveNativeRenderingDecision \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testArtifactSourcePreparationCachePreservesPartialSVGAndCompletion \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactCachesSourceAcrossUnchangedUpdatesAndAppearanceChanges \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactPatchesSameCanvasWithoutDroppingDrawnNodes \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testStreamingArtifactRetainsAnimationAcrossUnkeyedInsertionAndCompletion \
+            -only-testing:MyChatRuntimeTests/MyChatRuntimeTests/testCompletedHTMLArtifactRunsInteractionInsideOpaqueSandbox \
             CODE_SIGNING_ALLOWED=NO \
             test
 
@@ -171,12 +176,13 @@ jobs:
             -only-testing:MyChatUITests/MyChatUITests/testShortGentleSwipesOpenAndCloseDrawerFromAnywhere \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             -only-testing:MyChatUITests/MyChatUITests/testArtifactLibraryOpensAndDismissesPreviewRepeatedly \
+            -only-testing:MyChatUITests/MyChatUITests/testSVGArtifactPreviewEdgeSwipeCancelsAndReturnsRepeatedly \
             -only-testing:MyChatUITests/MyChatUITests/testSidebarSelectionTraitTracksDestination \
             -only-testing:MyChatUITests/MyChatUITests/testPasswordAndPrivacyShareOneSettingsEntry \
             -only-testing:MyChatUITests/MyChatUITests/testComposerTouchTargetsAndHapticPreferencePersist \
             -only-testing:MyChatUITests/MyChatUITests/testReasoningSummaryShowsProviderPreviewAndReopensInBothAppearances \
             test
-      - name: Run focused Artifact UI tests on an installed iOS 27 simulator
+      - name: Run focused Artifact and SVG UI tests on an installed iOS 27 simulator
         if: ${{ inputs.run_artifact_ui_tests }}
         working-directory: NativeApp
         run: |
