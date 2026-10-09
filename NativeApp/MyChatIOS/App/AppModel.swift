@@ -214,8 +214,8 @@ final class AppModel: ObservableObject {
     private let chatClient: any ChatAPIServing
     private let codeClient: any CodeAPIServing
     private let jobEventStream: any ChatEventStreaming
-    let chatGPTPlanProvider = ChatGPTPlanProvider()
-    private let chatGPTPlanHistoryClient = ChatGPTPlanHistoryClient()
+    let chatGPTPlanProvider: ChatGPTPlanProvider
+    private let chatGPTPlanHistoryClient: ChatGPTPlanHistoryClient
     private let chatGPTPlanRecoveryStore = ChatGPTPlanRecoveryStore()
     @Published private(set) var isRestoringAuthentication = true
     private var didRestoreAuthentication = false
@@ -270,7 +270,9 @@ final class AppModel: ObservableObject {
         accountSettingsClient: any AccountSettingsServing = AccountSettingsClient(),
         chatClient: any ChatAPIServing = ChatAPIClient(),
         codeClient: any CodeAPIServing = CodeAPIClient(),
-        jobEventStream: any ChatEventStreaming = JobEventStream()
+        jobEventStream: any ChatEventStreaming = JobEventStream(),
+        chatGPTPlanProvider: ChatGPTPlanProvider? = nil,
+        chatGPTPlanHistoryClient: ChatGPTPlanHistoryClient = ChatGPTPlanHistoryClient()
     ) {
         self.catalogClient = catalogClient
         self.authenticationClient = authenticationClient
@@ -280,6 +282,8 @@ final class AppModel: ObservableObject {
         self.chatClient = chatClient
         self.codeClient = codeClient
         self.jobEventStream = jobEventStream
+        self.chatGPTPlanProvider = chatGPTPlanProvider ?? ChatGPTPlanProvider()
+        self.chatGPTPlanHistoryClient = chatGPTPlanHistoryClient
         selectedModelID = UserDefaults.standard.string(forKey: selectedModelKey) ?? ModelCatalogItem.defaultChatModelID
     }
 

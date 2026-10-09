@@ -1313,6 +1313,79 @@ import Combine
         XCTAssertNil(model.workspaceError)
     }
 
+    func testFixturePlanProviderUsesSyntheticStoreAndRejectsUnconfiguredNetwork() async throws {
+        let store = NativeAuditPlanCredentialStore(credential: syntheticPlanCredential())
+        let model = NativeRuntimeFixture.makeModel(planCredentialStore: store)
+        URLProtocol.unregisterClass(NativeAuditURLProtocol.self)
+        defer { URLProtocol.registerClass(NativeAuditURLProtocol.self) }
+
+        model.chatGPTPlanProvider.restoreIfNeeded()
+        XCTAssertEqual(store.readCount, 1, "The injected getter must supply the account")
+        XCTAssertEqual(model.chatGPTPlanProvider.account?.subject, "offline-plan-subject")
+        do {
+            try await model.chatGPTPlanProvider.refreshModels()
+            XCTFail("The default fixture must reject an undeclared Plan endpoint")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .unsupportedURL)
+        }
+        XCTAssertEqual(store.readCount, 1, "Restoring the cached synthetic account must not read another store")
+        try model.chatGPTPlanProvider.disconnect()
+        XCTAssertNil(try store.loadCredential()?.accessToken, "Disconnect must write to the injected store")
+        try model.chatGPTPlanProvider.forgetRegistration()
+        XCTAssertNil(try store.loadCredential())
+    }
+
+    func testPlanContextUsesInjectedSessionAndNeverFallsBackToSharedNetwork() async throws {
+        let recorder = ChatGPTPlanRequestRecorder()
+        recorder.isolatedResponses = [
+            "GET https://api.openai.com/v1/models":
+                (200, Data(#"{"models":[{"slug":"offline-model","display_name":"Offline model","visibility":"list"}]}"#.utf8), "application/json"),
+            "POST https://mychat-nm6x.onrender.com/api/chat/chatgpt-plan-context":
+                (503, Data(#"{"error":{"message":"isolated-plan-context-rejected"}}"#.utf8), "application/json")
+        ]
+        ChatGPTPlanFixtureURLProtocol.recorder = recorder
+        defer { ChatGPTPlanFixtureURLProtocol.recorder = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ChatGPTPlanFixtureURLProtocol.self]
+        let network = URLSession(configuration: configuration)
+        defer { network.invalidateAndCancel() }
+        let store = NativeAuditPlanCredentialStore(credential: syntheticPlanCredential())
+        let model = NativeRuntimeFixture.makeModel(planSession: network, planCredentialStore: store)
+        URLProtocol.unregisterClass(NativeAuditURLProtocol.self)
+        defer { URLProtocol.registerClass(NativeAuditURLProtocol.self) }
+        await model.restoreAuthenticationIfNeeded()
+        await model.reloadModels()
+        let planID = ChatGPTPlanProvider.modelIDPrefix + "offline-model"
+        XCTAssertTrue(model.models.contains { $0.id == planID })
+        XCTAssertEqual(store.readCount, 1)
+        model.beginPrivateChat()
+        defer { model.discardPrivateChat() }
+        model.selectedModelID = planID
+        model.draft = "Synthetic context rejection"
+        model.sendDraft()
+        try await waitUntil {
+            model.currentConversationError?.contains("isolated-plan-context-rejected") == true
+                && !model.isCurrentConversationGenerating
+        }
+        XCTAssertFalse(recorder.requests.filter { $0.url?.path == "/v1/models" }.isEmpty)
+        XCTAssertEqual(recorder.requests.filter { $0.url?.path == "/api/chat/chatgpt-plan-context" }.count, 1)
+        for (request, authorization) in zip(recorder.requests, recorder.authorizationHeaders) {
+            let isCatalog = request.url?.path == "/v1/models"
+            XCTAssertEqual(request.httpMethod, isCatalog ? "GET" : "POST")
+            XCTAssertEqual(authorization, isCatalog ? "Bearer offline-plan-access" : "Bearer isolated-runtime-test")
+        }
+        XCTAssertFalse(recorder.requests.contains { $0.url?.path == "/v1/responses" },
+            "A rejected context must end the turn before a model request")
+    }
+
+    private func syntheticPlanCredential() -> ChatGPTPlanCredential {
+        ChatGPTPlanCredential(hostID: "offline-plan-host", clientID: "offline-plan-client",
+            subject: "offline-plan-subject", email: nil, displayName: nil,
+            accessToken: "offline-plan-access", refreshToken: "offline-plan-refresh", idToken: nil,
+            scopes: [ChatGPTPlanProvider.usageScope], accessExpiresAt: Date().addingTimeInterval(3_600),
+            earliestRefreshAt: Date().addingTimeInterval(3_600))
+    }
+
     func testHistoricalArtifactRecoverySavesMissingPackageWithoutOpeningChat() async throws {
         let source = "<inline-artifact><svg viewBox=\"0 0 100 100\"><circle r=\"20\"/></svg></inline-artifact>"
         NativeAuditURLProtocol.historicalTestContent = source
@@ -3473,6 +3546,7 @@ private final class ChatGPTPlanRequestRecorder: @unchecked Sendable {
     var streamContentType = "text/event-stream"
     var streamResponseBody = Data()
     var scriptedResponses: [(Int, Data, String)] = []
+    var isolatedResponses: [String: (Int, Data, String)]?
 
     var requests: [URLRequest] { lock.lock(); defer { lock.unlock() }; return capturedRequests }
     func requestBody(at index: Int) -> Data? {
@@ -3492,8 +3566,13 @@ private final class ChatGPTPlanRequestRecorder: @unchecked Sendable {
         capturedAuthorizationHeaders.append(request.value(forHTTPHeaderField: "Authorization") ?? "")
         let requestNumber = capturedRequests.count
         let scripted = scriptedResponses.isEmpty ? nil : scriptedResponses.removeFirst()
+        let isolated = isolatedResponses
         lock.unlock()
 
+        if let isolated {
+            let key = (request.httpMethod ?? "GET") + " " + (request.url?.absoluteString ?? "")
+            return isolated[key] ?? (503, Data(#"{"error":"Unconfigured isolated Plan request"}"#.utf8), "application/json")
+        }
         if let scripted { return scripted }
 
         if requestNumber == 1 {

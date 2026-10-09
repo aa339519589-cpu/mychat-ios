@@ -11,7 +11,9 @@ enum NativeRuntimeFixture {
 
     @MainActor static func makeModel(dataClient: (any SupabaseDataServing)? = nil,
         workspaceClient: (any WorkspaceDataServing)? = nil,
-        chatClient: (any ChatAPIServing)? = nil, stream: (any ChatEventStreaming)? = nil) -> AppModel {
+        chatClient: (any ChatAPIServing)? = nil, stream: (any ChatEventStreaming)? = nil,
+        planSession: URLSession? = nil,
+        planCredentialStore: (any ChatGPTPlanCredentialStoring)? = nil) -> AppModel {
         if ProcessInfo.processInfo.arguments.contains("--ui-test-mode") {
             UserDefaults.standard.removeObject(forKey: "mychat.account-settings-cache.v1." + userID)
             if let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
@@ -24,6 +26,7 @@ enum NativeRuntimeFixture {
         // isolate URLSession.shared or an already-running shared config fetch.
         let network = makeSession()
         let configuration = MobileConfigurationClient(session: network)
+        let planNetwork = planSession ?? network
         return AppModel(
             catalogClient: ModelCatalogClient(session: network),
             authenticationClient: SupabaseAuthClient(configurationClient: configuration,
@@ -33,7 +36,10 @@ enum NativeRuntimeFixture {
             accountSettingsClient: AccountSettingsClient(configurationClient: configuration, session: network),
             chatClient: chatClient ?? ChatAPIClient(session: network),
             codeClient: CodeAPIClient(session: network),
-            jobEventStream: stream ?? JobEventStream(session: network)
+            jobEventStream: stream ?? JobEventStream(session: network),
+            chatGPTPlanProvider: ChatGPTPlanProvider(session: planNetwork,
+                credentialStore: planCredentialStore ?? NativeAuditPlanCredentialStore()),
+            chatGPTPlanHistoryClient: ChatGPTPlanHistoryClient(session: planNetwork)
         )
     }
 
@@ -229,6 +235,47 @@ enum NativeRuntimeFixture {
             metrics["errorDomain"] = failure.domain; metrics["errorCode"] = failure.code
             metrics["error"] = error.localizedDescription
         }
+    }
+}
+
+/// Fixture credentials never consult or mutate the simulator's Keychain.
+final class NativeAuditPlanCredentialStore: ChatGPTPlanCredentialStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var credential: ChatGPTPlanCredential?
+    private var hostID: String?
+    private var reads = 0
+
+    init(credential: ChatGPTPlanCredential? = nil) { self.credential = credential }
+
+    var readCount: Int { lock.lock(); defer { lock.unlock() }; return reads }
+
+    func loadCredential() throws -> ChatGPTPlanCredential? {
+        lock.lock(); defer { lock.unlock() }
+        reads += 1
+        return credential
+    }
+
+    func save(_ credential: ChatGPTPlanCredential) throws {
+        lock.lock(); defer { lock.unlock() }
+        self.credential = credential
+    }
+
+    func deleteCredential() throws {
+        lock.lock(); defer { lock.unlock() }
+        credential = nil
+    }
+
+    func loadOrCreateHostID() throws -> String {
+        lock.lock(); defer { lock.unlock() }
+        if let hostID { return hostID }
+        let value = "urn:uuid:10000000-0000-4000-8000-000000000099"
+        hostID = value
+        return value
+    }
+
+    func deleteHostID() throws {
+        lock.lock(); defer { lock.unlock() }
+        hostID = nil
     }
 }
 

@@ -5,6 +5,14 @@ import Network
 import Security
 import UIKit
 
+protocol ChatGPTPlanCredentialStoring: Sendable {
+    func loadCredential() throws -> ChatGPTPlanCredential?
+    func save(_ credential: ChatGPTPlanCredential) throws
+    func deleteCredential() throws
+    func loadOrCreateHostID() throws -> String
+    func deleteHostID() throws
+}
+
 @MainActor
 final class ChatGPTPlanProvider: ObservableObject {
     nonisolated static let modelIDPrefix = "chatgpt-plan:"
@@ -69,14 +77,14 @@ final class ChatGPTPlanProvider: ObservableObject {
     @Published private(set) var isAuthorizing = false
 
     private let session: URLSession
-    private let credentialStore: ChatGPTPlanCredentialStore
+    private let credentialStore: any ChatGPTPlanCredentialStoring
     private var credentials: ChatGPTPlanCredential?
     private var refreshTask: Task<ChatGPTPlanCredential, Error>?
     private var callbackServer: LoopbackOAuthCallbackServer?
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = .shared, credentialStore: (any ChatGPTPlanCredentialStoring)? = nil) {
         self.session = session
-        self.credentialStore = ChatGPTPlanCredentialStore()
+        self.credentialStore = credentialStore ?? ChatGPTPlanCredentialStore()
     }
 
     var isConnected: Bool { account != nil }
@@ -1290,7 +1298,7 @@ struct ChatGPTPlanCredential: Codable {
     var earliestRefreshAt: Date?
 }
 
-private final class ChatGPTPlanCredentialStore: @unchecked Sendable {
+private final class ChatGPTPlanCredentialStore: ChatGPTPlanCredentialStoring, @unchecked Sendable {
     private let service = "com.mychat.ios.chatgpt-plan"
     private let accountKey = "credential.v1"
     private let hostIDKey = "host-id.v1"
