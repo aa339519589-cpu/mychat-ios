@@ -229,6 +229,15 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
     private static var deletedProjects: Set<String> = []
     private static var codeCancellationCount = 0
     private static var codeCancellationStatusQueryCount = 0
+    private static let lateCodeJobA = "88000000-0000-4000-8000-000000000064"
+    private static let lateCodeJobB = "88000000-0000-4000-8000-000000000067"
+    private static let lateCodeTask = "88000000-0000-4000-8000-000000000065"
+    private static var lateCodeStreams: [String: NativeAuditURLProtocol] = [:]
+    private static var lateCodeStreamCounts: [String: Int] = [:]
+    private static var lateCodeCancellation: NativeAuditURLProtocol?
+    private static var lateCodeEndedA = false
+    private static var lateCodeReplyScheduled = false
+    private static var lateCodeReplyDelivered = false
     static var historicalTestContent: String?
     private static var addedMemories: [[String: Any]] = []
     private static var savedArtifacts: [[String: Any]] = []
@@ -242,6 +251,7 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         guard let url = request.url else { return }
+        if handleLateCodeCancellation(url) { return }
         let path = url.path
         if ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay"),
            path.hasPrefix("/api/v1/jobs/"), path.hasSuffix("/events") {
@@ -300,6 +310,123 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() { stopped = true }
+
+    private func codeFixtureJSON(status: Int, payload: [String: Any]) -> Bool {
+        guard !stopped, let url = request.url, let receiver = client else { return false }
+        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json", "Cache-Control": "no-store"])!
+        receiver.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        receiver.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: payload))
+        receiver.urlProtocolDidFinishLoading(self)
+        return true
+    }
+
+    private func codeFixtureFrame(_ sequence: Int, kind: String, payload: [String: Any]) {
+        guard !stopped, let url = request.url else { return }
+        let envelope: [String: Any] = ["jobId": url.pathComponents.dropLast().last ?? "",
+            "seq": sequence, "kind": kind, "payload": payload]
+        let json = try! JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        let text = String(data: json, encoding: .utf8)!
+        client?.urlProtocol(self, didLoad: Data("id: \(sequence)\nevent: \(kind)\ndata: \(text)\n\n".utf8))
+    }
+
+    private func handleLateCodeCancellation(_ url: URL) -> Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("--ui-test-code-late-cancel"),
+              url.path.hasPrefix("/api/v1/jobs/") else { return false }
+        let jobID = url.pathComponents.dropLast().last ?? ""
+        if url.path.hasSuffix("/events") {
+            Self.lock.lock()
+            Self.lateCodeStreams[jobID] = self
+            Self.lateCodeStreamCounts[jobID, default: 0] += 1
+            let count = Self.lateCodeStreamCounts[jobID, default: 0]
+            let resumed = jobID == Self.lateCodeJobB && count > 1
+            if Self.lateCodeEndedA,
+               jobID == Self.lateCodeJobB || arguments.contains("--ui-test-code-cancel-resubscribe") {
+                Self.scheduleLateCodeReply()
+            }
+            Self.lock.unlock()
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream", "Cache-Control": "no-store"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            codeFixtureFrame(1, kind: "text.delta", payload: ["text": resumed ? "后继任务已正常恢复" : "任务正在运行"])
+            return true
+        }
+        guard url.path.hasSuffix("/cancel"), request.httpMethod == "POST", jobID == Self.lateCodeJobA else {
+            return false
+        }
+        Self.lock.lock()
+        Self.lateCodeCancellation = self
+        Self.lateCodeEndedA = true
+        let stream = Self.lateCodeStreams[jobID]
+        Self.lock.unlock()
+        if !arguments.contains("--ui-test-code-cancel-resubscribe") {
+            stream?.codeFixtureFrame(2, kind: "job.terminal", payload: ["status": "completed", "content": "首个任务已完成"])
+        }
+        if let stream { stream.client?.urlProtocolDidFinishLoading(stream) }
+        // The HTTP response remains held until recovery has reached the selected owner.
+        return true
+    }
+
+    // Called with lock held. No sleeping while holding the fixture's request lock.
+    private static func scheduleLateCodeReply() {
+        guard !lateCodeReplyScheduled, lateCodeCancellation != nil else { return }
+        lateCodeReplyScheduled = true
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+            lock.lock()
+            let pending = lateCodeCancellation
+            lateCodeCancellation = nil
+            let arguments = ProcessInfo.processInfo.arguments
+            let successor = arguments.contains("--ui-test-code-cancel-successor")
+            let resumed = arguments.contains("--ui-test-code-cancel-resubscribe")
+            let stream = successor ? lateCodeStreams[lateCodeJobB] : (resumed ? lateCodeStreams[lateCodeJobA] : nil)
+            lock.unlock()
+            let delivered: Bool
+            if arguments.contains("--ui-test-code-late-cancel-fails") {
+                delivered = pending?.codeFixtureJSON(status: 503, payload: ["error": "隔离测试：迟到取消失败"]) ?? false
+            } else {
+                delivered = pending?.codeFixtureJSON(status: 202, payload: ["jobId": lateCodeJobA,
+                    "accepted": true, "replayed": false, "status": "cancelling", "eventSeq": 1]) ?? false
+            }
+            guard delivered else { return }
+            lock.lock(); lateCodeReplyDelivered = true; lock.unlock()
+            NSLog("CODE_LATE_CANCEL_RESPONSE_DELIVERED")
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                stream?.codeFixtureFrame(2, kind: "text.delta", payload: ["text": "；取消响应已交付"])
+                if successor, let stream {
+                    // A normal disconnect after the stale reply must not enter A's cancellation path.
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+                        stream.client?.urlProtocolDidFinishLoading(stream)
+                    }
+                }
+            }
+        }
+    }
+
+    // Called with lock held by response(). B deliberately shares A's task ID.
+    private static func lateCodeRecovery() -> [String: Any] {
+        let arguments = ProcessInfo.processInfo.arguments
+        let successor = lateCodeEndedA && arguments.contains("--ui-test-code-cancel-successor")
+        let sameJob = arguments.contains("--ui-test-code-cancel-resubscribe")
+        let finished = lateCodeEndedA && !successor && !sameJob
+        if finished { scheduleLateCodeReply() }
+        let jobID = successor ? lateCodeJobB : lateCodeJobA
+        let responseID = successor ? "88000000-0000-4000-8000-000000000068" : "88000000-0000-4000-8000-000000000066"
+        let cancelling = sameJob && lateCodeReplyDelivered && !arguments.contains("--ui-test-code-late-cancel-fails")
+        let status = finished ? "completed" : (cancelling ? "cancelling" : "running")
+        let task: [String: Any] = ["id": lateCodeTask, "status": status, "branch": "main",
+            "error": NSNull(), "pullRequestUrl": NSNull(), "toolCalls": [], "artifacts": []]
+        let admission: Any
+        if finished {
+            admission = NSNull()
+        } else {
+            admission = ["schemaVersion": 1, "jobId": jobID,
+                "taskId": lateCodeTask, "responseId": responseID, "status": status, "created": false,
+                "streamUrl": "/api/v1/jobs/\(jobID)/events", "trialRemaining": NSNull(), "trialLimit": NSNull()] as [String: Any]
+        }
+        return ["sessionId": "80000000-0000-4000-8000-000000000064", "task": task,
+            "admission": admission, "operationAdmission": NSNull()]
+    }
 
     private static func body(_ request: URLRequest) -> [String: Any] {
         var data = request.httpBody ?? Data()
@@ -418,6 +545,12 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
                 ["id": "80000000-0000-4000-8000-000000000066", "repo": "mychat/test-app", "title": "修复登录边界", "created_at": date, "updated_at": date],
             ])
         case "/rest/v1/code_messages":
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel") {
+                return (200, ["88000000-0000-4000-8000-000000000066", "88000000-0000-4000-8000-000000000068"].map { id in
+                    ["id": id, "session_id": "80000000-0000-4000-8000-000000000064", "role": "assistant",
+                     "content": "隔离任务记录", "meta": NSNull(), "created_at": date] as [String: Any]
+                })
+            }
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-terminal-replay") else { return (200, []) }
             return (200, [[
                 "id": "88000000-0000-4000-8000-000000000076",
@@ -427,6 +560,9 @@ final class NativeAuditURLProtocol: URLProtocol, @unchecked Sendable {
         case "/api/code/tasks":
             guard ProcessInfo.processInfo.arguments.contains("--ui-test-code-display") else {
                 return (503, ["error": "隔离测试未配置任务恢复"])
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-code-late-cancel") {
+                return (200, lateCodeRecovery())
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff")
                 || ProcessInfo.processInfo.arguments.contains("--ui-test-code-diff-legacy") {

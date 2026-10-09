@@ -938,6 +938,7 @@ private struct CodeSessionDetailView: View {
         errorMessage = nil
         do {
             let response = try await appModel.cancelCodeRun(admission)
+            guard activeAdmission?.jobID == admission.jobID else { return }
             guard response.jobID == admission.jobID else {
                 isCancelling = false
                 errorMessage = "取消响应与当前 Code 任务不匹配"
@@ -955,6 +956,7 @@ private struct CodeSessionDetailView: View {
                 scheduleCancellationReconciliation(for: admission)
             }
         } catch {
+            guard activeAdmission?.jobID == admission.jobID else { return }
             errorMessage = error.localizedDescription
             isCancelling = false
             cancellationPending = true

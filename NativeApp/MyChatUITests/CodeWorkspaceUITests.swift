@@ -362,6 +362,83 @@ final class CodeWorkspaceUITests: XCTestCase {
         app.terminate()
     }
 
+    @MainActor func testLateCancelResponseKeepsTheIdleComposerUsable() {
+        for fails in [false, true] {
+            let app = openLateCodeCancelFixture(fails: fails)
+            defer { app.terminate() }
+            let composer = app.buttons["code.session.send"]
+            composer.tap()
+            expectCodeComposer(composer, label: "发送编程消息")
+            let draft = app.descendants(matching: .any).matching(identifier: "code.session.draft").firstMatch
+            XCTAssertTrue(draft.waitForExistence(timeout: 5))
+            draft.tap()
+            draft.typeText("Follow up after job A")
+            XCTAssertTrue(composer.isEnabled)
+            // The fixture releases A's HTTP response two seconds after its terminal recovery.
+            let staleDisable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == false"), object: composer)
+            staleDisable.isInverted = true
+            XCTAssertEqual(XCTWaiter.wait(for: [staleDisable], timeout: 4), .completed)
+            expectCodeComposer(composer, label: "发送编程消息", enabled: true)
+            assertNoStaleCodeCancellationError(app)
+        }
+    }
+
+    @MainActor func testLateCancelResponseCannotOwnASuccessorWithTheSameTaskID() {
+        for fails in [false, true] {
+            let app = openLateCodeCancelFixture(fails: fails, extra: ["--ui-test-code-cancel-successor"])
+            defer { app.terminate() }
+            let composer = app.buttons["code.session.send"]
+            composer.tap()
+            // This marker is emitted by B's second stream, after A's cancel response and B's disconnect.
+            let recovered = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "后继任务已正常恢复")).firstMatch
+            XCTAssertTrue(recovered.waitForExistence(timeout: 15))
+            expectCodeComposer(composer, label: "停止 Code 任务", enabled: true)
+            assertNoStaleCodeCancellationError(app)
+        }
+    }
+
+    @MainActor func testCurrentJobCancelResponseRemainsValidAfterResubscribing() {
+        for fails in [false, true] {
+            let app = openLateCodeCancelFixture(fails: fails, extra: ["--ui-test-code-cancel-resubscribe"])
+            defer { app.terminate() }
+            let composer = app.buttons["code.session.send"]
+            composer.tap()
+            let delivered = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "取消响应已交付")).firstMatch
+            XCTAssertTrue(delivered.waitForExistence(timeout: 15))
+            expectCodeComposer(composer, label: fails ? "重试停止 Code 任务" : "等待停止确认", enabled: fails)
+        }
+    }
+
+    @MainActor private func openLateCodeCancelFixture(fails: Bool, extra: [String] = []) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-code-late-cancel"]
+            + extra + (fails ? ["--ui-test-code-late-cancel-fails"] : [])
+        app.launch()
+        let sidebar = app.buttons["打开侧边栏"].firstMatch
+        XCTAssertTrue(sidebar.waitForExistence(timeout: 10))
+        sidebar.tap()
+        app.buttons["编程"].firstMatch.tap()
+        let row = app.buttons["code.session.80000000-0000-4000-8000-000000000064"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        let started = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "任务正在运行")).firstMatch
+        XCTAssertTrue(started.waitForExistence(timeout: 10), "The initial stream must exist before cancellation starts")
+        expectCodeComposer(app.buttons["code.session.send"], label: "停止 Code 任务", enabled: true)
+        return app
+    }
+
+    @MainActor private func expectCodeComposer(_ composer: XCUIElement, label: String, enabled: Bool? = nil) {
+        let predicate = enabled.map { NSPredicate(format: "label == %@ AND isEnabled == %@", label, NSNumber(value: $0)) }
+            ?? NSPredicate(format: "label == %@", label)
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: composer)
+        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 10), .completed)
+    }
+
+    @MainActor private func assertNoStaleCodeCancellationError(_ app: XCUIApplication) {
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "迟到取消失败")).firstMatch.exists)
+        XCTAssertFalse(app.staticTexts["取消请求已提交，正在等待云端状态"].exists)
+    }
+
     @MainActor func testTerminalRecoveryReplaysEventsWithoutShowingStopOrPublishingEarly() {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-test-mode", "--ui-test-code-display", "--ui-test-code-terminal-replay"]
